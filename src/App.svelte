@@ -1,21 +1,53 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import Sidebar from "./lib/Sidebar.svelte";
+  import { activeSessionId } from "./lib/stores";
 
-  let name = $state("");
-  let greetMsg = $state("");
+  let activeSession: string | null = $state(null);
 
-  async function greet(event: Event) {
-    event.preventDefault();
-    greetMsg = await invoke("greet", { name });
-  }
+  activeSessionId.subscribe((value) => {
+    activeSession = value;
+  });
 </script>
 
-<main class="container">
-  <h1>The Controller</h1>
+<div class="app-layout">
+  <Sidebar />
+  <main class="terminal-area">
+    {#if activeSession}
+      <div class="terminal-placeholder">
+        Terminal for session: {activeSession}
+      </div>
+    {:else}
+      <div class="empty-state">
+        Select or create a session to begin.
+      </div>
+    {/if}
+  </main>
+</div>
 
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
-  </form>
-  <p>{greetMsg}</p>
-</main>
+<style>
+  .app-layout {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+  }
+
+  .terminal-area {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #11111b;
+    color: #cdd6f4;
+  }
+
+  .terminal-placeholder {
+    font-size: 14px;
+    color: #cdd6f4;
+  }
+
+  .empty-state {
+    font-size: 14px;
+    color: #6c7086;
+  }
+</style>
