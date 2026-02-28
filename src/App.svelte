@@ -1,5 +1,6 @@
 <script lang="ts">
   import Sidebar from "./lib/Sidebar.svelte";
+  import Terminal from "./lib/Terminal.svelte";
   import { activeSessionId } from "./lib/stores";
 
   let activeSession: string | null = $state(null);
@@ -13,9 +14,9 @@
   <Sidebar />
   <main class="terminal-area">
     {#if activeSession}
-      <div class="terminal-placeholder">
-        Terminal for session: {activeSession}
-      </div>
+      {#key activeSession}
+        <Terminal sessionId={activeSession} />
+      {/key}
     {:else}
       <div class="empty-state">
         Select or create a session to begin.
@@ -35,19 +36,18 @@
   .terminal-area {
     flex: 1;
     display: flex;
-    align-items: center;
-    justify-content: center;
     background: #11111b;
     color: #cdd6f4;
-  }
-
-  .terminal-placeholder {
-    font-size: 14px;
-    color: #cdd6f4;
+    overflow: hidden;
   }
 
   .empty-state {
     font-size: 14px;
     color: #6c7086;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
   }
 </style>
