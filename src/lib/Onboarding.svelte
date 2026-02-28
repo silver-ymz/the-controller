@@ -77,17 +77,8 @@
       await invoke("save_onboarding_config", {
         projectsRoot: entry.path,
       });
-      // Check CLI auth — skip straight to app if already authenticated
-      const status = await invoke<string>("check_claude_cli");
-      if (status === "authenticated") {
-        finishOnboarding();
-        return;
-      }
-      claudeStatus = status as typeof claudeStatus;
-      if (status === "not_authenticated") {
-        await startLogin();
-      }
       step = "cli-check";
+      await checkClaude();
     } catch (e) {
       showToast(String(e), "error");
     }
@@ -99,7 +90,10 @@
       const status = await invoke<string>("check_claude_cli");
       claudeStatus = status as typeof claudeStatus;
 
-      if (status === "not_authenticated") {
+      if (status === "authenticated") {
+        // Show the success state briefly, then auto-proceed
+        setTimeout(finishOnboarding, 1000);
+      } else if (status === "not_authenticated") {
         await startLogin();
       }
     } catch (e) {
