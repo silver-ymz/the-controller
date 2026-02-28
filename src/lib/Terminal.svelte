@@ -16,6 +16,7 @@
   let term: Terminal | undefined;
   let fitAddon: FitAddon | undefined;
   let resizeObserver: ResizeObserver | undefined;
+  let mutationObserver: MutationObserver | undefined;
   let unlistenOutput: UnlistenFn | undefined;
   let unlistenStatus: UnlistenFn | undefined;
 
@@ -81,12 +82,26 @@
       }
     });
     resizeObserver.observe(containerEl);
+
+    // Refit when becoming visible (display: none -> block doesn't trigger ResizeObserver)
+    mutationObserver = new MutationObserver(() => {
+      if (containerEl && containerEl.offsetParent !== null && fitAddon) {
+        fitAddon.fit();
+      }
+    });
+    if (containerEl?.parentElement) {
+      mutationObserver.observe(containerEl.parentElement, {
+        attributes: true,
+        attributeFilter: ["class"],
+      });
+    }
   });
 
   onDestroy(() => {
     unlistenOutput?.();
     unlistenStatus?.();
     resizeObserver?.disconnect();
+    mutationObserver?.disconnect();
     term?.dispose();
   });
 </script>
