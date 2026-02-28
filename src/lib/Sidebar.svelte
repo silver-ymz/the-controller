@@ -115,11 +115,9 @@
   }
 
   async function createSession(projectId: string) {
-    const label = `Session ${Date.now().toString(36)}`;
     try {
       const sessionId: string = await invoke("create_session", {
         projectId,
-        label,
       });
       sessionStatuses.update(m => {
         const next = new Map(m);

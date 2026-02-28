@@ -134,7 +134,6 @@ pub fn create_session(
     state: State<AppState>,
     app_handle: AppHandle,
     project_id: String,
-    label: String,
 ) -> Result<String, String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_id = Uuid::new_v4();
@@ -143,6 +142,15 @@ pub fn create_session(
     let repo_path = {
         let storage = state.storage.lock().map_err(|e| e.to_string())?;
         let mut project = storage.load_project(project_uuid).map_err(|e| e.to_string())?;
+
+        // Auto-generate label: session-N where N is next available number
+        let next_num = project
+            .sessions
+            .iter()
+            .filter(|s| s.worktree_branch.is_none())
+            .count()
+            + 1;
+        let label = format!("session-{}", next_num);
 
         let session_config = SessionConfig {
             id: session_id,
@@ -311,4 +319,37 @@ pub fn list_root_directories(state: State<AppState>) -> Result<Vec<config::DirEn
 #[tauri::command]
 pub fn generate_project_names(description: String) -> Result<Vec<String>, String> {
     config::generate_names_via_cli(&description)
+}
+
+#[tauri::command]
+pub fn scaffold_project(state: State<AppState>, name: String) -> Result<Project, String> {
+    let storage = state.storage.lock().map_err(|e| e.to_string())?;
+    let cfg = config::load_config(&storage.base_dir())
+        .ok_or("No config found. Complete onboarding first.")?;
+
+    let repo_path = std::path::Path::new(&cfg.projects_root).join(&name);
+
+    // Create directory
+    std::fs::create_dir_all(&repo_path).map_err(|e| e.to_string())?;
+
+    // Git init
+    git2::Repository::init(&repo_path).map_err(|e| e.to_string())?;
+
+    // Create project entry
+    let project = Project {
+        id: Uuid::new_v4(),
+        name,
+        repo_path: repo_path.to_string_lossy().to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        archived: false,
+        sessions: vec![],
+    };
+    storage.save_project(&project).map_err(|e| e.to_string())?;
+
+    // Create default agents.md
+    storage
+        .save_agents_md(project.id, DEFAULT_AGENTS_MD)
+        .map_err(|e| e.to_string())?;
+
+    Ok(project)
 }

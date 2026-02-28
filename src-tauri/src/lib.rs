@@ -28,6 +28,7 @@ pub fn run() {
             commands::check_claude_cli,
             commands::list_root_directories,
             commands::generate_project_names,
+            commands::scaffold_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
