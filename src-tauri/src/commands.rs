@@ -193,9 +193,11 @@ pub fn close_session(
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
 
-    // Close the PTY session
-    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-    pty_manager.close_session(session_uuid)?;
+    // Close the PTY session (scoped to release lock before acquiring storage)
+    {
+        let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
+        pty_manager.close_session(session_uuid)?;
+    }
 
     // Remove the session from the project and save
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
