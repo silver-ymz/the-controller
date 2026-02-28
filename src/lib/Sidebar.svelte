@@ -12,6 +12,20 @@
   let expandedProjects = $state(new Set<string>());
   let showSessionMenu = $state<string | null>(null);
 
+  // Close dropdown menus on outside click
+  $effect(() => {
+    if (!showNewMenu && !showSessionMenu) return;
+    function handleClick() {
+      showNewMenu = false;
+      showSessionMenu = null;
+    }
+    const timer = setTimeout(() => window.addEventListener("click", handleClick), 0);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("click", handleClick);
+    };
+  });
+
   let projectList: Project[] = $state([]);
   let activeSession: string | null = $state(null);
   let statuses: Map<string, "running" | "idle"> = $state(new Map());
