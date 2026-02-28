@@ -3,6 +3,7 @@ pub mod models;
 pub mod pty_manager;
 pub mod state;
 pub mod storage;
+pub mod worktree;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -20,6 +21,7 @@ pub fn run() {
             commands::write_to_pty,
             commands::resize_pty,
             commands::close_session,
+            commands::create_refinement,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

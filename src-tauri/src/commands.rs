@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::models::{Project, SessionConfig};
 use crate::state::AppState;
+use crate::worktree::WorktreeManager;
 
 const DEFAULT_AGENTS_MD: &str = r#"# Agents
 
@@ -208,4 +209,50 @@ pub fn close_session(
     storage.save_project(&project).map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn create_refinement(
+    state: State<AppState>,
+    app_handle: AppHandle,
+    project_id: String,
+    branch_name: String,
+) -> Result<String, String> {
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let session_id = Uuid::new_v4();
+
+    // Load project to get repo_path
+    let repo_path = {
+        let storage = state.storage.lock().map_err(|e| e.to_string())?;
+        let project = storage.load_project(project_uuid).map_err(|e| e.to_string())?;
+        project.repo_path.clone()
+    };
+
+    // Create the worktree
+    let worktree_path = WorktreeManager::create_worktree(&repo_path, &branch_name)?;
+    let worktree_path_str = worktree_path
+        .to_str()
+        .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?
+        .to_string();
+
+    // Create session config with worktree info, add to project, and save
+    {
+        let storage = state.storage.lock().map_err(|e| e.to_string())?;
+        let mut project = storage.load_project(project_uuid).map_err(|e| e.to_string())?;
+
+        let session_config = SessionConfig {
+            id: session_id,
+            label: branch_name.clone(),
+            worktree_path: Some(worktree_path_str.clone()),
+            worktree_branch: Some(branch_name),
+        };
+        project.sessions.push(session_config);
+        storage.save_project(&project).map_err(|e| e.to_string())?;
+    }
+
+    // Spawn PTY session in the WORKTREE directory (not the main repo)
+    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
+    pty_manager.spawn_session(session_id, &worktree_path_str, app_handle)?;
+
+    Ok(session_id.to_string())
 }

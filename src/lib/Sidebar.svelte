@@ -6,6 +6,7 @@
   let newProjectName = $state("");
   let newProjectRepoPath = $state("");
   let expandedProjects = $state(new Set<string>());
+  let showSessionMenu = $state<string | null>(null);
 
   let projectList: Project[] = $state([]);
   let activeSession: string | null = $state(null);
@@ -90,6 +91,30 @@
     }
   }
 
+  function toggleSessionMenu(projectId: string) {
+    showSessionMenu = showSessionMenu === projectId ? null : projectId;
+  }
+
+  async function createRefinement(projectId: string) {
+    const branchName = prompt("Enter branch name for refinement:");
+    if (!branchName || !branchName.trim()) return;
+
+    showSessionMenu = null;
+    try {
+      const sessionId: string = await invoke("create_refinement", {
+        projectId,
+        branchName: branchName.trim(),
+      });
+      activeSessionId.set(sessionId);
+      await loadProjects();
+      const next = new Set(expandedProjects);
+      next.add(projectId);
+      expandedProjects = next;
+    } catch (err) {
+      console.error("Failed to create refinement:", err);
+    }
+  }
+
   function selectSession(sessionId: string) {
     activeSessionId.set(sessionId);
   }
@@ -135,11 +160,25 @@
           </button>
           <span class="project-name">{project.name}</span>
           <span class="session-count">{project.sessions.length}</span>
-          <button
-            class="btn-add-session"
-            onclick={(e: MouseEvent) => { e.stopPropagation(); createSession(project.id); }}
-            title="New session"
-          >+</button>
+          <div class="add-session-wrapper">
+            <button
+              class="btn-add-session"
+              onclick={(e: MouseEvent) => { e.stopPropagation(); toggleSessionMenu(project.id); }}
+              title="New session"
+            >+</button>
+            {#if showSessionMenu === project.id}
+              <div class="session-menu">
+                <button
+                  class="session-menu-item"
+                  onclick={(e: MouseEvent) => { e.stopPropagation(); showSessionMenu = null; createSession(project.id); }}
+                >Session</button>
+                <button
+                  class="session-menu-item"
+                  onclick={(e: MouseEvent) => { e.stopPropagation(); createRefinement(project.id); }}
+                >Refinement</button>
+              </div>
+            {/if}
+          </div>
         </div>
 
         {#if expandedProjects.has(project.id)}
@@ -331,6 +370,39 @@
 
   .btn-add-session:hover {
     color: #cdd6f4;
+  }
+
+  .add-session-wrapper {
+    position: relative;
+  }
+
+  .session-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    background: #1e1e2e;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    z-index: 10;
+    min-width: 120px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+
+  .session-menu-item {
+    display: block;
+    width: 100%;
+    padding: 6px 12px;
+    background: none;
+    border: none;
+    color: #cdd6f4;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+    box-shadow: none;
+  }
+
+  .session-menu-item:hover {
+    background: #313244;
   }
 
   .session-list {
