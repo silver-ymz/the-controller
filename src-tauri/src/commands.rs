@@ -323,11 +323,22 @@ pub fn generate_project_names(description: String) -> Result<Vec<String>, String
 
 #[tauri::command]
 pub fn scaffold_project(state: State<AppState>, name: String) -> Result<Project, String> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.starts_with('.')
+    {
+        return Err(format!("Invalid project name: {}", name));
+    }
+
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     let cfg = config::load_config(&storage.base_dir())
-        .ok_or("No config found. Complete onboarding first.")?;
+        .ok_or_else(|| "No config found. Complete onboarding first.".to_string())?;
 
     let repo_path = std::path::Path::new(&cfg.projects_root).join(&name);
+    if repo_path.exists() {
+        return Err(format!("Directory already exists: {}", name));
+    }
 
     // Create directory
     std::fs::create_dir_all(&repo_path).map_err(|e| e.to_string())?;
