@@ -1,17 +1,21 @@
+pub mod commands;
 pub mod models;
+pub mod state;
 pub mod storage;
-
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .manage(state::AppState::new())
+        .invoke_handler(tauri::generate_handler![
+            commands::create_project,
+            commands::load_project,
+            commands::list_projects,
+            commands::archive_project,
+            commands::get_agents_md,
+            commands::update_agents_md,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
