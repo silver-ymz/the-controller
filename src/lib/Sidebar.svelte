@@ -6,6 +6,7 @@
   import FuzzyFinder from "./FuzzyFinder.svelte";
   import NewProjectModal from "./NewProjectModal.svelte";
 
+  let sidebarEl: HTMLElement | undefined = $state();
   let showNewMenu = $state(false);
   let showFuzzyFinder = $state(false);
   let showNewProjectModal = $state(false);
@@ -68,6 +69,12 @@
           );
           if (project) closeSession(project.id, activeSession);
         }
+        break;
+      }
+      case "focus-sidebar": {
+        // Focus the first focusable session item in the sidebar
+        const firstSession = sidebarEl?.querySelector<HTMLElement>(".session-item");
+        firstSession?.focus();
         break;
       }
       case "next-project":
@@ -224,7 +231,7 @@
   }
 </script>
 
-<aside class="sidebar">
+<aside class="sidebar" bind:this={sidebarEl}>
   <div class="sidebar-header">
     <h2>Projects</h2>
     <div class="new-btn-wrapper">

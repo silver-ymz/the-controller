@@ -97,6 +97,10 @@
     }
   });
 
+  export function focus() {
+    term?.focus();
+  }
+
   onDestroy(() => {
     unlistenOutput?.();
     unlistenStatus?.();

@@ -1,9 +1,10 @@
 <script lang="ts">
   import Terminal from "./Terminal.svelte";
-  import { projects, activeSessionId, type Project } from "./stores";
+  import { projects, activeSessionId, hotkeyAction, type Project } from "./stores";
 
   let projectList: Project[] = $state([]);
   let activeSession: string | null = $state(null);
+  let terminalComponents: Record<string, Terminal> = $state({});
 
   projects.subscribe((value) => {
     projectList = value;
@@ -11,6 +12,12 @@
 
   activeSessionId.subscribe((value) => {
     activeSession = value;
+  });
+
+  hotkeyAction.subscribe((action) => {
+    if (action?.type === "focus-terminal" && activeSession) {
+      terminalComponents[activeSession]?.focus();
+    }
   });
 
   let allSessionIds: string[] = $derived(
@@ -21,7 +28,7 @@
 <div class="terminal-manager">
   {#each allSessionIds as sessionId (sessionId)}
     <div class="terminal-wrapper" class:visible={activeSession === sessionId}>
-      <Terminal {sessionId} />
+      <Terminal {sessionId} bind:this={terminalComponents[sessionId]} />
     </div>
   {/each}
 
