@@ -6,11 +6,19 @@
   import Onboarding from "./lib/Onboarding.svelte";
   import Toast from "./lib/Toast.svelte";
   import HotkeyManager from "./lib/HotkeyManager.svelte";
+  import HotkeyHelp from "./lib/HotkeyHelp.svelte";
   import StatusBar from "./lib/StatusBar.svelte";
-  import { appConfig, onboardingComplete, type Config } from "./lib/stores";
+  import { appConfig, onboardingComplete, hotkeyAction, type Config } from "./lib/stores";
 
   let ready = $state(false);
   let needsOnboarding = $state(true);
+  let showHelp = $state(false);
+
+  hotkeyAction.subscribe((action) => {
+    if (action?.type === "toggle-help") {
+      showHelp = !showHelp;
+    }
+  });
 
   onMount(async () => {
     try {
@@ -44,6 +52,9 @@
     </div>
     <HotkeyManager />
     <StatusBar />
+    {#if showHelp}
+      <HotkeyHelp onClose={() => showHelp = false} />
+    {/if}
   {/if}
 {/if}
 <Toast />
