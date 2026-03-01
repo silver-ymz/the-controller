@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { projects, activeSessionId, sessionStatuses, type Project } from "./stores";
+  import { projects, activeSessionId, sessionStatuses, hotkeyAction, type Project } from "./stores";
   import { showToast } from "./toast";
   import FuzzyFinder from "./FuzzyFinder.svelte";
   import NewProjectModal from "./NewProjectModal.svelte";
@@ -40,6 +40,58 @@
 
   sessionStatuses.subscribe((value) => {
     statuses = value;
+  });
+
+  // React to hotkey actions
+  hotkeyAction.subscribe((action) => {
+    if (!action) return;
+    switch (action.type) {
+      case "open-fuzzy-finder":
+        showFuzzyFinder = true;
+        break;
+      case "open-new-project":
+        showNewProjectModal = true;
+        break;
+      case "create-session": {
+        // Create session in the project that owns the active session
+        const project = projectList.find((p) =>
+          p.sessions.some((s) => s.id === activeSession),
+        );
+        if (project) createSession(project.id);
+        break;
+      }
+      case "close-session": {
+        // Close the active session
+        if (activeSession) {
+          const project = projectList.find((p) =>
+            p.sessions.some((s) => s.id === activeSession),
+          );
+          if (project) closeSession(project.id, activeSession);
+        }
+        break;
+      }
+      case "next-project":
+      case "prev-project": {
+        const delta = action.type === "next-project" ? 1 : -1;
+        if (projectList.length === 0) break;
+        // Find currently focused project (owns active session, or first)
+        let currentIdx = projectList.findIndex((p) =>
+          p.sessions.some((s) => s.id === activeSession),
+        );
+        if (currentIdx === -1) currentIdx = 0;
+        const nextIdx =
+          (currentIdx + delta + projectList.length) % projectList.length;
+        const nextProject = projectList[nextIdx];
+        // Expand and select first session
+        const next = new Set(expandedProjects);
+        next.add(nextProject.id);
+        expandedProjects = next;
+        if (nextProject.sessions.length > 0) {
+          activeSessionId.set(nextProject.sessions[0].id);
+        }
+        break;
+      }
+    }
   });
 
   $effect(() => {
