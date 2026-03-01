@@ -157,8 +157,16 @@
     }
 
     if (leaderState === "leader") {
-      // Ignore modifier-only keypresses (user may be building a chord)
-      if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
+      // Ignore modifier-only keypresses but reset timeout (user may be building a chord)
+      if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
+        // Reset timeout so shifted keys have the full window
+        clearLeaderTimeout();
+        timeoutId = setTimeout(() => {
+          forwardEscape();
+          resetToIdle();
+        }, LEADER_TIMEOUT_MS);
+        return;
+      }
 
       // Always stop propagation and prevent default in leader mode
       // to prevent xterm or other handlers from receiving the key
