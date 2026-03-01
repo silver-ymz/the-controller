@@ -328,8 +328,12 @@ pub fn save_onboarding_config(
 }
 
 #[tauri::command]
-pub fn check_claude_cli() -> Result<String, String> {
-    Ok(config::check_claude_cli_status())
+pub async fn check_claude_cli() -> Result<String, String> {
+    let result =
+        tokio::task::spawn_blocking(|| config::check_claude_cli_status())
+            .await
+            .map_err(|e| format!("Task failed: {}", e))?;
+    Ok(result)
 }
 
 #[tauri::command]

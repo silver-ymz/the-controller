@@ -73,15 +73,11 @@
 
   async function selectDirectory(entry: DirEntry) {
     projectsRoot = entry.path;
-    try {
-      await invoke("save_onboarding_config", {
-        projectsRoot: entry.path,
-      });
-      step = "cli-check";
-      checkClaude();
-    } catch (e) {
-      showToast(String(e), "error");
-    }
+    step = "cli-check";
+    invoke("save_onboarding_config", { projectsRoot: entry.path }).catch((e) =>
+      showToast(String(e), "error"),
+    );
+    checkClaude();
   }
 
   async function checkClaude() {
@@ -168,7 +164,10 @@
       </p>
 
       {#if claudeStatus === "checking"}
-        <p>Checking Claude CLI...</p>
+        <div class="checking">
+          <div class="spinner"></div>
+          <p>Checking Claude CLI...</p>
+        </div>
       {:else if claudeStatus === "authenticated"}
         <p class="success">Claude CLI is ready</p>
         <button onclick={finishOnboarding}>Get Started</button>
@@ -307,6 +306,24 @@
   button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .checking {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .spinner {
+    width: 20px;
+    height: 20px;
+    border: 2.5px solid #313244;
+    border-top-color: #89b4fa;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .success {
     color: #a6e3a1;
