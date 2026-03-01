@@ -10,9 +10,8 @@
     type HotkeyAction,
   } from "./stores";
 
-  type LeaderState = "idle" | "leader";
-
-  let leaderState: LeaderState = $state("idle");
+  let terminalHasFocus = $state(false);
+  let explicitLeader = $state(false);
   let lastEscapeTime = 0;
 
   const DOUBLE_ESCAPE_MS = 300;
@@ -34,14 +33,21 @@
     projectList.flatMap((p) => p.sessions.map((s) => s.id)),
   );
 
-  function enterLeader() {
-    leaderState = "leader";
-    leaderActive.set(true);
-    // No timeout — leader stays active until a key is pressed
+  // Detect if a terminal (xterm) has focus
+  function isTerminalFocused(): boolean {
+    const el = document.activeElement;
+    if (!el) return false;
+    // xterm renders a textarea for input capture
+    return el.closest(".xterm") !== null;
   }
 
-  function resetToIdle() {
-    leaderState = "idle";
+  function enterExplicitLeader() {
+    explicitLeader = true;
+    leaderActive.set(true);
+  }
+
+  function exitExplicitLeader() {
+    explicitLeader = false;
     leaderActive.set(false);
   }
 
@@ -53,7 +59,6 @@
 
   function dispatchAction(action: NonNullable<HotkeyAction>) {
     hotkeyAction.set(action);
-    // Reset the action after a tick so consumers can react to each dispatch
     setTimeout(() => hotkeyAction.set(null), 0);
   }
 
@@ -79,13 +84,12 @@
     activeSessionId.set(flatSessions[nextIndex]);
   }
 
-  function handleLeaderKey(e: KeyboardEvent): boolean {
+  function handleHotkey(e: KeyboardEvent): boolean {
     const key = e.key;
 
     // Session switching: 1-9
     if (key >= "1" && key <= "9") {
-      const index = parseInt(key, 10) - 1;
-      switchToSessionIndex(index);
+      switchToSessionIndex(parseInt(key, 10) - 1);
       return true;
     }
 
@@ -123,44 +127,63 @@
       case "?":
         dispatchAction({ type: "toggle-help" });
         return true;
-      case "Escape":
-        // Double-escape: forward to terminal
-        forwardEscape();
-        return true;
       default:
         return false;
     }
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (leaderState === "idle") {
+    // Ignore modifier-only keypresses
+    if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
+
+    const inTerminal = isTerminalFocused();
+
+    // --- Terminal focused: require Escape prefix ---
+    if (inTerminal && !explicitLeader) {
       if (e.key === "Escape") {
         const now = Date.now();
         if (now - lastEscapeTime < DOUBLE_ESCAPE_MS) {
-          // Double-tap Escape: forward to terminal immediately
+          // Double-tap Escape: forward to terminal
           forwardEscape();
           lastEscapeTime = 0;
         } else {
-          // First Escape: enter leader mode
+          // Single Escape: enter explicit leader mode
           e.stopPropagation();
           e.preventDefault();
           lastEscapeTime = now;
-          enterLeader();
+          enterExplicitLeader();
         }
       }
+      // All other keys pass through to terminal
       return;
     }
 
-    if (leaderState === "leader") {
-      // Ignore modifier-only keypresses
-      if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
-
+    // --- Explicit leader mode (from terminal) ---
+    if (explicitLeader) {
       e.stopPropagation();
       e.preventDefault();
 
-      handleLeaderKey(e);
-      resetToIdle();
+      if (e.key === "Escape") {
+        // Escape cancels leader, return to terminal
+        exitExplicitLeader();
+        return;
+      }
+
+      handleHotkey(e);
+      exitExplicitLeader();
+      return;
     }
+
+    // --- Ambient leader mode (not in terminal) ---
+    // Escape closes modals / goes back (let it propagate to modal handlers)
+    if (e.key === "Escape") return;
+
+    // Try to handle as hotkey
+    if (handleHotkey(e)) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+    // Unrecognized keys pass through normally
   }
 
   onMount(() => {

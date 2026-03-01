@@ -40,7 +40,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="modal" onclick={(e) => e.stopPropagation()} role="presentation">
     <div class="modal-header">Keyboard Shortcuts</div>
-    <p class="subtitle">Press Escape to activate leader, then:</p>
+    <p class="subtitle">Keys work directly. Press Escape first when terminal is focused.</p>
     <table class="shortcut-table">
       <thead>
         <tr>
