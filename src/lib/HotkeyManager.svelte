@@ -384,9 +384,17 @@
     // Don't intercept keys when typing in input fields
     if (isEditableElementFocused()) return;
 
-    // Escape walks up focus hierarchy: session → project (stops there)
+    // Escape: check for double-tap (forward to terminal), else walk up focus hierarchy
     if (e.key === "Escape") {
-      if (currentFocus?.type === "session") {
+      const now = Date.now();
+      if (now - lastEscapeTime < DOUBLE_ESCAPE_MS) {
+        // Double-tap Escape: forward to terminal and refocus it
+        forwardEscape();
+        lastEscapeTime = 0;
+        dispatchAction({ type: "focus-terminal" });
+        e.stopPropagation();
+        e.preventDefault();
+      } else if (currentFocus?.type === "session") {
         focusTarget.set({ type: "project", projectId: currentFocus.projectId });
         e.stopPropagation();
         e.preventDefault();
