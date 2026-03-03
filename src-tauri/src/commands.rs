@@ -85,6 +85,15 @@ pub fn create_project(
         return Err(format!("repo_path is not a directory: {}", repo_path));
     }
 
+    let storage = state.storage.lock().map_err(|e| e.to_string())?;
+
+    // Reject duplicate project names
+    if let Ok(existing) = storage.list_projects() {
+        if existing.iter().any(|p| p.name == name) {
+            return Err(format!("A project named '{}' already exists", name));
+        }
+    }
+
     let project = Project {
         id: Uuid::new_v4(),
         name,
@@ -94,7 +103,6 @@ pub fn create_project(
         sessions: vec![],
     };
 
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
     storage.save_project(&project).map_err(|e| e.to_string())?;
 
     // If repo doesn't have agents.md, create default one in config dir
@@ -129,8 +137,12 @@ pub fn load_project(
 
     // Return existing project if one with the same repo_path exists
     if let Ok(existing) = storage.list_projects() {
-        if let Some(project) = existing.into_iter().find(|p| p.repo_path == repo_path) {
-            return Ok(project);
+        if let Some(project) = existing.iter().find(|p| p.repo_path == repo_path) {
+            return Ok(project.clone());
+        }
+        // Reject duplicate project names when creating new
+        if existing.iter().any(|p| p.name == name) {
+            return Err(format!("A project named '{}' already exists", name));
         }
     }
 
@@ -579,6 +591,14 @@ pub fn scaffold_project(state: State<AppState>, name: String) -> Result<Project,
     validate_project_name(&name)?;
 
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
+
+    // Reject duplicate project names
+    if let Ok(existing) = storage.list_projects() {
+        if existing.iter().any(|p| p.name == name) {
+            return Err(format!("A project named '{}' already exists", name));
+        }
+    }
+
     let cfg = config::load_config(&storage.base_dir())
         .ok_or_else(|| "No config found. Complete onboarding first.".to_string())?;
 
