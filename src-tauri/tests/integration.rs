@@ -93,26 +93,18 @@ fn test_agents_md_lifecycle() {
     assert_eq!(priority_read, repo_content);
 }
 
-/// Simulate the stale-sessions bug: sessions persisted from a previous app run
-/// should be cleared on startup so they don't appear as ghost entries.
-///
-/// This test reproduces the bug by:
-/// 1. Creating a project with sessions saved to disk (simulating a previous run)
-/// 2. Calling the public `cleanup_stale_sessions` helper
-/// 3. Verifying all sessions are cleared
-///
-/// Without the cleanup, the stale sessions persist and accumulate,
-/// making it look like pressing 'c' creates multiple sessions at once.
+/// Sessions should persist across app restarts. On startup, `restore_sessions`
+/// re-spawns PTY processes for active sessions while keeping metadata intact.
+/// This test verifies session metadata survives a simulated restart.
 #[test]
-fn test_stale_sessions_cleared_on_startup() {
+fn test_sessions_persist_across_restarts() {
     let tmp = TempDir::new().unwrap();
     let storage = make_storage(&tmp);
 
-    // Simulate a previous app run that left sessions persisted on disk
     let project_id = Uuid::new_v4();
     let project = Project {
         id: project_id,
-        name: "stale-test".to_string(),
+        name: "persist-test".to_string(),
         repo_path: "/tmp/fake-repo".to_string(),
         created_at: "2026-03-01T00:00:00Z".to_string(),
         archived: false,
@@ -134,33 +126,28 @@ fn test_stale_sessions_cleared_on_startup() {
             SessionConfig {
                 id: Uuid::new_v4(),
                 label: "session-3".to_string(),
-                worktree_path: Some("/tmp/nonexistent/wt3".to_string()),
-                worktree_branch: Some("session-3".to_string()),
-                archived: false,
+                worktree_path: None,
+                worktree_branch: None,
+                archived: true,
             },
         ],
     };
-    storage.save_project(&project).expect("save project with stale sessions");
+    storage.save_project(&project).expect("save project");
 
-    // Verify the stale sessions are persisted
-    let loaded = storage.load_project(project_id).expect("load before cleanup");
-    assert_eq!(loaded.sessions.len(), 3, "stale sessions should be persisted on disk");
-
-    // --- Simulate app startup: call the cleanup function ---
-    the_controller_lib::commands::do_cleanup_stale_sessions(&storage);
-
-    // Verify sessions are cleared after cleanup
-    let cleaned = storage.load_project(project_id).expect("load after cleanup");
+    // Simulate restart: reload from disk
+    let loaded = storage.load_project(project_id).expect("load after restart");
+    assert_eq!(loaded.sessions.len(), 3, "all sessions should persist");
     assert_eq!(
-        cleaned.sessions.len(),
-        0,
-        "stale sessions must be cleared on startup — without cleanup, \
-         ghost sessions accumulate and pressing 'c' appears to create multiple sessions"
+        loaded.sessions.iter().filter(|s| !s.archived).count(),
+        2,
+        "active sessions should survive restart"
     );
-
-    // Project metadata should still exist
-    assert_eq!(cleaned.name, "stale-test");
-    assert!(!cleaned.archived);
+    assert_eq!(
+        loaded.sessions.iter().filter(|s| s.archived).count(),
+        1,
+        "archived sessions should also survive"
+    );
+    assert_eq!(loaded.name, "persist-test");
 }
 
 /// Verify that no two projects can have the same name.
@@ -206,9 +193,9 @@ fn test_no_duplicate_project_names() {
     );
 }
 
-/// Verify that cleanup also works correctly with a real worktree on disk.
+/// Verify that worktrees persist across app restarts (not cleaned up).
 #[test]
-fn test_stale_sessions_cleanup_removes_worktrees() {
+fn test_worktrees_persist_across_restarts() {
     let tmp = TempDir::new().unwrap();
     let storage = make_storage(&tmp);
 
@@ -234,7 +221,7 @@ fn test_stale_sessions_cleanup_removes_worktrees() {
     let project_id = Uuid::new_v4();
     let project = Project {
         id: project_id,
-        name: "worktree-cleanup-test".to_string(),
+        name: "worktree-persist-test".to_string(),
         repo_path: repo_path.clone(),
         created_at: "2026-03-01T00:00:00Z".to_string(),
         archived: false,
@@ -248,13 +235,10 @@ fn test_stale_sessions_cleanup_removes_worktrees() {
     };
     storage.save_project(&project).expect("save project");
 
-    // --- Call the cleanup function ---
-    the_controller_lib::commands::do_cleanup_stale_sessions(&storage);
-
-    // Verify sessions cleared and worktree removed
-    let cleaned = storage.load_project(project_id).expect("load after cleanup");
-    assert_eq!(cleaned.sessions.len(), 0);
-    assert!(!wt_path.exists(), "worktree directory should be removed after cleanup");
+    // Simulate restart: reload from disk
+    let loaded = storage.load_project(project_id).expect("load after restart");
+    assert_eq!(loaded.sessions.len(), 1, "session should persist");
+    assert!(wt_path.exists(), "worktree should still exist on disk after restart");
 }
 
 /// A project with no sessions should be archivable.

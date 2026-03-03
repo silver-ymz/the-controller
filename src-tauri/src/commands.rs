@@ -35,42 +35,40 @@ const DEFAULT_AGENTS_MD: &str = r#"# Agents
 You are a helpful coding assistant working on this project.
 "#;
 
-/// Clear all sessions from all projects.
-/// PTY processes don't survive restart, so persisted sessions are stale.
-/// Also cleans up orphaned worktrees.
-pub fn do_cleanup_stale_sessions(storage: &crate::storage::Storage) {
-    let projects = match storage.list_projects() {
-        Ok(p) => p,
-        Err(_) => return,
+/// Re-spawn PTY sessions for all active (non-archived) sessions across all projects.
+/// PTY processes don't survive restart, but session metadata and worktrees persist.
+#[tauri::command]
+pub fn restore_sessions(
+    state: State<AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let projects = {
+        let storage = state.storage.lock().map_err(|e| e.to_string())?;
+        storage.list_projects().map_err(|e| e.to_string())?
     };
 
-    for mut project in projects {
-        if project.sessions.is_empty() {
-            continue;
-        }
+    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
 
-        // Clean up worktrees for active (non-archived) sessions
+    for project in &projects {
         for session in &project.sessions {
             if session.archived {
                 continue;
             }
-            if let (Some(wt_path), Some(branch)) =
-                (&session.worktree_path, &session.worktree_branch)
+            let session_dir = session
+                .worktree_path
+                .clone()
+                .unwrap_or_else(|| project.repo_path.clone());
+
+            if let Err(e) = pty_manager.spawn_session(session.id, &session_dir, app_handle.clone())
             {
-                let _ = WorktreeManager::remove_worktree(wt_path, &project.repo_path, branch);
+                eprintln!(
+                    "Failed to restore session {} ({}): {}",
+                    session.label, session.id, e
+                );
             }
         }
-
-        // Remove only active sessions; keep archived ones
-        project.sessions.retain(|s| s.archived);
-        let _ = storage.save_project(&project);
     }
-}
 
-#[tauri::command]
-pub fn cleanup_stale_sessions(state: State<AppState>) -> Result<(), String> {
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    do_cleanup_stale_sessions(&storage);
     Ok(())
 }
 

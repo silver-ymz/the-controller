@@ -35,8 +35,8 @@
 
   onMount(async () => {
     try {
-      // Clean up stale sessions from previous runs
-      await invoke("cleanup_stale_sessions");
+      // Re-spawn PTY sessions for persisted active sessions
+      await invoke("restore_sessions");
 
       const config = await invoke<Config | null>("check_onboarding");
       if (config) {

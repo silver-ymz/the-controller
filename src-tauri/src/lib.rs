@@ -12,7 +12,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(state::AppState::new())
         .invoke_handler(tauri::generate_handler![
-            commands::cleanup_stale_sessions,
+            commands::restore_sessions,
             commands::create_project,
             commands::load_project,
             commands::list_projects,
