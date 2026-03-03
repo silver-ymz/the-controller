@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
-import { projects, activeSessionId, hotkeyAction, focusTarget, jumpMode, sidebarVisible } from './stores';
+import { projects, activeSessionId, hotkeyAction, focusTarget, jumpMode, sidebarVisible, expandedProjects } from './stores';
 import HotkeyManager from './HotkeyManager.svelte';
 
 const testProject = {
@@ -57,6 +57,7 @@ describe('HotkeyManager', () => {
     focusTarget.set(null);
     jumpMode.set(null);
     sidebarVisible.set(true);
+    expandedProjects.set(new Set(['proj-1', 'proj-2']));
     vi.clearAllMocks();
     render(HotkeyManager);
   });
@@ -184,63 +185,74 @@ describe('HotkeyManager', () => {
 
   // ── j/k session navigation ──
 
-  describe('j/k session navigation', () => {
-    it('j moves focus to next session', () => {
+  describe('j/k item navigation', () => {
+    // Flat order for testProject: proj-1, sess-1, sess-2
+
+    it('j from project moves to first session', () => {
+      focusTarget.set({ type: 'project', projectId: 'proj-1' });
+      pressKey('j');
+      expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
+      expect(get(activeSessionId)).toBe('sess-1');
+    });
+
+    it('j from session moves to next session', () => {
       focusTarget.set({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
       pressKey('j');
       expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-2', projectId: 'proj-1' });
       expect(get(activeSessionId)).toBe('sess-2');
     });
 
-    it('k moves focus to prev session', () => {
-      focusTarget.set({ type: 'session', sessionId: 'sess-2', projectId: 'proj-1' });
-      pressKey('k');
-      expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
-      expect(get(activeSessionId)).toBe('sess-1');
-    });
-
-    it('j wraps from last session to first', () => {
-      focusTarget.set({ type: 'session', sessionId: 'sess-2', projectId: 'proj-1' });
-      pressKey('j');
-      expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
-    });
-
-    it('k wraps from first session to last', () => {
+    it('k from session moves to project header', () => {
       focusTarget.set({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
       pressKey('k');
-      expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-2', projectId: 'proj-1' });
+      expect(get(focusTarget)).toEqual({ type: 'project', projectId: 'proj-1' });
     });
 
-    it('j crosses project boundary', () => {
-      projects.set([testProject, testProject2]);
+    it('j wraps from last item to first project', () => {
       focusTarget.set({ type: 'session', sessionId: 'sess-2', projectId: 'proj-1' });
       pressKey('j');
-      expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-3', projectId: 'proj-2' });
+      expect(get(focusTarget)).toEqual({ type: 'project', projectId: 'proj-1' });
     });
 
-    it('k crosses project boundary backwards', () => {
-      projects.set([testProject, testProject2]);
-      focusTarget.set({ type: 'session', sessionId: 'sess-3', projectId: 'proj-2' });
+    it('k wraps from first project to last session', () => {
+      focusTarget.set({ type: 'project', projectId: 'proj-1' });
       pressKey('k');
       expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-2', projectId: 'proj-1' });
     });
 
-    it('j from project focus goes to first session of that project', () => {
-      focusTarget.set({ type: 'project', projectId: 'proj-1' });
+    it('j crosses project boundary via project header', () => {
+      // Flat order: proj-1, sess-1, sess-2, proj-2, sess-3, sess-4
+      projects.set([testProject, testProject2]);
+      focusTarget.set({ type: 'session', sessionId: 'sess-2', projectId: 'proj-1' });
       pressKey('j');
-      expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
+      expect(get(focusTarget)).toEqual({ type: 'project', projectId: 'proj-2' });
     });
 
-    it('j with no focus goes to first session', () => {
+    it('k crosses project boundary via last session of prev project', () => {
+      projects.set([testProject, testProject2]);
+      focusTarget.set({ type: 'project', projectId: 'proj-2' });
+      pressKey('k');
+      expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-2', projectId: 'proj-1' });
+    });
+
+    it('j with no focus goes to first project', () => {
       focusTarget.set(null);
       pressKey('j');
-      expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
+      expect(get(focusTarget)).toEqual({ type: 'project', projectId: 'proj-1' });
     });
 
-    it('j with no sessions does nothing', () => {
-      projects.set([{ ...testProject, sessions: [] }]);
+    it('j with empty projects does nothing', () => {
+      projects.set([]);
       pressKey('j');
       expect(get(focusTarget)).toBeNull();
+    });
+
+    it('j on project with no sessions skips to next project', () => {
+      // Flat order: proj-1 (no sessions), proj-2, sess-3, sess-4
+      projects.set([{ ...testProject, sessions: [] }, testProject2]);
+      focusTarget.set({ type: 'project', projectId: 'proj-1' });
+      pressKey('j');
+      expect(get(focusTarget)).toEqual({ type: 'project', projectId: 'proj-2' });
     });
   });
 
@@ -601,6 +613,79 @@ describe('HotkeyManager', () => {
       expect(invoke).not.toHaveBeenCalledWith('write_to_pty', expect.anything());
 
       vi.restoreAllMocks();
+    });
+  });
+
+  // ── Collapse/Expand ──
+
+  describe('collapse/expand', () => {
+    it('j skips sessions of collapsed project', () => {
+      projects.set([testProject, testProject2]);
+      expandedProjects.set(new Set(['proj-2'])); // proj-1 collapsed
+      focusTarget.set({ type: 'project', projectId: 'proj-1' });
+      pressKey('j');
+      // Should skip sess-1, sess-2 and go to proj-2
+      expect(get(focusTarget)).toEqual({ type: 'project', projectId: 'proj-2' });
+    });
+
+    it('k skips sessions of collapsed project', () => {
+      projects.set([testProject, testProject2]);
+      expandedProjects.set(new Set(['proj-1'])); // proj-2 collapsed
+      focusTarget.set({ type: 'project', projectId: 'proj-2' });
+      pressKey('k');
+      // Should skip sess-3, sess-4 and go to sess-2 (last session of expanded proj-1)
+      expect(get(focusTarget)).toEqual({ type: 'session', sessionId: 'sess-2', projectId: 'proj-1' });
+    });
+
+    it('j navigates only projects when all collapsed', () => {
+      projects.set([testProject, testProject2]);
+      expandedProjects.set(new Set()); // all collapsed
+      focusTarget.set({ type: 'project', projectId: 'proj-1' });
+      pressKey('j');
+      expect(get(focusTarget)).toEqual({ type: 'project', projectId: 'proj-2' });
+    });
+
+    it('Enter on project toggles expand', () => {
+      expandedProjects.set(new Set());
+      focusTarget.set({ type: 'project', projectId: 'proj-1' });
+      pressKey('Enter');
+      expect(get(expandedProjects).has('proj-1')).toBe(true);
+      pressKey('Enter');
+      expect(get(expandedProjects).has('proj-1')).toBe(false);
+    });
+
+    it('Enter on session dispatches focus-terminal', () => {
+      focusTarget.set({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
+      let captured: any = null;
+      const unsub = hotkeyAction.subscribe((v) => { captured = v; });
+      pressKey('Enter');
+      expect(captured).toEqual({ type: 'focus-terminal' });
+      expect(get(activeSessionId)).toBe('sess-1');
+      unsub();
+    });
+
+    it('Enter with no focus does nothing harmful', () => {
+      focusTarget.set(null);
+      pressKey('Enter');
+      expect(get(hotkeyAction)).toBeNull();
+    });
+
+    it('c on project dispatches create-session', () => {
+      focusTarget.set({ type: 'project', projectId: 'proj-1' });
+      let captured: any = null;
+      const unsub = hotkeyAction.subscribe((v) => { captured = v; });
+      pressKey('c');
+      expect(captured).toEqual({ type: 'create-session', projectId: 'proj-1' });
+      unsub();
+    });
+
+    it('c on session dispatches create-session for that project', () => {
+      focusTarget.set({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
+      let captured: any = null;
+      const unsub = hotkeyAction.subscribe((v) => { captured = v; });
+      pressKey('c');
+      expect(captured).toEqual({ type: 'create-session', projectId: 'proj-1' });
+      unsub();
     });
   });
 

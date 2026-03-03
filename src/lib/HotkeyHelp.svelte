@@ -8,9 +8,11 @@
   let { onClose }: Props = $props();
 
   const shortcuts: { key: string; description: string }[] = [
-    { key: "j / k", description: "Next / previous session" },
-    { key: "J / K", description: "Next / previous project" },
+    { key: "j / k", description: "Next / previous item (project or session)" },
+    { key: "J / K", description: "Next / previous project (skip sessions)" },
+    { key: "Enter", description: "Expand/collapse project or focus terminal" },
     { key: "g", description: "Go to project / session (jump mode)" },
+    { key: "c", description: "Create new session in focused project" },
     { key: "d", description: "Delete focused item (session or project)" },
     { key: "a", description: "Archive focused item (session or project)" },
     { key: "A", description: "View archived projects" },

@@ -1,32 +1,16 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
-  import { showToast } from "./toast";
 
   interface Props {
-    projectId: string;
-    projectName: string;
-    onDeleted: () => void;
+    sessionLabel: string;
+    isArchived: boolean;
+    onUntrack: () => void;
+    onDelete: () => void;
     onClose: () => void;
   }
 
-  let { projectId, projectName, onDeleted, onClose }: Props = $props();
-
-  let loading = $state(false);
+  let { sessionLabel, isArchived, onUntrack, onDelete, onClose }: Props = $props();
   let modalEl: HTMLDivElement | undefined = $state();
-
-  async function deleteProject(deleteRepo: boolean) {
-    if (loading) return;
-    loading = true;
-    try {
-      await invoke("delete_project", { projectId, deleteRepo });
-      onDeleted();
-    } catch (e) {
-      showToast(String(e), "error");
-    } finally {
-      loading = false;
-    }
-  }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape" || e.key === "n") {
@@ -36,11 +20,11 @@
     } else if (e.key === "u") {
       e.preventDefault();
       e.stopPropagation();
-      deleteProject(false);
+      onUntrack();
     } else if (e.key === "d") {
       e.preventDefault();
       e.stopPropagation();
-      deleteProject(true);
+      onDelete();
     }
   }
 
@@ -62,28 +46,16 @@
     role="presentation"
     tabindex="-1"
   >
-    <div class="modal-header">Delete Project</div>
+    <div class="modal-header">Delete Session</div>
     <p class="description">
-      Delete <strong>{projectName}</strong>? This will close all sessions and remove worktrees.
+      Delete <strong>{sessionLabel}</strong>?{#if !isArchived} The terminal process will be terminated.{/if}
     </p>
     <div class="actions">
-      <button
-        class="btn-untrack"
-        onclick={() => deleteProject(false)}
-        disabled={loading}
-      >Untrack <kbd>u</kbd></button>
-      <button
-        class="btn-delete"
-        onclick={() => deleteProject(true)}
-        disabled={loading}
-      >Delete Everything <kbd>d</kbd></button>
-      <button
-        class="btn-cancel"
-        onclick={onClose}
-        disabled={loading}
-      >Cancel <kbd>n</kbd></button>
+      <button class="btn-untrack" onclick={onUntrack}>Untrack <kbd>u</kbd></button>
+      <button class="btn-delete" onclick={onDelete}>Delete Worktree <kbd>d</kbd></button>
+      <button class="btn-cancel" onclick={onClose}>Cancel <kbd>n</kbd></button>
     </div>
-    <p class="hint">Untrack removes from the controller only. Delete Everything also removes the repo directory.</p>
+    <p class="hint">Untrack removes the session only. Delete Worktree also removes the worktree directory and branch.</p>
   </div>
 </div>
 
@@ -172,12 +144,6 @@
   .btn-cancel:hover {
     color: #cdd6f4;
     border-color: #45475a;
-  }
-  .btn-untrack:disabled,
-  .btn-delete:disabled,
-  .btn-cancel:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
   kbd {
     font-family: monospace;

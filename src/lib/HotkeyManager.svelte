@@ -12,6 +12,7 @@
     archiveView,
     archivedProjects,
     focusTarget,
+    expandedProjects,
     type Project,
     type HotkeyAction,
     type FocusTarget,
@@ -50,6 +51,7 @@
 
   let isArchiveView = $state(false);
   let archivedProjectList: Project[] = $state([]);
+  let expandedSet: Set<string> = $state(new Set());
 
   $effect(() => {
     const unsub = archiveView.subscribe((v) => { isArchiveView = v; });
@@ -58,6 +60,11 @@
 
   $effect(() => {
     const unsub = archivedProjects.subscribe((v) => { archivedProjectList = v; });
+    return unsub;
+  });
+
+  $effect(() => {
+    const unsub = expandedProjects.subscribe((v) => { expandedSet = v; });
     return unsub;
   });
 
@@ -197,35 +204,45 @@
     }
   }
 
-  function getVisibleSessions(): { sessionId: string; projectId: string }[] {
+  type SidebarItem =
+    | { type: "project"; projectId: string }
+    | { type: "session"; sessionId: string; projectId: string };
+
+  function getVisibleItems(): SidebarItem[] {
     const list = isArchiveView ? archivedProjectList : projectList;
-    const result: { sessionId: string; projectId: string }[] = [];
+    const result: SidebarItem[] = [];
     for (const p of list) {
+      result.push({ type: "project", projectId: p.id });
+      if (!expandedSet.has(p.id)) continue;
       const sessions = isArchiveView
         ? p.sessions.filter(s => s.archived)
         : p.sessions.filter(s => !s.archived);
       for (const s of sessions) {
-        result.push({ sessionId: s.id, projectId: p.id });
+        result.push({ type: "session", sessionId: s.id, projectId: p.id });
       }
     }
     return result;
   }
 
-  function navigateSession(direction: 1 | -1) {
-    const sessions = getVisibleSessions();
-    if (sessions.length === 0) return;
+  function navigateItem(direction: 1 | -1) {
+    const items = getVisibleItems();
+    if (items.length === 0) return;
     let idx = -1;
     if (currentFocus?.type === "session") {
-      idx = sessions.findIndex(s => s.sessionId === currentFocus.sessionId);
+      idx = items.findIndex(it => it.type === "session" && it.sessionId === currentFocus.sessionId);
     } else if (currentFocus?.type === "project") {
-      // j from project → first session of that project; k from project → last session of prev project
-      const projIdx = sessions.findIndex(s => s.projectId === currentFocus.projectId);
-      idx = direction === 1 ? projIdx - 1 : projIdx;
+      idx = items.findIndex(it => it.type === "project" && it.projectId === currentFocus.projectId);
     }
-    const len = sessions.length;
-    const next = sessions[((idx + direction) % len + len) % len];
-    activeSessionId.set(next.sessionId);
-    focusTarget.set({ type: "session", sessionId: next.sessionId, projectId: next.projectId });
+    const len = items.length;
+    const next = items[((idx + direction) % len + len) % len];
+    if (next.type === "session") {
+      if (!isArchiveView) {
+        activeSessionId.set(next.sessionId);
+      }
+      focusTarget.set({ type: "session", sessionId: next.sessionId, projectId: next.projectId });
+    } else {
+      focusTarget.set({ type: "project", projectId: next.projectId });
+    }
   }
 
   function navigateProject(direction: 1 | -1) {
@@ -250,10 +267,10 @@
         enterJumpMode();
         return true;
       case "j":
-        navigateSession(1);
+        navigateItem(1);
         return true;
       case "k":
-        navigateSession(-1);
+        navigateItem(-1);
         return true;
       case "J":
         navigateProject(1);
@@ -277,7 +294,14 @@
         }
         return true;
       case "a":
-        if (currentFocus?.type === "session") {
+        if (isArchiveView) {
+          // In archive view, a unarchives the focused item
+          if (currentFocus?.type === "session") {
+            dispatchAction({ type: "unarchive-session", sessionId: currentFocus.sessionId, projectId: currentFocus.projectId });
+          } else if (currentFocus?.type === "project") {
+            dispatchAction({ type: "unarchive-project", projectId: currentFocus.projectId });
+          }
+        } else if (currentFocus?.type === "session") {
           dispatchAction({ type: "archive-session", sessionId: currentFocus.sessionId, projectId: currentFocus.projectId });
         } else if (currentFocus?.type === "project") {
           dispatchAction({ type: "archive-project", projectId: currentFocus.projectId });
@@ -288,8 +312,31 @@
       case "A":
         dispatchAction({ type: "toggle-archive-view" });
         return true;
+      case "c":
+        if (currentFocus?.type === "project") {
+          dispatchAction({ type: "create-session", projectId: currentFocus.projectId });
+        } else if (currentFocus?.type === "session") {
+          dispatchAction({ type: "create-session", projectId: currentFocus.projectId });
+        }
+        return true;
       case "s":
         sidebarVisible.update(v => !v);
+        return true;
+      case "Enter":
+        if (currentFocus?.type === "project") {
+          const next = new Set(expandedSet);
+          if (next.has(currentFocus.projectId)) {
+            next.delete(currentFocus.projectId);
+          } else {
+            next.add(currentFocus.projectId);
+          }
+          expandedProjects.set(next);
+        } else if (currentFocus?.type === "session") {
+          if (!isArchiveView) {
+            activeSessionId.set(currentFocus.sessionId);
+          }
+          dispatchAction({ type: "focus-terminal" });
+        }
         return true;
       case "?":
         dispatchAction({ type: "toggle-help" });

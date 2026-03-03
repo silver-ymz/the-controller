@@ -472,31 +472,36 @@ pub fn close_session(
     state: State<AppState>,
     project_id: String,
     session_id: String,
+    delete_worktree: bool,
 ) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
 
-    // Close the PTY session (scoped to release lock before acquiring storage)
+    // Try to close the PTY session (may not exist for archived sessions)
     {
         let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-        pty_manager.close_session(session_uuid)?;
+        let _ = pty_manager.close_session(session_uuid);
     }
 
-    // Remove session and clean up worktree
+    // Remove session from project
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     let mut project = storage
         .load_project(project_uuid)
         .map_err(|e| e.to_string())?;
 
-    // Find session before removing to check for worktree
     let session = project.sessions.iter().find(|s| s.id == session_uuid).cloned();
     project.sessions.retain(|s| s.id != session_uuid);
     storage.save_project(&project).map_err(|e| e.to_string())?;
 
-    // Clean up worktree
-    if let Some(session) = session {
-        if let (Some(wt_path), Some(branch)) = (session.worktree_path, session.worktree_branch) {
-            let _ = WorktreeManager::remove_worktree(&wt_path, &project.repo_path, &branch);
+    // Optionally clean up worktree
+    if delete_worktree {
+        if let Some(session) = session {
+            if let (Some(wt_path), Some(branch)) =
+                (session.worktree_path, session.worktree_branch)
+            {
+                let _ =
+                    WorktreeManager::remove_worktree(&wt_path, &project.repo_path, &branch);
+            }
         }
     }
 

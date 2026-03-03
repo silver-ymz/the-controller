@@ -12,10 +12,6 @@
   let { title, message, confirmLabel = "Confirm", onConfirm, onClose }: Props = $props();
   let modalEl: HTMLDivElement | undefined = $state();
 
-  onMount(() => {
-    modalEl?.focus();
-  });
-
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape" || e.key === "n") {
       e.preventDefault();
@@ -27,9 +23,17 @@
       onConfirm();
     }
   }
+
+  onMount(() => {
+    modalEl?.focus();
+    window.addEventListener("keydown", handleKeydown, { capture: true });
+    return () => {
+      window.removeEventListener("keydown", handleKeydown, { capture: true });
+    };
+  });
 </script>
 
-<div class="overlay" onclick={onClose} onkeydown={handleKeydown} role="dialog">
+<div class="overlay" onclick={onClose} role="dialog">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
     class="modal"
