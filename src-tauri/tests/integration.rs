@@ -434,3 +434,55 @@ fn test_archive_project_with_no_sessions() {
     );
     assert_eq!(archived_list[0].id, project_id);
 }
+
+/// After migration, new sessions should use name-based paths.
+#[test]
+fn test_create_session_uses_project_name_in_path() {
+    let tmp = TempDir::new().unwrap();
+    let storage = make_storage(&tmp);
+
+    let project_id = Uuid::new_v4();
+
+    // Set up a real git repo so worktree creation works
+    let repo_dir = TempDir::new().unwrap();
+    let repo_path = repo_dir.path().to_str().unwrap().to_string();
+    let repo = git2::Repository::init(&repo_path).expect("init repo");
+    let sig = repo.signature().unwrap_or_else(|_| {
+        git2::Signature::now("Test", "test@example.com").unwrap()
+    });
+    let tree_id = repo.treebuilder(None).unwrap().write().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+        .expect("initial commit");
+
+    let project = Project {
+        id: project_id,
+        name: "test-name-path".to_string(),
+        repo_path: repo_path.clone(),
+        created_at: "2026-03-01T00:00:00Z".to_string(),
+        archived: false,
+        sessions: vec![],
+    };
+    storage.save_project(&project).expect("save project");
+
+    // Create worktree using name-based path (what create_session should do)
+    let worktree_dir = tmp.path()
+        .join("worktrees")
+        .join(&project.name)
+        .join("session-1");
+    let wt_path = WorktreeManager::create_worktree(&repo_path, "session-1", &worktree_dir)
+        .expect("create worktree");
+
+    // Path should contain project name, not UUID
+    let path_str = wt_path.to_str().unwrap();
+    assert!(
+        path_str.contains("test-name-path"),
+        "worktree path should contain project name, got: {}",
+        path_str
+    );
+    assert!(
+        !path_str.contains(&project_id.to_string()),
+        "worktree path should NOT contain UUID, got: {}",
+        path_str
+    );
+}

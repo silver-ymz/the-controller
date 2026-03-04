@@ -50,6 +50,14 @@ pub fn restore_sessions(
 ) -> Result<(), String> {
     let projects = {
         let storage = state.storage.lock().map_err(|e| e.to_string())?;
+        let projects = storage.list_projects().map_err(|e| e.to_string())?;
+        // Migrate worktree paths from UUID-based to name-based directories
+        for project in &projects {
+            if let Err(e) = storage.migrate_worktree_paths(project) {
+                eprintln!("Failed to migrate worktrees for project '{}': {}", project.name, e);
+            }
+        }
+        // Reload after migration to get updated paths
         storage.list_projects().map_err(|e| e.to_string())?
     };
 
@@ -333,17 +341,17 @@ pub fn create_session(
     let session_id = Uuid::new_v4();
 
     // Load the project and generate session label
-    let (repo_path, label, base_dir) = {
+    let (repo_path, label, base_dir, project_name) = {
         let storage = state.storage.lock().map_err(|e| e.to_string())?;
         let project = storage.load_project(project_uuid).map_err(|e| e.to_string())?;
         let label = next_session_label(&project.sessions);
-        (project.repo_path.clone(), label, storage.base_dir())
+        (project.repo_path.clone(), label, storage.base_dir(), project.name.clone())
     };
 
-    // Create worktree under ~/.the-controller/worktrees/{project_id}/{label}/
+    // Create worktree under ~/.the-controller/worktrees/{project_name}/{label}/
     let worktree_dir = base_dir
         .join("worktrees")
-        .join(project_uuid.to_string())
+        .join(&project_name)
         .join(&label);
 
     // Try to create a worktree; fall back to repo path for repos without commits
