@@ -25,7 +25,7 @@ impl TmuxManager {
             .unwrap_or(false)
     }
 
-    pub fn create_session(session_id: Uuid, working_dir: &str) -> Result<(), String> {
+    pub fn create_session(session_id: Uuid, working_dir: &str, command: &str) -> Result<(), String> {
         let name = Self::session_name(session_id);
         let output = Command::new(TMUX_BIN)
             .args([
@@ -39,7 +39,7 @@ impl TmuxManager {
                 "80",
                 "-y",
                 "24",
-                "claude",
+                command,
             ])
             .env_remove("CLAUDECODE")
             .output()
