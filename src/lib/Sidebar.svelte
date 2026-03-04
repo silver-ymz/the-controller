@@ -3,7 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { projects, activeSessionId, sessionStatuses, hotkeyAction, showKeyHints, jumpMode, generateJumpLabels, archiveView, archivedProjects, focusTarget, expandedProjects, type Project, type JumpPhase, type FocusTarget } from "./stores";
   import { showToast } from "./toast";
-  import { focusAfterSessionDelete } from "./focus-helpers";
+  import { focusAfterSessionDelete, focusAfterProjectDelete } from "./focus-helpers";
   import FuzzyFinder from "./FuzzyFinder.svelte";
   import NewProjectModal from "./NewProjectModal.svelte";
   import DeleteProjectModal from "./DeleteProjectModal.svelte";
@@ -608,9 +608,16 @@
       projectId={deleteTarget.id}
       projectName={deleteTarget.name}
       onDeleted={async () => {
+        const list = isArchiveView ? archivedProjectList : projectList;
+        const nextFocus = focusAfterProjectDelete(list, deleteTarget!.id, expandedProjectSet, isArchiveView);
+        activeSessionId.update(current => {
+          if (deleteTarget!.sessions.some(s => s.id === current)) return nextFocus?.type === "session" ? nextFocus.sessionId : null;
+          return current;
+        });
         deleteTarget = null;
         await loadProjects();
         if (isArchiveView) await loadArchivedProjects();
+        focusTarget.set(nextFocus);
       }}
       onClose={() => (deleteTarget = null)}
     />
