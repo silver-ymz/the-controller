@@ -322,6 +322,7 @@
       case "s":
         sidebarVisible.update(v => !v);
         return true;
+      case "l":
       case "Enter":
         if (currentFocus?.type === "project") {
           const next = new Set(expandedSet);
