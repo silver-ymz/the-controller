@@ -32,25 +32,14 @@ impl TmuxManager {
         continue_session: bool,
     ) -> Result<(), String> {
         let name = Self::session_name(session_id);
-        let shell_cmd = if continue_session {
-            format!("{} --continue", command)
-        } else {
-            command.to_string()
-        };
+        let mut args = vec![
+            "new-session", "-d", "-s", &name, "-c", working_dir, "-x", "80", "-y", "24", command,
+        ];
+        if continue_session {
+            args.push("--continue");
+        }
         let output = Command::new(TMUX_BIN)
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                &name,
-                "-c",
-                working_dir,
-                "-x",
-                "80",
-                "-y",
-                "24",
-                &shell_cmd,
-            ])
+            .args(&args)
             .env_remove("CLAUDECODE")
             .output()
             .map_err(|e| format!("failed to run tmux: {}", e))?;

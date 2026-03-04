@@ -294,7 +294,7 @@ pub fn unarchive_project(
     // Spawn PTYs for restored sessions
     let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
     for (session_id, session_dir, kind) in to_restore {
-        pty_manager.spawn_session(session_id, &session_dir, &kind, app_handle.clone(), false)?;
+        pty_manager.spawn_session(session_id, &session_dir, &kind, app_handle.clone(), true)?;
     }
 
     Ok(())
@@ -430,7 +430,7 @@ pub fn archive_session(
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
 
-    // Close the PTY session (worktree stays on disk)
+    // Close the PTY session and kill tmux (worktree stays on disk)
     {
         let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
         let _ = pty_manager.close_session(session_uuid);
