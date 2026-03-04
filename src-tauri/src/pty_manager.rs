@@ -35,27 +35,33 @@ impl PtyManager {
         &mut self,
         session_id: Uuid,
         working_dir: &str,
+        kind: &str,
         app_handle: AppHandle,
         continue_session: bool,
     ) -> Result<(), String> {
+        let command = match kind {
+            "codex" => "codex",
+            _ => "claude",
+        };
         if TmuxManager::is_available() {
             // Create tmux session if it doesn't already exist
             if !TmuxManager::has_session(session_id) {
-                TmuxManager::create_session(session_id, working_dir, continue_session)?;
+                TmuxManager::create_session(session_id, working_dir, command, continue_session)?;
             }
             // Attach to the tmux session via a local PTY
             self.attach_tmux_session(session_id, app_handle)
         } else {
-            // No tmux — spawn claude directly in a PTY
-            self.spawn_direct_session(session_id, working_dir, app_handle)
+            // No tmux — spawn the command directly in a PTY
+            self.spawn_direct_session(session_id, working_dir, command, app_handle)
         }
     }
 
-    /// Spawn `claude` directly in a local PTY without tmux.
+    /// Spawn a command directly in a local PTY without tmux.
     fn spawn_direct_session(
         &mut self,
         session_id: Uuid,
         working_dir: &str,
+        command: &str,
         app_handle: AppHandle,
     ) -> Result<(), String> {
         let pty_system = native_pty_system();
@@ -68,14 +74,14 @@ impl PtyManager {
             })
             .map_err(|e| format!("failed to open pty: {}", e))?;
 
-        let mut cmd = CommandBuilder::new("claude");
+        let mut cmd = CommandBuilder::new(command);
         cmd.cwd(working_dir);
         cmd.env_remove("CLAUDECODE");
 
         let _child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| format!("failed to spawn claude: {}", e))?;
+            .map_err(|e| format!("failed to spawn {}: {}", command, e))?;
 
         drop(pair.slave);
 

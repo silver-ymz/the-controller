@@ -65,7 +65,7 @@ pub fn restore_sessions(
                 .clone()
                 .unwrap_or_else(|| project.repo_path.clone());
 
-            if let Err(e) = pty_manager.spawn_session(session.id, &session_dir, app_handle.clone(), true)
+            if let Err(e) = pty_manager.spawn_session(session.id, &session_dir, &session.kind, app_handle.clone(), true)
             {
                 eprintln!(
                     "Failed to restore session {} ({}): {}",
@@ -268,7 +268,7 @@ pub fn unarchive_project(
     let mut project = storage.load_project(id).map_err(|e| e.to_string())?;
 
     // Collect sessions to restore before taking pty_manager lock
-    let to_restore: Vec<(Uuid, String)> = project
+    let to_restore: Vec<(Uuid, String, String)> = project
         .sessions
         .iter()
         .filter(|s| s.archived)
@@ -277,7 +277,7 @@ pub fn unarchive_project(
                 .worktree_path
                 .clone()
                 .unwrap_or_else(|| project.repo_path.clone());
-            (s.id, dir)
+            (s.id, dir, s.kind.clone())
         })
         .collect();
 
@@ -293,8 +293,8 @@ pub fn unarchive_project(
 
     // Spawn PTYs for restored sessions
     let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-    for (session_id, session_dir) in to_restore {
-        pty_manager.spawn_session(session_id, &session_dir, app_handle.clone(), false)?;
+    for (session_id, session_dir, kind) in to_restore {
+        pty_manager.spawn_session(session_id, &session_dir, &kind, app_handle.clone(), false)?;
     }
 
     Ok(())
@@ -326,7 +326,9 @@ pub fn create_session(
     state: State<AppState>,
     app_handle: AppHandle,
     project_id: String,
+    kind: Option<String>,
 ) -> Result<String, String> {
+    let kind = kind.unwrap_or_else(|| "claude".to_string());
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_id = Uuid::new_v4();
 
@@ -372,6 +374,7 @@ pub fn create_session(
             worktree_path: wt_path,
             worktree_branch: wt_branch,
             archived: false,
+            kind: kind.clone(),
         };
         project.sessions.push(session_config);
         storage.save_project(&project).map_err(|e| e.to_string())?;
@@ -379,7 +382,7 @@ pub fn create_session(
 
     // Spawn the PTY session in the worktree (or repo) directory
     let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-    pty_manager.spawn_session(session_id, &session_dir, app_handle, false)?;
+    pty_manager.spawn_session(session_id, &session_dir, &kind, app_handle, false)?;
 
     Ok(session_id.to_string())
 }
@@ -460,6 +463,7 @@ pub fn unarchive_session(
         .worktree_path
         .clone()
         .unwrap_or_else(|| project.repo_path.clone());
+    let kind = session.kind.clone();
 
     session.archived = false;
     storage.save_project(&project).map_err(|e| e.to_string())?;
@@ -469,7 +473,7 @@ pub fn unarchive_session(
 
     // Spawn the PTY session in the existing worktree directory
     let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-    pty_manager.spawn_session(session_uuid, &session_dir, app_handle, true)?;
+    pty_manager.spawn_session(session_uuid, &session_dir, &kind, app_handle, true)?;
 
     Ok(())
 }
@@ -714,6 +718,7 @@ mod tests {
                 worktree_path: None,
                 worktree_branch: None,
                 archived: false,
+                kind: "claude".to_string(),
             },
             SessionConfig {
                 id: Uuid::new_v4(),
@@ -721,6 +726,7 @@ mod tests {
                 worktree_path: None,
                 worktree_branch: None,
                 archived: false,
+                kind: "claude".to_string(),
             },
         ];
         assert_eq!(next_session_label(&sessions), "session-3");
@@ -736,6 +742,7 @@ mod tests {
                 worktree_path: Some("/tmp/wt1".to_string()),
                 worktree_branch: Some("session-1".to_string()),
                 archived: true,
+                kind: "claude".to_string(),
             },
             SessionConfig {
                 id: Uuid::new_v4(),
@@ -743,6 +750,7 @@ mod tests {
                 worktree_path: Some("/tmp/wt2".to_string()),
                 worktree_branch: Some("session-2".to_string()),
                 archived: false,
+                kind: "claude".to_string(),
             },
             SessionConfig {
                 id: Uuid::new_v4(),
@@ -750,6 +758,7 @@ mod tests {
                 worktree_path: Some("/tmp/wt3".to_string()),
                 worktree_branch: Some("session-3".to_string()),
                 archived: true,
+                kind: "claude".to_string(),
             },
         ];
         // Max is session-3, so next is session-4
@@ -765,6 +774,7 @@ mod tests {
             worktree_path: None,
             worktree_branch: None,
             archived: false,
+            kind: "claude".to_string(),
         }];
         assert_eq!(next_session_label(&sessions), "session-4");
     }
