@@ -3,6 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { projects, activeSessionId, sessionStatuses, hotkeyAction, showKeyHints, jumpMode, generateJumpLabels, archiveView, archivedProjects, focusTarget, expandedProjects, type Project, type JumpPhase, type FocusTarget } from "./stores";
   import { showToast } from "./toast";
+  import { focusAfterSessionDelete } from "./focus-helpers";
   import FuzzyFinder from "./FuzzyFinder.svelte";
   import NewProjectModal from "./NewProjectModal.svelte";
   import DeleteProjectModal from "./DeleteProjectModal.svelte";
@@ -310,16 +311,21 @@
 
   async function closeSession(projectId: string, sessionId: string, deleteWorktree: boolean) {
     try {
+      const list = isArchiveView ? archivedProjectList : projectList;
+      const nextFocus = focusAfterSessionDelete(list, projectId, sessionId, isArchiveView);
+
       await invoke("close_session", { projectId, sessionId, deleteWorktree });
-      // Remove from status tracking
       sessionStatuses.update(m => {
         const next = new Map(m);
         next.delete(sessionId);
         return next;
       });
-      // Clear active session if it was the closed one
-      activeSessionId.update(current => current === sessionId ? null : current);
-      // Reload projects
+      activeSessionId.update(current => {
+        if (current !== sessionId) return current;
+        if (nextFocus?.type === "session") return nextFocus.sessionId;
+        return null;
+      });
+      focusTarget.set(nextFocus);
       await loadProjects();
       if (isArchiveView) await loadArchivedProjects();
     } catch (e) {
