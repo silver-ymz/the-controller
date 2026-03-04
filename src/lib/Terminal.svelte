@@ -4,7 +4,7 @@
   import { FitAddon } from "@xterm/addon-fit";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { readText } from "@tauri-apps/plugin-clipboard-manager";
+
   import "@xterm/xterm/css/xterm.css";
 
   interface Props {
@@ -41,25 +41,18 @@
     term.open(containerEl);
     fitAddon.fit();
 
-    // Handle keys that xterm.js doesn't natively support
+    // Handle keys that xterm.js doesn't natively support.
+    // xterm calls this handler for both keydown AND keypress events.
+    // We act on keydown and suppress keypress for the same combos so xterm
+    // doesn't also emit the default character (e.g. \r for Shift-Enter).
     term.attachCustomKeyEventHandler((event) => {
-      if (event.type !== "keydown") return true;
-
-      // Cmd-V (macOS) / Ctrl-V (Linux/Windows): paste from clipboard
-      if (event.key === "v" && (event.metaKey || event.ctrlKey)) {
-        readText().then((text) => {
-          if (text) {
-            invoke("write_to_pty", { sessionId, data: text });
-          }
-        });
-        return false;
-      }
-
       // Shift-Enter: send CSI u sequence so Claude Code can distinguish it from Enter.
       // Uses send_raw_to_pty which bypasses tmux's outer terminal parser via
       // `tmux send-keys -H`, since tmux doesn't recognise CSI u from the outer PTY.
       if (event.key === "Enter" && event.shiftKey) {
-        invoke("send_raw_to_pty", { sessionId, data: "\x1b[13;2u" });
+        if (event.type === "keydown") {
+          invoke("send_raw_to_pty", { sessionId, data: "\x1b[13;2u" });
+        }
         return false;
       }
 
