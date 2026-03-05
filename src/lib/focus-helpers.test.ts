@@ -16,6 +16,7 @@ function makeProject(id: string, sessionIds: string[]): Project {
       worktree_branch: null,
       archived: false,
       kind: 'claude',
+      github_issue: null,
     })),
   };
 }
