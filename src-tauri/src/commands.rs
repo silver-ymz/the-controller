@@ -383,11 +383,6 @@ pub fn create_session(
         (project.repo_path.clone(), label, storage.base_dir(), project.name.clone())
     };
 
-    // Sync main branch before creating worktree so session starts from latest
-    if let Err(e) = WorktreeManager::sync_main(&repo_path) {
-        eprintln!("Warning: failed to sync main branch: {}", e);
-    }
-
     // Create worktree under ~/.the-controller/worktrees/{project_name}/{label}/
     let worktree_dir = base_dir
         .join("worktrees")
