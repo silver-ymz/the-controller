@@ -911,6 +911,79 @@ pub async fn post_github_comment(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn add_github_label(
+    repo_path: String,
+    issue_number: u64,
+    label: String,
+) -> Result<(), String> {
+    let repo_path_clone = repo_path.clone();
+    let nwo = tokio::task::spawn_blocking(move || extract_github_repo(&repo_path_clone))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))??;
+
+    // Ensure the label exists on the repo (ignore errors if it already exists)
+    let _ = tokio::process::Command::new("gh")
+        .args([
+            "label", "create",
+            &label,
+            "--repo", &nwo,
+            "--description", "Issue is being worked on in a session",
+            "--color", "F9E2AF",
+        ])
+        .output()
+        .await;
+
+    // Add label to the issue
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "issue", "edit",
+            &issue_number.to_string(),
+            "--repo", &nwo,
+            "--add-label", &label,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run gh: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh issue edit failed: {}", stderr));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_github_label(
+    repo_path: String,
+    issue_number: u64,
+    label: String,
+) -> Result<(), String> {
+    let repo_path_clone = repo_path.clone();
+    let nwo = tokio::task::spawn_blocking(move || extract_github_repo(&repo_path_clone))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))??;
+
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "issue", "edit",
+            &issue_number.to_string(),
+            "--repo", &nwo,
+            "--remove-label", &label,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run gh: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh issue edit failed: {}", stderr));
+    }
+
+    Ok(())
+}
+
 const MAX_MERGE_RETRIES: u32 = 5;
 const REBASE_POLL_INTERVAL_SECS: u64 = 3;
 

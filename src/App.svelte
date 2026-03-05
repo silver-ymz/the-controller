@@ -114,6 +114,12 @@
         issueNumber: issue.number,
         body: `Working on this in session \`${sessionId.substring(0, 8)}\``,
       }).catch((e: unknown) => showToast(`Failed to post comment: ${e}`, "error"));
+      // Add in-progress label (fire and forget)
+      invoke("add_github_label", {
+        repoPath,
+        issueNumber: issue.number,
+        label: "in-progress",
+      }).catch((e: unknown) => showToast(`Failed to add label: ${e}`, "error"));
 
       sessionStatuses.update((m: Map<string, string>) => {
         const next = new Map(m);
