@@ -297,16 +297,12 @@
           }
         }
         return true;
-      case "C":
-        if (currentFocus?.type === "project" || currentFocus?.type === "session") {
-          dispatchAction({ type: "create-session", projectId: currentFocus.projectId });
-        }
-        return true;
       case "x":
-        if (currentFocus?.type === "project") {
-          dispatchAction({ type: "create-session", projectId: currentFocus.projectId, kind: "codex" });
-        } else if (currentFocus?.type === "session") {
-          dispatchAction({ type: "create-session", projectId: currentFocus.projectId, kind: "codex" });
+        if (currentFocus?.type === "project" || currentFocus?.type === "session") {
+          const project = projectList.find(p => p.id === currentFocus.projectId);
+          if (project) {
+            dispatchAction({ type: "pick-issue-for-session", projectId: project.id, repoPath: project.repo_path, kind: "codex" });
+          }
         }
         return true;
       case "m":
