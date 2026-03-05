@@ -5,6 +5,7 @@ pub mod config;
 pub mod models;
 pub mod pty_manager;
 pub mod state;
+pub mod status_socket;
 pub mod storage;
 pub mod tmux;
 pub mod worktree;
