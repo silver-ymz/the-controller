@@ -59,3 +59,25 @@ Affected locations:
 - `src-tauri/src/tmux.rs` — `create_session` (removes CLAUDECODE for tmux-backed sessions)
 - `src-tauri/src/pty_manager.rs` — `spawn_command` (removes CLAUDECODE for direct commands)
 - `src-tauri/src/config.rs` — `check_claude_cli_status`, `generate_names_via_cli`
+
+## Session Status Detection via Hooks
+
+Session status (idle/working/exited) is detected using Claude Code hooks, not PTY output heuristics.
+
+**How it works:**
+1. On app startup, a Unix domain socket listener starts at `/tmp/the-controller.sock`.
+2. When spawning Claude sessions, `--settings` is passed with hook config for `UserPromptSubmit` (→ working), `Stop` (→ idle), and `Notification[idle_prompt]` (→ idle).
+3. Hook commands send `status:session-id` to the socket via `nc -U`.
+4. The socket listener emits `session-status-hook:<session-id>` Tauri events.
+5. PTY EOF (`session-status-changed`) still handles the "exited" state.
+
+**Key files:**
+- `src-tauri/src/status_socket.rs` — socket listener, message parsing, hook JSON generation
+- `src-tauri/src/tmux.rs` — passes `--settings` and `THE_CONTROLLER_SESSION_ID` env var
+- `src-tauri/src/pty_manager.rs` — same for direct (non-tmux) sessions
+- `src/lib/Sidebar.svelte` — listens for `session-status-hook` events
+
+**Edge cases:**
+- Hook commands use `timeout 2` + `; true` to avoid blocking Claude Code
+- Stale socket files are cleaned up on startup
+- Reattached tmux sessions default to "idle" until the next hook fires
