@@ -369,6 +369,7 @@ pub fn create_session(
     app_handle: AppHandle,
     project_id: String,
     kind: Option<String>,
+    github_issue: Option<crate::models::GithubIssue>,
 ) -> Result<String, String> {
     let kind = kind.unwrap_or_else(|| "claude".to_string());
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
@@ -422,7 +423,7 @@ pub fn create_session(
             worktree_branch: wt_branch,
             archived: false,
             kind: kind.clone(),
-            github_issue: None,
+            github_issue,
         };
         project.sessions.push(session_config);
         storage.save_project(&project).map_err(|e| e.to_string())?;
