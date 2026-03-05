@@ -85,7 +85,7 @@ impl PtyManager {
             cmd.arg("--settings");
             cmd.arg(settings_json);
             if let Some(prompt) = initial_prompt {
-                cmd.arg("--prompt");
+                cmd.arg("--append-system-prompt");
                 cmd.arg(prompt);
             }
         }
