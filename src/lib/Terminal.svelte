@@ -22,6 +22,11 @@
   let unlistenOutput: UnlistenFn | undefined;
   let unlistenStatus: UnlistenFn | undefined;
 
+  // Gate: suppress onData forwarding during initialization to prevent
+  // xterm.js auto-responses to terminal queries (DA, DSR) from being
+  // sent to the PTY as input. See GitHub issue #49.
+  let inputReady = false;
+
   async function handleImagePaste(
     writeToPty: (data: string) => Promise<unknown>,
   ) {
@@ -68,23 +73,31 @@
     // Handle keys that xterm.js doesn't natively support
     term.attachCustomKeyEventHandler(
       makeCustomKeyHandler(
-        (data) => invoke("send_raw_to_pty", { sessionId, data }),
+        (data) => {
+          if (!inputReady) return;
+          invoke("send_raw_to_pty", { sessionId, data });
+        },
         {
           onImagePaste: () => {
+            if (!inputReady) return;
             handleImagePaste(writeToPty);
           },
         },
       ),
     );
 
-    // Connect user input to PTY
+    // Connect user input to PTY (gated until initialization settles)
     term.onData((data: string) => {
+      if (!inputReady) return;
       writeToPty(data).catch((err) => {
         console.error("Failed to write to PTY:", err);
       });
     });
 
-    // Listen for PTY output (base64-encoded)
+    // Listen for PTY output (base64-encoded).
+    // After the listener is set up, allow a brief window for tmux's
+    // initial terminal queries and xterm auto-responses to settle,
+    // then enable input forwarding.
     listen<string>(`pty-output:${sessionId}`, (event) => {
       if (term) {
         const bytes = Uint8Array.from(atob(event.payload), (c) =>
@@ -94,6 +107,9 @@
       }
     }).then((fn) => {
       unlistenOutput = fn;
+      setTimeout(() => {
+        inputReady = true;
+      }, 100);
     });
 
     // Listen for session status changes
