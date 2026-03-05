@@ -104,12 +104,16 @@ pub fn hook_settings_json(_session_id: Uuid) -> String {
     serde_json::json!({
         "hooks": {
             "UserPromptSubmit": [{
-                "type": "command",
-                "command": working_cmd
+                "hooks": [{
+                    "type": "command",
+                    "command": working_cmd
+                }]
             }],
             "Stop": [{
-                "type": "command",
-                "command": idle_cmd
+                "hooks": [{
+                    "type": "command",
+                    "command": idle_cmd
+                }]
             }],
             "Notification": [{
                 "matcher": "idle_prompt",
@@ -159,6 +163,20 @@ mod tests {
         assert!(hooks.get("UserPromptSubmit").is_some());
         assert!(hooks.get("Stop").is_some());
         assert!(hooks.get("Notification").is_some());
+
+        // Verify new hooks format: each event entry must have a nested "hooks" array
+        for event_name in &["UserPromptSubmit", "Stop", "Notification"] {
+            let entries = hooks.get(*event_name).unwrap().as_array().unwrap();
+            for entry in entries {
+                assert!(
+                    entry.get("hooks").is_some(),
+                    "{} entry missing nested 'hooks' array",
+                    event_name
+                );
+                let inner = entry.get("hooks").unwrap().as_array().unwrap();
+                assert!(!inner.is_empty(), "{} has empty hooks array", event_name);
+            }
+        }
     }
 
     #[test]
