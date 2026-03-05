@@ -296,6 +296,13 @@
           dispatchAction({ type: "create-session", projectId: currentFocus.projectId });
         }
         return true;
+      case "x":
+        if (currentFocus?.type === "project") {
+          dispatchAction({ type: "create-session", projectId: currentFocus.projectId, kind: "codex" });
+        } else if (currentFocus?.type === "session") {
+          dispatchAction({ type: "create-session", projectId: currentFocus.projectId, kind: "codex" });
+        }
+        return true;
       case "m":
         if (currentFocus?.type === "session") {
           dispatchAction({ type: "merge-session", sessionId: currentFocus.sessionId, projectId: currentFocus.projectId });

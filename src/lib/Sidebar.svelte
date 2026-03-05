@@ -128,7 +128,7 @@
             : (projectList.find((p) =>
                 p.sessions.some((s) => s.id === activeSession),
               ) ?? projectList[0]);
-          if (project) createSession(project.id);
+          if (project) createSession(project.id, action.kind);
           break;
         }
         case "delete-session": {
@@ -300,10 +300,11 @@
     expandedProjects.set(next);
   }
 
-  async function createSession(projectId: string) {
+  async function createSession(projectId: string, kind?: string) {
     try {
       const sessionId: string = await invoke("create_session", {
         projectId,
+        kind: kind ?? "claude",
       });
       markSession(sessionId, "working");
       activeSessionId.set(sessionId);

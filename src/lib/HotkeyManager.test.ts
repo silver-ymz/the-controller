@@ -567,6 +567,33 @@ describe('HotkeyManager', () => {
       expect(captured).toEqual({ type: 'create-session', projectId: 'proj-1' });
       unsub();
     });
+
+    it('x on project dispatches create-session with kind codex', () => {
+      focusTarget.set({ type: 'project', projectId: 'proj-1' });
+      let captured: any = null;
+      const unsub = hotkeyAction.subscribe((v) => { captured = v; });
+      pressKey('x');
+      expect(captured).toEqual({ type: 'create-session', projectId: 'proj-1', kind: 'codex' });
+      unsub();
+    });
+
+    it('x on session dispatches create-session with kind codex for that project', () => {
+      focusTarget.set({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
+      let captured: any = null;
+      const unsub = hotkeyAction.subscribe((v) => { captured = v; });
+      pressKey('x');
+      expect(captured).toEqual({ type: 'create-session', projectId: 'proj-1', kind: 'codex' });
+      unsub();
+    });
+
+    it('x with no focus does nothing', () => {
+      focusTarget.set(null);
+      let captured: any = null;
+      const unsub = hotkeyAction.subscribe((v) => { captured = v; });
+      pressKey('x');
+      expect(captured).toBeNull();
+      unsub();
+    });
   });
 
   // ── Input field passthrough ──
