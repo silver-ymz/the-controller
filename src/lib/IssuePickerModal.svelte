@@ -23,7 +23,7 @@
   let error: string | null = $state(null);
   let selectedIndex = $state(0);
 
-  // Total items: "No issue" (index 0) + issues
+  // Total items: issues + "No issue" (last)
   let itemCount = $derived(issues.length + 1);
 
   onMount(() => {
@@ -48,10 +48,10 @@
   });
 
   function confirm() {
-    if (selectedIndex === 0) {
+    if (selectedIndex === issues.length) {
       onSkip();
     } else {
-      onSelect(issues[selectedIndex - 1]);
+      onSelect(issues[selectedIndex]);
     }
   }
 
@@ -96,19 +96,19 @@
       <div class="status error">{error}</div>
     {:else}
       <ul class="issue-list">
-        <li>
-          <button class="issue-btn no-issue" class:selected={selectedIndex === 0} onclick={onSkip}>
-            No issue
-          </button>
-        </li>
         {#each issues as issue, i}
           <li>
-            <button class="issue-btn" class:selected={selectedIndex === i + 1} onclick={() => onSelect(issue)}>
+            <button class="issue-btn" class:selected={selectedIndex === i} onclick={() => onSelect(issue)}>
               <span class="issue-number">#{issue.number}</span>
               <span class="issue-title">{issue.title}</span>
             </button>
           </li>
         {/each}
+        <li>
+          <button class="issue-btn no-issue" class:selected={selectedIndex === issues.length} onclick={onSkip}>
+            No issue
+          </button>
+        </li>
       </ul>
     {/if}
   </div>
