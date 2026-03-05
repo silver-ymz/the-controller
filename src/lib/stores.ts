@@ -23,7 +23,8 @@ export interface Config {
 
 export const projects = writable<Project[]>([]);
 export const activeSessionId = writable<string | null>(null);
-export const sessionStatuses = writable<Map<string, "running" | "idle">>(new Map());
+export type SessionStatus = "working" | "idle" | "exited";
+export const sessionStatuses = writable<Map<string, SessionStatus>>(new Map());
 export const appConfig = writable<Config | null>(null);
 export const onboardingComplete = writable<boolean>(false);
 
