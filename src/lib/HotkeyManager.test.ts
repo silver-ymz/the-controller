@@ -577,20 +577,29 @@ describe('HotkeyManager', () => {
       unsub();
     });
 
-    it('x on project dispatches create-session with kind codex', () => {
+    it('x on project dispatches pick-issue-for-session with kind codex', () => {
       focusTarget.set({ type: 'project', projectId: 'proj-1' });
       let captured: any = null;
       const unsub = hotkeyAction.subscribe((v) => { captured = v; });
       pressKey('x');
-      expect(captured).toEqual({ type: 'create-session', projectId: 'proj-1', kind: 'codex' });
+      expect(captured).toEqual({ type: 'pick-issue-for-session', projectId: 'proj-1', repoPath: '/tmp/test', kind: 'codex' });
       unsub();
     });
 
-    it('x on session dispatches create-session with kind codex for that project', () => {
+    it('x on session dispatches pick-issue-for-session with kind codex for that project', () => {
       focusTarget.set({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
       let captured: any = null;
       const unsub = hotkeyAction.subscribe((v) => { captured = v; });
       pressKey('x');
+      expect(captured).toEqual({ type: 'pick-issue-for-session', projectId: 'proj-1', repoPath: '/tmp/test', kind: 'codex' });
+      unsub();
+    });
+
+    it('X on project dispatches create-session with kind codex (raw)', () => {
+      focusTarget.set({ type: 'project', projectId: 'proj-1' });
+      let captured: any = null;
+      const unsub = hotkeyAction.subscribe((v) => { captured = v; });
+      pressKey('X');
       expect(captured).toEqual({ type: 'create-session', projectId: 'proj-1', kind: 'codex' });
       unsub();
     });

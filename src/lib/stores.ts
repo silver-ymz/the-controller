@@ -52,7 +52,7 @@ export type HotkeyAction =
   | { type: "unarchive-project"; projectId: string }
   | { type: "toggle-archive-view" }
   | { type: "create-issue"; projectId: string; repoPath: string }
-  | { type: "pick-issue-for-session"; projectId: string; repoPath: string }
+  | { type: "pick-issue-for-session"; projectId: string; repoPath: string; kind?: string }
   | { type: "merge-session"; sessionId: string; projectId: string }
   | null;
 
