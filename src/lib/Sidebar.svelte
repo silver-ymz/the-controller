@@ -51,6 +51,8 @@
   let projectList: Project[] = $state([]);
   let activeSession: string | null = $state(null);
   let statuses: Map<string, SessionStatus> = $state(new Map());
+  const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const IDLE_DEBOUNCE_MS = 1500;
 
   $effect(() => {
     const unsub = projects.subscribe((value) => { projectList = value; });
@@ -253,11 +255,22 @@
           markSession(session.id, "exited");
         }).then(unlisten => { if (!cancelled) unlisteners.push(unlisten); else unlisten(); });
 
-        // Hook-based status: precise idle/working from Claude Code hooks
+        // Hook-based status: precise idle/working from Claude Code hooks.
+        // Debounce idle transitions to avoid flickering between tool calls
+        // (Stop hook fires after each assistant turn, even mid-task).
         listen<string>(`session-status-hook:${session.id}`, (event) => {
           const status = event.payload as SessionStatus;
-          if (status === "working" || status === "idle") {
-            markSession(session.id, status);
+          if (status === "working") {
+            const pending = idleTimers.get(session.id);
+            if (pending) { clearTimeout(pending); idleTimers.delete(session.id); }
+            markSession(session.id, "working");
+          } else if (status === "idle") {
+            const pending = idleTimers.get(session.id);
+            if (pending) clearTimeout(pending);
+            idleTimers.set(session.id, setTimeout(() => {
+              idleTimers.delete(session.id);
+              markSession(session.id, "idle");
+            }, IDLE_DEBOUNCE_MS));
           }
         }).then(unlisten => { if (!cancelled) unlisteners.push(unlisten); else unlisten(); });
       }
@@ -266,6 +279,8 @@
     return () => {
       cancelled = true;
       unlisteners.forEach(fn => fn());
+      for (const timer of idleTimers.values()) clearTimeout(timer);
+      idleTimers.clear();
     };
   });
 
@@ -339,6 +354,8 @@
       const nextFocus = focusAfterSessionDelete(list, projectId, sessionId, isArchiveView);
 
       await invoke("close_session", { projectId, sessionId, deleteWorktree });
+      const closeTimer = idleTimers.get(sessionId);
+      if (closeTimer) { clearTimeout(closeTimer); idleTimers.delete(sessionId); }
       sessionStatuses.update(m => {
         const next = new Map(m);
         next.delete(sessionId);
@@ -366,6 +383,8 @@
       const prevSession = idx > 0 ? activeSessions[idx - 1] : null;
 
       await invoke("archive_session", { projectId, sessionId });
+      const archiveTimer = idleTimers.get(sessionId);
+      if (archiveTimer) { clearTimeout(archiveTimer); idleTimers.delete(sessionId); }
       sessionStatuses.update(m => {
         const next = new Map(m);
         next.delete(sessionId);
