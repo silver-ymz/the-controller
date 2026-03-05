@@ -44,7 +44,7 @@ impl TmuxManager {
             args.push("--settings");
             args.push(&settings_json);
             if let Some(prompt) = initial_prompt {
-                args.push("--prompt");
+                args.push("--append-system-prompt");
                 args.push(prompt);
             }
         }
