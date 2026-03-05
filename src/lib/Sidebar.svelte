@@ -111,28 +111,6 @@
     return generateJumpLabels(list.length);
   });
 
-  let sessionJumpLabels = $derived.by(() => {
-    const js = jumpState;
-    if (!js || js.phase !== 'session') return [];
-    const list = isArchiveView ? archivedProjectList : projectList;
-    const project = list.find(p => p.id === js.projectId);
-    if (!project) return [];
-    const sessions = isArchiveView
-      ? project.sessions.filter(s => s.archived)
-      : project.sessions.filter(s => !s.archived);
-    // In archive view, no "create new" option
-    return generateJumpLabels(isArchiveView ? sessions.length : sessions.length + 1);
-  });
-
-  // Auto-expand project when entering session jump phase
-  $effect(() => {
-    if (jumpState?.phase === 'session' && !expandedProjectSet.has(jumpState.projectId)) {
-      const next = new Set(expandedProjectSet);
-      next.add(jumpState.projectId);
-      expandedProjects.set(next);
-    }
-  });
-
   // React to hotkey actions
   $effect(() => {
     const unsub = hotkeyAction.subscribe((action) => {
@@ -150,7 +128,7 @@
             : (projectList.find((p) =>
                 p.sessions.some((s) => s.id === activeSession),
               ) ?? projectList[0]);
-          if (project) createSession(project.id);
+          if (project) createSession(project.id, action.kind);
           break;
         }
         case "delete-session": {
@@ -322,10 +300,11 @@
     expandedProjects.set(next);
   }
 
-  async function createSession(projectId: string) {
+  async function createSession(projectId: string, kind?: string) {
     try {
       const sessionId: string = await invoke("create_session", {
         projectId,
+        kind: kind ?? "claude",
       });
       markSession(sessionId, "working");
       activeSessionId.set(sessionId);
@@ -504,9 +483,6 @@
                 >
                   <span class="status-dot archived-dot">&cir;</span>
                   <span class="session-label">{session.label}</span>
-                  {#if jumpState?.phase === 'session' && jumpState.projectId === project.id && sessionJumpLabels[sessionIdx]}
-                    <kbd class="jump-label">{sessionJumpLabels[sessionIdx]}</kbd>
-                  {/if}
                 </div>
               {/each}
             </div>
@@ -562,18 +538,8 @@
                   {#if session.github_issue}
                     <span class="issue-badge">#{session.github_issue.number}</span>
                   {/if}
-                  {#if jumpState?.phase === 'session' && jumpState.projectId === project.id && sessionJumpLabels[sessionIdx]}
-                    <kbd class="jump-label">{sessionJumpLabels[sessionIdx]}</kbd>
-                  {/if}
                 </div>
               {/each}
-              {#if jumpState?.phase === 'session' && jumpState.projectId === project.id}
-                <div class="session-item create-option">
-                  <span class="status-dot">+</span>
-                  <span class="session-label">New session</span>
-                  <kbd class="jump-label">{sessionJumpLabels[activeSessions.length]}</kbd>
-                </div>
-              {/if}
             </div>
           {/if}
         </div>
