@@ -6,6 +6,7 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { makeCustomKeyHandler } from "./terminal-keys";
   import { clipboardHasImage } from "./clipboard";
+  import { activeSessionId } from "./stores";
   import "@xterm/xterm/css/xterm.css";
 
   interface Props {
@@ -131,8 +132,14 @@
       unlistenStatus = fn;
     });
 
-    // Listen for drag-and-drop file events (from Finder)
+    // Listen for drag-and-drop file events (from Finder).
+    // Gate on active session — this is a window-level event so all
+    // mounted Terminal instances receive it; only the active one should act.
     listen<{ paths: string[] }>("tauri://drag-drop", async (event) => {
+      let active: string | null = null;
+      activeSessionId.subscribe((v) => { active = v; })();
+      if (active !== sessionId) return;
+
       const imagePath = event.payload.paths.find(isImageFile);
       if (imagePath) {
         try {
