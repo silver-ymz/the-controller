@@ -91,14 +91,14 @@ fn handle_connection(stream: UnixStream, app_handle: &AppHandle) {
 
 /// Generate a JSON settings string for Claude Code's `--settings` flag.
 /// Configures hooks that report session status changes over the Unix socket.
-pub fn hook_settings_json(_session_id: Uuid) -> String {
+pub fn hook_settings_json(session_id: Uuid) -> String {
     let working_cmd = format!(
-        "echo \"working:$THE_CONTROLLER_SESSION_ID\" | nc -U -w 2 {} 2>/dev/null; true",
-        SOCKET_PATH
+        "echo \"working:{}\" | nc -U -w 2 {} 2>/dev/null; true",
+        session_id, SOCKET_PATH
     );
     let idle_cmd = format!(
-        "echo \"idle:$THE_CONTROLLER_SESSION_ID\" | nc -U -w 2 {} 2>/dev/null; true",
-        SOCKET_PATH
+        "echo \"idle:{}\" | nc -U -w 2 {} 2>/dev/null; true",
+        session_id, SOCKET_PATH
     );
 
     serde_json::json!({
@@ -219,6 +219,25 @@ mod tests {
     #[test]
     fn test_socket_path_returns_expected() {
         assert_eq!(socket_path(), "/tmp/the-controller.sock");
+    }
+
+    #[test]
+    fn test_hook_commands_contain_hardcoded_session_id() {
+        let id = uuid::Uuid::new_v4();
+        let json = hook_settings_json(id);
+        let id_str = id.to_string();
+        assert!(
+            json.contains(&format!("working:{}", id_str)),
+            "hook commands must contain hardcoded session UUID, not env var"
+        );
+        assert!(
+            json.contains(&format!("idle:{}", id_str)),
+            "hook commands must contain hardcoded session UUID, not env var"
+        );
+        assert!(
+            !json.contains("$THE_CONTROLLER_SESSION_ID"),
+            "hook commands must not rely on env var (not available in tmux sessions)"
+        );
     }
 
     #[test]
