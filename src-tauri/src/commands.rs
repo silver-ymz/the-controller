@@ -427,6 +427,7 @@ pub fn create_session(
             kind: kind.clone(),
             github_issue,
             initial_prompt: initial_prompt.clone(),
+            done_commits: vec![],
         };
         project.sessions.push(session_config);
         storage.save_project(&project).map_err(|e| e.to_string())?;
@@ -1285,11 +1286,7 @@ unsafe fn macos_window_number(ns_view: *mut std::ffi::c_void) -> isize {
     objc_msgSend(ns_window, sel_number) as isize
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CommitInfo {
-    pub hash: String,
-    pub message: String,
-}
+use crate::models::CommitInfo;
 
 #[tauri::command]
 pub fn get_session_commits(
@@ -1311,18 +1308,41 @@ pub fn get_session_commits(
 
     let worktree_path = match &session.worktree_path {
         Some(p) => p.clone(),
-        None => return Ok(vec![]),
+        None => return Ok(session.done_commits.clone()),
     };
 
-    let repo = git2::Repository::discover(&worktree_path)
+    // Discover new commits on the branch that aren't on main
+    let new_commits = discover_branch_commits(&worktree_path).unwrap_or_default();
+
+    // Merge with previously stored commits (new first, then stored, dedup by hash)
+    let mut seen = std::collections::HashSet::new();
+    let mut all_commits = Vec::new();
+    for c in new_commits.iter().chain(session.done_commits.iter()) {
+        if seen.insert(c.hash.clone()) {
+            all_commits.push(c.clone());
+        }
+    }
+
+    // Persist if we found new commits
+    if all_commits.len() > session.done_commits.len() {
+        let mut project = project.clone();
+        if let Some(s) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
+            s.done_commits = all_commits.clone();
+        }
+        let _ = storage.save_project(&project);
+    }
+
+    Ok(all_commits)
+}
+
+/// Walk commits on the worktree branch that aren't on the main branch.
+fn discover_branch_commits(worktree_path: &str) -> Result<Vec<CommitInfo>, String> {
+    let repo = git2::Repository::discover(worktree_path)
         .map_err(|e| format!("Failed to open repo: {e}"))?;
 
-    // Walk commits on the session branch that aren't on the main branch.
-    // The session branch name matches the session label.
     let head = repo.head().map_err(|e| format!("No HEAD: {e}"))?;
     let head_commit = head.peel_to_commit().map_err(|e| e.to_string())?;
 
-    // Find the merge base with the default branch (master or main)
     let main_oid = find_main_branch_oid(&repo);
 
     let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
@@ -1332,7 +1352,6 @@ pub fn get_session_commits(
     let mut commits = Vec::new();
     for oid in revwalk {
         let oid = oid.map_err(|e| e.to_string())?;
-        // Stop at merge base (commits shared with main)
         if let Some(main) = main_oid {
             if oid == main {
                 break;
@@ -1345,7 +1364,6 @@ pub fn get_session_commits(
         }
         let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
         let message = commit.summary().unwrap_or("").to_string();
-        // Skip the initial worktree commit
         if message.starts_with("Initial commit") {
             continue;
         }
@@ -1431,6 +1449,7 @@ mod tests {
                 kind: "claude".to_string(),
                 github_issue: None,
                 initial_prompt: None,
+                done_commits: vec![],
             },
             SessionConfig {
                 id: Uuid::new_v4(),
@@ -1441,6 +1460,7 @@ mod tests {
                 kind: "claude".to_string(),
                 github_issue: None,
                 initial_prompt: None,
+                done_commits: vec![],
             },
         ];
         assert_eq!(next_session_label(&sessions), "session-3");
@@ -1459,6 +1479,7 @@ mod tests {
                 kind: "claude".to_string(),
                 github_issue: None,
                 initial_prompt: None,
+                done_commits: vec![],
             },
             SessionConfig {
                 id: Uuid::new_v4(),
@@ -1469,6 +1490,7 @@ mod tests {
                 kind: "claude".to_string(),
                 github_issue: None,
                 initial_prompt: None,
+                done_commits: vec![],
             },
             SessionConfig {
                 id: Uuid::new_v4(),
@@ -1479,6 +1501,7 @@ mod tests {
                 kind: "claude".to_string(),
                 github_issue: None,
                 initial_prompt: None,
+                done_commits: vec![],
             },
         ];
         // Max is session-3, so next is session-4
@@ -1497,6 +1520,7 @@ mod tests {
             kind: "claude".to_string(),
             github_issue: None,
             initial_prompt: None,
+            done_commits: vec![],
         }];
         assert_eq!(next_session_label(&sessions), "session-4");
     }
