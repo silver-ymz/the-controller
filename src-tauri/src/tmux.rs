@@ -124,6 +124,28 @@ impl TmuxManager {
         Ok(())
     }
 
+    /// Query the current window dimensions of a tmux session.
+    /// Returns `(cols, rows)` or `None` if the query fails.
+    pub fn session_size(session_id: Uuid) -> Option<(u16, u16)> {
+        let name = Self::session_name(session_id);
+        let output = Command::new(TMUX_BIN)
+            .args(["display-message", "-t", &name, "-p", "#{window_width} #{window_height}"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let parts: Vec<&str> = text.trim().split_whitespace().collect();
+        if parts.len() == 2 {
+            let cols = parts[0].parse::<u16>().ok()?;
+            let rows = parts[1].parse::<u16>().ok()?;
+            Some((cols, rows))
+        } else {
+            None
+        }
+    }
+
     pub fn resize_session(session_id: Uuid, cols: u16, rows: u16) -> Result<(), String> {
         let name = Self::session_name(session_id);
         let output = Command::new(TMUX_BIN)
@@ -171,6 +193,12 @@ mod tests {
     fn test_has_session_returns_false_for_nonexistent() {
         let id = Uuid::new_v4();
         assert!(!TmuxManager::has_session(id));
+    }
+
+    #[test]
+    fn test_session_size_returns_none_for_nonexistent() {
+        let id = Uuid::new_v4();
+        assert!(TmuxManager::session_size(id).is_none());
     }
 
     #[test]

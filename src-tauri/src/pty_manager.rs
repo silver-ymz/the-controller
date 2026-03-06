@@ -155,11 +155,15 @@ impl PtyManager {
     ) -> Result<(), String> {
         let tmux_name = TmuxManager::session_name(session_id);
 
+        // Use the tmux session's current dimensions so the attach doesn't
+        // force a resize (which causes TUI glitches like garbled input).
+        let (cols, rows) = TmuxManager::session_size(session_id).unwrap_or((80, 24));
+
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
-                rows: 24,
-                cols: 80,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
