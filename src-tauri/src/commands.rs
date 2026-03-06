@@ -817,8 +817,7 @@ fn extract_github_repo(repo_path: &str) -> Result<String, String> {
     parse_github_nwo(url)
 }
 
-#[tauri::command]
-pub async fn list_github_issues(repo_path: String) -> Result<Vec<crate::models::GithubIssue>, String> {
+pub(crate) async fn fetch_github_issues(repo_path: String) -> Result<Vec<crate::models::GithubIssue>, String> {
     let repo_path_clone = repo_path.clone();
     let nwo = tokio::task::spawn_blocking(move || extract_github_repo(&repo_path_clone))
         .await
@@ -848,6 +847,49 @@ pub async fn list_github_issues(repo_path: String) -> Result<Vec<crate::models::
 }
 
 #[tauri::command]
+pub async fn list_github_issues(
+    repo_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::models::GithubIssue>, String> {
+    // Check cache (lock is dropped at end of block before any .await)
+    let cache_result = {
+        let cache = state.issue_cache.lock().map_err(|e| format!("Cache lock error: {}", e))?;
+        match cache.get(&repo_path) {
+            Some(entry) if entry.is_fresh() => {
+                return Ok(entry.issues.clone());
+            }
+            Some(entry) => {
+                // Stale hit: return stale data and refresh in background
+                Some(entry.issues.clone())
+            }
+            None => None,
+        }
+    };
+
+    if let Some(stale_issues) = cache_result {
+        // Spawn background refresh
+        let cache_arc = state.issue_cache.clone();
+        let repo_path_bg = repo_path.clone();
+        tokio::spawn(async move {
+            if let Ok(fresh_issues) = fetch_github_issues(repo_path_bg.clone()).await {
+                if let Ok(mut cache) = cache_arc.lock() {
+                    cache.insert(repo_path_bg, fresh_issues);
+                }
+            }
+        });
+        return Ok(stale_issues);
+    }
+
+    // Cache miss: fetch, cache, and return
+    let issues = fetch_github_issues(repo_path.clone()).await?;
+    {
+        let mut cache = state.issue_cache.lock().map_err(|e| format!("Cache lock error: {}", e))?;
+        cache.insert(repo_path, issues.clone());
+    }
+    Ok(issues)
+}
+
+#[tauri::command]
 pub async fn generate_issue_body(title: String) -> Result<String, String> {
     let prompt = format!(
         "Write a concise GitHub issue body for an issue titled: \"{}\". \
@@ -871,6 +913,7 @@ pub async fn generate_issue_body(title: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn create_github_issue(
+    state: State<'_, AppState>,
     repo_path: String,
     title: String,
     body: String,
@@ -902,12 +945,18 @@ pub async fn create_github_issue(
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let number = parse_github_issue_url(&url)?;
 
-    Ok(crate::models::GithubIssue {
+    let issue = crate::models::GithubIssue {
         number,
         title,
         url,
         labels: vec![],
-    })
+    };
+
+    if let Ok(mut cache) = state.issue_cache.lock() {
+        cache.add_issue(&repo_path, issue.clone());
+    }
+
+    Ok(issue)
 }
 
 #[tauri::command]
@@ -942,6 +991,7 @@ pub async fn post_github_comment(
 
 #[tauri::command]
 pub async fn add_github_label(
+    state: State<'_, AppState>,
     repo_path: String,
     issue_number: u64,
     label: String,
@@ -980,11 +1030,16 @@ pub async fn add_github_label(
         return Err(format!("gh issue edit failed: {}", stderr));
     }
 
+    if let Ok(mut cache) = state.issue_cache.lock() {
+        cache.add_label(&repo_path, issue_number, &label);
+    }
+
     Ok(())
 }
 
 #[tauri::command]
 pub async fn remove_github_label(
+    state: State<'_, AppState>,
     repo_path: String,
     issue_number: u64,
     label: String,
@@ -1008,6 +1063,10 @@ pub async fn remove_github_label(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("gh issue edit failed: {}", stderr));
+    }
+
+    if let Ok(mut cache) = state.issue_cache.lock() {
+        cache.remove_label(&repo_path, issue_number, &label);
     }
 
     Ok(())
