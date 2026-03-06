@@ -67,7 +67,7 @@ export const expandedProjects = writable<Set<string>>(new Set());
 
 // Focus tracking — granular: which element is focused
 export type FocusTarget =
-  | { type: "terminal" }
+  | { type: "terminal"; projectId: string }
   | { type: "session"; sessionId: string; projectId: string }
   | { type: "project"; projectId: string }
   | null;

@@ -42,7 +42,9 @@
       ? currentFocus.projectId
       : currentFocus?.type === "session"
         ? currentFocus.projectId
-        : null;
+        : currentFocus?.type === "terminal"
+          ? currentFocus.projectId
+          : null;
 
     const project = projectId
       ? projectList.find((p) => p.id === projectId)

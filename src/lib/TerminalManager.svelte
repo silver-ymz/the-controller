@@ -38,7 +38,12 @@
   });
 
   function handleFocusIn() {
-    focusTarget.set({ type: "terminal" });
+    const project = activeSession
+      ? projectList.find((p) => p.sessions.some((s) => s.id === activeSession))
+      : null;
+    if (project) {
+      focusTarget.set({ type: "terminal", projectId: project.id });
+    }
   }
 
   let allSessionIds: string[] = $derived(
