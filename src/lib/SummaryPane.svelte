@@ -113,20 +113,20 @@
   .summary-pane {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 8px 12px;
+    gap: 12px;
+    padding: 24px 36px;
     background: #181825;
     border-bottom: 1px solid #313244;
-    font-size: 12px;
+    font-size: 36px;
     flex-shrink: 0;
-    max-height: 360px;
+    max-height: 1080px;
     overflow-y: auto;
   }
 
   .summary-row {
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: 24px;
     min-width: 0;
   }
 
@@ -137,10 +137,10 @@
   .label {
     color: #6c7086;
     font-weight: 600;
-    font-size: 10px;
-    letter-spacing: 0.5px;
+    font-size: 30px;
+    letter-spacing: 1.5px;
     flex-shrink: 0;
-    width: 42px;
+    width: 126px;
   }
 
   .value {
@@ -149,9 +149,8 @@
   }
 
   .prompt-text {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    word-wrap: break-word;
   }
 
   .muted {
@@ -169,21 +168,20 @@
   .commit-item {
     display: flex;
     align-items: baseline;
-    gap: 6px;
+    gap: 18px;
     line-height: 1.5;
   }
 
   .commit-hash {
     color: #89b4fa;
     font-family: monospace;
-    font-size: 11px;
+    font-size: 33px;
     flex-shrink: 0;
   }
 
   .commit-msg {
     color: #cdd6f4;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    word-wrap: break-word;
   }
 </style>
