@@ -14,13 +14,15 @@ Run the project's test suite. If tests fail, fix them before proceeding.
 1. Ensure all changes are committed before proceeding
 2. Rebase onto `master`
 3. Create a PR to `master`
-4. Squash merge the PR and delete the remote branch:
+4. Squash merge the PR (without `--delete-branch` to avoid worktree checkout errors):
    ```bash
-   # Use --squash and --delete-branch, but do NOT let gh try to checkout master locally
-   gh pr merge --squash --delete-branch
+   gh pr merge --squash
    ```
-   **Worktree note:** If this errors with "'master' is already used by worktree", the merge still succeeded on GitHub. The error is just the local checkout step — ignore it and proceed to step 5.
-5. Sync local master:
+5. Delete the remote branch:
+   ```bash
+   git push origin --delete "$(git branch --show-current)"
+   ```
+6. Sync local master:
    ```bash
    # Find where master is checked out and pull there directly
    master_worktree=$(git worktree list | grep '\[master\]' | awk '{print $1}')
@@ -30,8 +32,8 @@ Run the project's test suite. If tests fail, fix them before proceeding.
      git fetch origin master:master
    fi
    ```
-6. Close the associated issue with a summary of what was done
-7. If running inside The Controller (i.e. `$THE_CONTROLLER_SESSION_ID` is set), signal it to clean up this session's worktree:
+7. Close the associated issue with a summary of what was done
+8. If running inside The Controller (i.e. `$THE_CONTROLLER_SESSION_ID` is set), signal it to clean up this session's worktree:
    ```bash
    echo "cleanup:$THE_CONTROLLER_SESSION_ID" | nc -U -w 2 /tmp/the-controller.sock 2>/dev/null; true
    ```
