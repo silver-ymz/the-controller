@@ -36,12 +36,11 @@ pub fn build_session_args(
 ) -> Vec<String> {
     let mut args = Vec::new();
 
-    if continue_session {
-        args.push("--continue".to_string());
-    }
-
     match command {
         "claude" => {
+            if continue_session {
+                args.push("--continue".to_string());
+            }
             let settings_json = crate::status_socket::hook_settings_json(session_id);
             args.push("--settings".to_string());
             args.push(settings_json);
@@ -51,9 +50,17 @@ pub fn build_session_args(
             }
         }
         "codex" => {
+            if continue_session {
+                args.push("resume".to_string());
+                args.push("--last".to_string());
+            }
             args.extend(CODEX_FULL_PERMISSION_ARGS.iter().map(|s| s.to_string()));
         }
-        _ => {}
+        _ => {
+            if continue_session {
+                args.push("--continue".to_string());
+            }
+        }
     }
 
     // Positional prompt (must come after all flags) so the assistant
@@ -85,13 +92,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_args_preserve_continue_flag() {
+    fn codex_args_use_resume_subcommand() {
         let session_id = Uuid::new_v4();
         let args = build_session_args("codex", session_id, true, None);
         assert_eq!(
             args,
             vec![
-                "--continue".to_string(),
+                "resume".to_string(),
+                "--last".to_string(),
                 "--sandbox".to_string(),
                 "danger-full-access".to_string(),
                 "--ask-for-approval".to_string(),
