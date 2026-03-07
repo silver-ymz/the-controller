@@ -22,11 +22,12 @@ Run the project's test suite. If tests fail, fix them before proceeding.
    **Worktree note:** If this errors with "'master' is already used by worktree", the merge still succeeded on GitHub. The error is just the local checkout step — ignore it and proceed to step 5.
 5. Sync local master:
    ```bash
-   git fetch origin master:master
-   # If master is checked out in another worktree, update that working tree too
+   # Find where master is checked out and pull there directly
    master_worktree=$(git worktree list | grep '\[master\]' | awk '{print $1}')
    if [ -n "$master_worktree" ]; then
-     git -C "$master_worktree" reset --hard master
+     git -C "$master_worktree" pull origin master
+   else
+     git fetch origin master:master
    fi
    ```
 6. Close the associated issue with a summary of what was done
