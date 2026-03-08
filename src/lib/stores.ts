@@ -22,11 +22,16 @@ export interface SessionConfig {
   kind: string;
   github_issue: GithubIssue | null;
   initial_prompt: string | null;
+  auto_worker_session: boolean;
 }
 
 export interface MaintainerConfig {
   enabled: boolean;
   interval_minutes: number;
+}
+
+export interface AutoWorkerConfig {
+  enabled: boolean;
 }
 
 export interface MaintainerFinding {
@@ -55,6 +60,7 @@ export interface Project {
   archived: boolean;
   sessions: SessionConfig[];
   maintainer: MaintainerConfig;
+  auto_worker: AutoWorkerConfig;
 }
 
 export interface Config {
@@ -69,6 +75,14 @@ export const appConfig = writable<Config | null>(null);
 export const onboardingComplete = writable<boolean>(false);
 export const maintainerStatuses = writable<Map<string, MaintainerStatus>>(new Map());
 export const maintainerPanelVisible = writable<boolean>(false);
+
+export type AutoWorkerStatus = {
+  status: "idle" | "working";
+  message?: string;
+  issue_number?: number;
+  issue_title?: string;
+};
+export const autoWorkerStatuses = writable<Map<string, AutoWorkerStatus>>(new Map());
 
 // Hotkey state
 export type TriageCategory = "untriaged" | "triaged";
@@ -93,6 +107,7 @@ export type HotkeyAction =
   | { type: "screenshot-to-session"; preview?: boolean; cropped?: boolean }
   | { type: "toggle-maintainer-panel" }
   | { type: "toggle-maintainer-enabled" }
+  | { type: "toggle-auto-worker-enabled" }
   | { type: "toggle-triage-panel"; category?: TriageCategory }
   | { type: "trigger-maintainer-check" }
   | { type: "clear-maintainer-reports" }

@@ -178,6 +178,7 @@ pub fn create_project(
         created_at: chrono::Utc::now().to_rfc3339(),
         archived: false,
         maintainer: crate::models::MaintainerConfig::default(),
+        auto_worker: crate::models::AutoWorkerConfig::default(),
         sessions: vec![],
     };
 
@@ -240,6 +241,7 @@ pub fn load_project(
         created_at: chrono::Utc::now().to_rfc3339(),
         archived: false,
         maintainer: crate::models::MaintainerConfig::default(),
+        auto_worker: crate::models::AutoWorkerConfig::default(),
         sessions: vec![],
     };
 
@@ -482,6 +484,7 @@ pub fn create_session(
             github_issue,
             initial_prompt: initial_prompt.clone(),
             done_commits: vec![],
+            auto_worker_session: false,
         };
         project.sessions.push(session_config);
         storage.save_project(&project).map_err(|e| e.to_string())?;
@@ -844,6 +847,7 @@ pub fn scaffold_project(state: State<AppState>, name: String) -> Result<Project,
         created_at: chrono::Utc::now().to_rfc3339(),
         archived: false,
         maintainer: crate::models::MaintainerConfig::default(),
+        auto_worker: crate::models::AutoWorkerConfig::default(),
         sessions: vec![],
     };
     storage.save_project(&project).map_err(|e| e.to_string())?;
@@ -1133,6 +1137,20 @@ pub async fn configure_maintainer(
 }
 
 #[tauri::command]
+pub async fn configure_auto_worker(
+    state: State<'_, AppState>,
+    project_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let storage = state.storage.lock().map_err(|e| e.to_string())?;
+    let mut project = storage.load_project(project_id).map_err(|e| e.to_string())?;
+    project.auto_worker.enabled = enabled;
+    storage.save_project(&project).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_maintainer_status(
     state: State<'_, AppState>,
     project_id: String,
@@ -1281,6 +1299,7 @@ mod tests {
                 github_issue: None,
                 initial_prompt: None,
                 done_commits: vec![],
+                auto_worker_session: false,
             },
             SessionConfig {
                 id: Uuid::new_v4(),
@@ -1292,6 +1311,7 @@ mod tests {
                 github_issue: None,
                 initial_prompt: None,
                 done_commits: vec![],
+                auto_worker_session: false,
             },
         ];
         let label = next_session_label(&sessions);
@@ -1312,6 +1332,7 @@ mod tests {
                 github_issue: None,
                 initial_prompt: None,
                 done_commits: vec![],
+                auto_worker_session: false,
             },
             SessionConfig {
                 id: Uuid::new_v4(),
@@ -1323,6 +1344,7 @@ mod tests {
                 github_issue: None,
                 initial_prompt: None,
                 done_commits: vec![],
+                auto_worker_session: false,
             },
             SessionConfig {
                 id: Uuid::new_v4(),
@@ -1334,6 +1356,7 @@ mod tests {
                 github_issue: None,
                 initial_prompt: None,
                 done_commits: vec![],
+                auto_worker_session: false,
             },
         ];
         // Max is session-3, so next is session-4
@@ -1354,6 +1377,7 @@ mod tests {
             github_issue: None,
             initial_prompt: None,
             done_commits: vec![],
+            auto_worker_session: false,
         }];
         let label = next_session_label(&sessions);
         assert!(label.starts_with("session-4-"), "expected session-4-<uuid>, got {}", label);

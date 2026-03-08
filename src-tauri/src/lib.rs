@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+pub mod auto_worker;
 pub mod commands;
 pub mod config;
 pub mod maintainer;
@@ -23,6 +24,7 @@ pub fn run() {
             skills::sync_skills();
             status_socket::start_listener(app.handle().clone());
             maintainer::MaintainerScheduler::start(app.handle().clone());
+            auto_worker::AutoWorkerScheduler::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -70,6 +72,7 @@ pub fn run() {
             commands::get_maintainer_history,
             commands::trigger_maintainer_check,
             commands::clear_maintainer_reports,
+            commands::configure_auto_worker,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
