@@ -1,6 +1,6 @@
 # Fuzzy Finder & Streamlined UX Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Replace manual path typing with a configured projects root, fuzzy finder modal, LLM-generated project names, and an onboarding flow.
 

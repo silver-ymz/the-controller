@@ -1,6 +1,6 @@
 # Session Status Hooks Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Replace unreliable pty-output debounce with Claude Code hooks communicating via Unix domain socket for precise session status detection.
 

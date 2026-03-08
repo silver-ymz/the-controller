@@ -1,6 +1,6 @@
 # Assign GitHub Issue to Session — Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Let users assign a GitHub issue to a session at creation time, displaying the link in the sidebar and posting a comment on the issue.
 

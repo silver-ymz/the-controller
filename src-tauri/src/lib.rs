@@ -6,6 +6,7 @@ pub mod maintainer;
 pub mod models;
 pub mod pty_manager;
 pub mod session_args;
+pub mod skills;
 pub mod state;
 pub mod status_socket;
 pub mod storage;
@@ -19,6 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state::AppState::new())
         .setup(|app| {
+            skills::sync_skills();
             status_socket::start_listener(app.handle().clone());
             maintainer::MaintainerScheduler::start(app.handle().clone());
             Ok(())

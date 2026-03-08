@@ -1,6 +1,6 @@
 # Focus After Delete Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** After deleting a session or project, move focus to the nearest sibling above in the sidebar.
 

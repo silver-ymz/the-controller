@@ -1,6 +1,6 @@
 # GitHub Task List Panel Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Add a toggleable RHS panel (`t` key) showing open GitHub issues for the focused project.
 

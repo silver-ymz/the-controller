@@ -1,6 +1,6 @@
 # Create GitHub Issue via `i` Key Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Add `i` keybinding that opens a title-only modal, generates an issue body via Claude CLI, creates the issue via `gh`, and optimistically inserts it into the task panel.
 

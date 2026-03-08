@@ -1,6 +1,6 @@
 # Image Paste Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Enable image pasting in the terminal so Claude Code can receive images from the clipboard.
 

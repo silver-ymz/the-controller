@@ -605,8 +605,8 @@
           const { sessionId, kind } = finishBranchTarget;
           const isCodex = kind === "codex";
           const prompt = isCodex
-            ? `$finishing-a-development-branch`
-            : `/finishing-a-development-branch`;
+            ? `$the-controller-finishing-a-development-branch`
+            : `/the-controller-finishing-a-development-branch`;
           if (isCodex) {
             invoke("write_to_pty", { sessionId, data: prompt }).then(() => {
               invoke("write_to_pty", { sessionId, data: "\r" });

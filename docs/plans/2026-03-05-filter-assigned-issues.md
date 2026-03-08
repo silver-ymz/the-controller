@@ -1,6 +1,6 @@
 # Filter Assigned Issues Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Hide issues that are already assigned to a session from the issue picker and task panel, using an `in-progress` GitHub label.
 

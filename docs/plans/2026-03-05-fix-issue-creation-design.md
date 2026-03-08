@@ -1,6 +1,6 @@
 # Fix GitHub Issue Creation Implementation Plan (#31)
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Fix issue creation to be non-blocking and remove the unsupported `--json` flag from `gh issue create`.
 

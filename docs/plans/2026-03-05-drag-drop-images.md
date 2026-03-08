@@ -1,6 +1,6 @@
 # Drag and Drop Images Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Enable dragging image files from Finder into Claude terminal sessions, copying to clipboard and triggering Claude Code's image reader.
 

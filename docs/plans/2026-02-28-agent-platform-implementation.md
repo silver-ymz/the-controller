@@ -1,6 +1,6 @@
 # Agent Platform Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **For Claude:** REQUIRED SUB-SKILL: Use the-controller-executing-plans to implement this plan task-by-task.
 
 **Goal:** Build a Tauri desktop app that manages multiple Claude Code sessions across projects with embedded terminals and a sidebar GUI.
 
