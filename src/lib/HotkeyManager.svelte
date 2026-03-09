@@ -10,7 +10,8 @@
     JUMP_KEYS,
     sidebarVisible,
 
-    maintainerPanelVisible,
+    workspaceMode,
+    workspaceModePickerVisible,
     archiveView,
     archivedProjects,
     focusTarget,
@@ -35,6 +36,9 @@
   // Toggle mode state (o prefix)
   let toggleModeActive = $state(false);
 
+  // Workspace mode state (Space prefix)
+  let workspaceModeActive = $state(false);
+
   const projectsState = fromStore(projects);
   let projectList: Project[] = $derived(projectsState.current);
   const activeSessionIdState = fromStore(activeSessionId);
@@ -47,9 +51,9 @@
   let archivedProjectList: Project[] = $derived(archivedProjectsState.current);
   const expandedProjectsState = fromStore(expandedProjects);
   let expandedSet: Set<string> = $derived(expandedProjectsState.current);
-  const maintainerPanelVisibleState = fromStore(maintainerPanelVisible);
-  let isMaintainerPanelVisible = $derived(maintainerPanelVisibleState.current);
-  const keyMap = buildKeyMap();
+  const workspaceModeState = fromStore(workspaceMode);
+  let currentMode = $derived(workspaceModeState.current);
+  let keyMap = $derived(buildKeyMap(currentMode));
 
   // Detect if a terminal (xterm) has focus
   function isTerminalFocused(): boolean {
@@ -158,6 +162,20 @@
     // Any other key (including Escape) cancels toggle mode
   }
 
+  function handleWorkspaceModeKey(key: string) {
+    workspaceModeActive = false;
+    workspaceModePickerVisible.set(false);
+    if (key === "d") {
+      workspaceMode.set("development");
+      return;
+    }
+    if (key === "a") {
+      workspaceMode.set("agents");
+      return;
+    }
+    // Any other key (including Escape) cancels
+  }
+
   type SidebarItem =
     | { type: "project"; projectId: string }
     | { type: "session"; sessionId: string; projectId: string };
@@ -216,9 +234,6 @@
     if (currentFocus?.type === "project" || currentFocus?.type === "session") {
       return projectList.find((p) => p.id === currentFocus.projectId) ?? null;
     }
-    if (currentFocus?.type === "maintainer" && activeId) {
-      return projectList.find((p) => p.sessions.some((s) => s.id === activeId)) ?? null;
-    }
     return null;
   }
 
@@ -272,12 +287,6 @@
   }
 
   function handleHotkey(key: string): boolean {
-    // Context-sensitive override: c clears reports when maintainer panel is open
-    if (key === "c" && isMaintainerPanelVisible) {
-      dispatchAction({ type: "clear-maintainer-reports" });
-      return true;
-    }
-
     const id = keyMap.get(key);
     if (id === undefined) return false;
 
@@ -362,17 +371,17 @@
       case "toggle-mode":
         toggleModeActive = true;
         return true;
-      case "trigger-maintainer-check":
-        if (isMaintainerPanelVisible) {
-          dispatchAction({ type: "trigger-maintainer-check" });
-          return true;
-        }
-        return false;
-      case "toggle-maintainer-panel":
-        dispatchAction({ type: "toggle-maintainer-panel" });
+      case "toggle-agent":
+        dispatchAction({ type: "toggle-auto-worker-enabled" });
+        return true;
+      case "trigger-agent-check":
+        dispatchAction({ type: "trigger-maintainer-check" });
         return true;
       case "toggle-help":
         dispatchAction({ type: "toggle-help" });
+        return true;
+      case "clear-agent-reports":
+        dispatchAction({ type: "clear-maintainer-reports" });
         return true;
       default: {
         const _exhaustive: never = id;
@@ -425,6 +434,15 @@
       return;
     }
 
+    // Workspace mode intercepts all keys
+    if (workspaceModeActive) {
+      e.stopPropagation();
+      e.preventDefault();
+      handleWorkspaceModeKey(e.key);
+      pushKeystroke("␣" + e.key);
+      return;
+    }
+
     const inTerminal = isTerminalFocused();
 
     // --- Terminal focused: Escape moves focus to sidebar session ---
@@ -471,6 +489,16 @@
         e.preventDefault();
         pushKeystroke("Esc");
       }
+      return;
+    }
+
+    // Space: workspace mode picker
+    if (e.key === " ") {
+      e.stopPropagation();
+      e.preventDefault();
+      workspaceModeActive = true;
+      workspaceModePickerVisible.set(true);
+      pushKeystroke("␣");
       return;
     }
 

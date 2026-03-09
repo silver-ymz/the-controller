@@ -2,7 +2,7 @@
   import { fromStore } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { projects, activeSessionId, sessionStatuses, maintainerStatuses, autoWorkerStatuses, hotkeyAction, showKeyHints, jumpMode, generateJumpLabels, archiveView, archivedProjects, focusTarget, expandedProjects, focusTerminalSoon, type Project, type JumpPhase, type FocusTarget, type SessionStatus, type AutoWorkerStatus } from "./stores";
+  import { projects, activeSessionId, sessionStatuses, maintainerStatuses, autoWorkerStatuses, hotkeyAction, showKeyHints, jumpMode, generateJumpLabels, archiveView, archivedProjects, focusTarget, expandedProjects, focusTerminalSoon, workspaceMode, type Project, type JumpPhase, type FocusTarget, type SessionStatus, type AutoWorkerStatus } from "./stores";
   import { showToast } from "./toast";
   import { focusAfterSessionDelete, focusAfterProjectDelete } from "./focus-helpers";
   import FuzzyFinder from "./FuzzyFinder.svelte";
@@ -11,6 +11,7 @@
   import ConfirmModal from "./ConfirmModal.svelte";
   import DeleteSessionModal from "./DeleteSessionModal.svelte";
   import ProjectTree from "./sidebar/ProjectTree.svelte";
+  import AgentTree from "./sidebar/AgentTree.svelte";
 
   let sidebarEl: HTMLElement | undefined = $state();
   const showKeyHintsState = fromStore(showKeyHints);
@@ -27,6 +28,8 @@
   let finishBranchTarget: { sessionId: string; kind?: string } | null = $state(null);
   const archiveViewState = fromStore(archiveView);
   let isArchiveView = $derived(archiveViewState.current);
+  const workspaceModeState = fromStore(workspaceMode);
+  let currentMode = $derived(workspaceModeState.current);
   const archivedProjectsState = fromStore(archivedProjects);
   let archivedProjectList: Project[] = $derived(archivedProjectsState.current);
 
@@ -466,44 +469,58 @@
 
 <aside class="sidebar" bind:this={sidebarEl}>
   <div class="sidebar-header">
-    <h2>{isArchiveView ? "Archives" : "Projects"}</h2>
+    <h2>{isArchiveView ? "Archives" : currentMode === "agents" ? "Agents" : "Projects"}</h2>
   </div>
 
   <div class="project-list">
-    <ProjectTree
-      projects={isArchiveView ? archivedProjectList : projectList}
-      mode={isArchiveView ? "archived" : "active"}
-      {expandedProjectSet}
-      {activeSession}
-      {currentFocus}
-      jumpState={jumpState}
-      {projectJumpLabels}
-      {getSessionStatus}
-      onToggleProject={toggleProject}
-      onProjectFocus={(projectId) => {
-        focusTarget.set({ type: "project", projectId });
-      }}
-      onSessionFocus={(sessionId, projectId) => {
-        focusTarget.set({ type: "session", sessionId, projectId });
-      }}
-      onSessionSelect={(sessionId, projectId) => {
-        selectSession(sessionId);
-        focusTarget.set({ type: "session", sessionId, projectId });
-      }}
-    />
+    {#if currentMode === "agents"}
+      <AgentTree
+        projects={projectList}
+        {currentFocus}
+        onProjectFocus={(projectId) => {
+          focusTarget.set({ type: "project", projectId });
+        }}
+      />
+    {:else}
+      <ProjectTree
+        projects={isArchiveView ? archivedProjectList : projectList}
+        mode={isArchiveView ? "archived" : "active"}
+        {expandedProjectSet}
+        {activeSession}
+        {currentFocus}
+        jumpState={jumpState}
+        {projectJumpLabels}
+        {getSessionStatus}
+        onToggleProject={toggleProject}
+        onProjectFocus={(projectId) => {
+          focusTarget.set({ type: "project", projectId });
+        }}
+        onSessionFocus={(sessionId, projectId) => {
+          focusTarget.set({ type: "session", sessionId, projectId });
+        }}
+        onSessionSelect={(sessionId, projectId) => {
+          selectSession(sessionId);
+          focusTarget.set({ type: "session", sessionId, projectId });
+        }}
+      />
+    {/if}
   </div>
 
   <div class="sidebar-footer">
-    <button
-      class="footer-tab"
-      class:active={!isArchiveView}
-      onclick={() => archiveView.set(false)}
-    >Active</button>
-    <button
-      class="footer-tab"
-      class:active={isArchiveView}
-      onclick={() => archiveView.set(true)}
-    >Archives</button>
+    {#if currentMode !== "agents"}
+      <button
+        class="footer-tab"
+        class:active={!isArchiveView}
+        onclick={() => archiveView.set(false)}
+      >Active</button>
+      <button
+        class="footer-tab"
+        class:active={isArchiveView}
+        onclick={() => archiveView.set(true)}
+      >Archives</button>
+    {:else}
+      <div class="footer-spacer"></div>
+    {/if}
     <button
       class="btn-help"
       class:active={showKeyHintsState.current}
@@ -693,6 +710,8 @@
     border-top: 1px solid #313244;
     padding: 0;
   }
+
+  .footer-spacer { flex: 1; }
 
   .footer-tab {
     flex: 1;
