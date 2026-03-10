@@ -82,4 +82,13 @@ describe('TerminalManager', () => {
     focusTarget.subscribe((v) => { focus = v; })();
     expect(focus).toEqual({ type: 'terminal', projectId: 'proj-1' });
   });
+
+  it('shows the normal empty state when focus references a missing session', () => {
+    focusTarget.set({ type: 'session', sessionId: 'missing-session', projectId: 'proj-1' });
+
+    render(TerminalManager);
+
+    expect(screen.getByText('No active session')).toBeInTheDocument();
+    expect(screen.queryByText('Session archived')).not.toBeInTheDocument();
+  });
 });

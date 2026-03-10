@@ -8,13 +8,10 @@ export function focusAfterSessionDelete(
   projectList: Project[],
   projectId: string,
   sessionId: string,
-  isArchiveView: boolean,
 ): FocusTarget {
   const project = projectList.find(p => p.id === projectId);
   if (!project) return null;
-  const sessions = isArchiveView
-    ? project.sessions.filter(s => s.archived)
-    : project.sessions.filter(s => !s.archived);
+  const sessions = project.sessions.filter(s => !s.auto_worker_session);
   const idx = sessions.findIndex(s => s.id === sessionId);
   if (idx > 0) {
     return { type: "session", sessionId: sessions[idx - 1].id, projectId };
@@ -31,16 +28,13 @@ export function focusAfterProjectDelete(
   projectList: Project[],
   projectId: string,
   expandedProjects: Set<string>,
-  isArchiveView: boolean,
 ): FocusTarget {
   const idx = projectList.findIndex(p => p.id === projectId);
   if (idx <= 0) return null;
 
   const prevProject = projectList[idx - 1];
   if (expandedProjects.has(prevProject.id)) {
-    const sessions = isArchiveView
-      ? prevProject.sessions.filter(s => s.archived)
-      : prevProject.sessions.filter(s => !s.archived);
+    const sessions = prevProject.sessions.filter(s => !s.auto_worker_session);
     if (sessions.length > 0) {
       const lastSession = sessions[sessions.length - 1];
       return { type: "session", sessionId: lastSession.id, projectId: prevProject.id };
@@ -69,7 +63,7 @@ export function focusForModeSwitch(
       // Try to focus the active session if it belongs to the same project
       if (activeSessionId) {
         const project = projectList.find(p => p.id === current.projectId);
-        if (project?.sessions.some(s => s.id === activeSessionId && !s.archived)) {
+        if (project?.sessions.some(s => s.id === activeSessionId && !s.auto_worker_session)) {
           return { type: "session", sessionId: activeSessionId, projectId: current.projectId };
         }
       }

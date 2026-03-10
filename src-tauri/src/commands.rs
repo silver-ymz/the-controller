@@ -423,10 +423,10 @@ pub fn create_project(
 
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
 
-    // Reject duplicate project names (skip archived projects)
+    // Reject duplicate project names.
     if let Ok(inventory) = storage.list_projects() {
         let existing = inventory.projects;
-        if existing.iter().any(|p| p.name == name && !p.archived) {
+        if existing.iter().any(|p| p.name == name) {
             return Err(format!("A project named '{}' already exists", name));
         }
     }
@@ -485,19 +485,10 @@ pub fn load_project(
     if let Ok(inventory) = storage.list_projects() {
         let existing = inventory.projects;
         if let Some(project) = existing.iter().find(|p| p.repo_path == repo_path) {
-            if project.archived {
-                // Unarchive the project so it becomes active again
-                let mut unarchived = project.clone();
-                unarchived.archived = false;
-                storage
-                    .save_project(&unarchived)
-                    .map_err(|e| e.to_string())?;
-                return Ok(unarchived);
-            }
             return Ok(project.clone());
         }
-        // Reject duplicate project names when creating new (skip archived projects)
-        if existing.iter().any(|p| p.name == name && !p.archived) {
+        // Reject duplicate project names when creating new.
+        if existing.iter().any(|p| p.name == name) {
             return Err(format!("A project named '{}' already exists", name));
         }
     }
@@ -535,31 +526,7 @@ pub fn load_project(
 pub fn list_projects(state: State<AppState>) -> Result<ProjectInventory, String> {
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     let inventory = storage.list_projects().map_err(|e| e.to_string())?;
-    Ok(inventory.filter_projects(|project| !project.archived))
-}
-
-#[tauri::command]
-pub fn archive_project(state: State<AppState>, project_id: String) -> Result<(), String> {
-    let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage.load_project(id).map_err(|e| e.to_string())?;
-
-    project.archived = true;
-
-    // Close PTYs for all active sessions, mark them archived (keep worktrees)
-    {
-        let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-        for session in &mut project.sessions {
-            if !session.archived {
-                let _ = pty_manager.close_session(session.id);
-                session.archived = true;
-            }
-        }
-    }
-
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(inventory)
 }
 
 #[tauri::command]
@@ -600,66 +567,6 @@ pub fn delete_project(
     Ok(())
 }
 
-#[tauri::command]
-pub fn list_archived_projects(state: State<AppState>) -> Result<ProjectInventory, String> {
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let inventory = storage.list_projects().map_err(|e| e.to_string())?;
-    Ok(inventory.filter_projects(|project| {
-        project.archived || project.sessions.iter().any(|session| session.archived)
-    }))
-}
-
-#[tauri::command]
-pub fn unarchive_project(
-    state: State<AppState>,
-    _app_handle: AppHandle,
-    project_id: String,
-) -> Result<(), String> {
-    let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage.load_project(id).map_err(|e| e.to_string())?;
-
-    // Collect sessions to restore before taking pty_manager lock
-    let to_restore: Vec<(Uuid, String, String)> = project
-        .sessions
-        .iter()
-        .filter(|s| s.archived)
-        .map(|s| {
-            let dir = s
-                .worktree_path
-                .clone()
-                .unwrap_or_else(|| project.repo_path.clone());
-            (s.id, dir, s.kind.clone())
-        })
-        .collect();
-
-    project.archived = false;
-
-    for session in &mut project.sessions {
-        if session.archived {
-            session.archived = false;
-        }
-    }
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-    drop(storage);
-
-    // Spawn PTYs for restored sessions
-    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-    for (session_id, session_dir, kind) in to_restore {
-        pty_manager.spawn_session(
-            session_id,
-            &session_dir,
-            &kind,
-            state.emitter.clone(),
-            true,
-            None,
-            24,
-            80,
-        )?;
-    }
-
-    Ok(())
-}
 
 #[tauri::command]
 pub fn get_agents_md(state: State<AppState>, project_id: String) -> Result<String, String> {
@@ -1154,86 +1061,6 @@ pub fn list_project_prompts(
     Ok(project.prompts)
 }
 
-#[tauri::command]
-pub fn archive_session(
-    state: State<AppState>,
-    project_id: String,
-    session_id: String,
-) -> Result<(), String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-
-    // Close the PTY session and kill tmux (worktree stays on disk)
-    {
-        let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-        let _ = pty_manager.close_session(session_uuid);
-    }
-
-    // Mark session as archived — keep worktree path/branch intact
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| e.to_string())?;
-
-    if let Some(session) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
-        session.archived = true;
-    } else {
-        return Err("Session not found".to_string());
-    }
-
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn unarchive_session(
-    state: State<AppState>,
-    _app_handle: AppHandle,
-    project_id: String,
-    session_id: String,
-) -> Result<(), String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-
-    update_project_with_rollback(
-        &state,
-        project_uuid,
-        |project| {
-            let repo_path = project.repo_path.clone();
-            let session = project
-                .sessions
-                .iter_mut()
-                .find(|s| s.id == session_uuid && s.archived)
-                .ok_or_else(|| "Archived session not found".to_string())?;
-
-            let session_dir = session.worktree_path.clone().unwrap_or(repo_path);
-            let kind = session.kind.clone();
-            session.archived = false;
-            Ok((session_dir, kind))
-        },
-        |project| {
-            if let Some(session) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
-                session.archived = true;
-            }
-            Ok(())
-        },
-        |(session_dir, kind)| {
-            let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-            pty_manager.spawn_session(
-                session_uuid,
-                &session_dir,
-                &kind,
-                state.emitter.clone(),
-                true,
-                None,
-                24,
-                80,
-            )
-        },
-    )?;
-
-    Ok(())
-}
 
 #[tauri::command]
 pub fn close_session(
@@ -1245,7 +1072,7 @@ pub fn close_session(
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
 
-    // Try to close the PTY session (may not exist for archived sessions)
+    // Try to close the PTY session even if the terminal is already gone.
     {
         let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
         let _ = pty_manager.close_session(session_uuid);
@@ -1364,10 +1191,10 @@ pub async fn scaffold_project(state: State<'_, AppState>, name: String) -> Resul
     let repo_path = {
         let storage = state.storage.lock().map_err(|e| e.to_string())?;
 
-        // Reject duplicate project names (skip archived projects)
+        // Reject duplicate project names.
         if let Ok(inventory) = storage.list_projects() {
             let existing = inventory.projects;
-            if existing.iter().any(|p| p.name == name && !p.archived) {
+            if existing.iter().any(|p| p.name == name) {
                 return Err(format!("A project named '{}' already exists", name));
             }
         }
@@ -1388,10 +1215,7 @@ pub async fn scaffold_project(state: State<'_, AppState>, name: String) -> Resul
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     if let Ok(inventory) = storage.list_projects() {
         let existing = inventory.projects;
-        if existing
-            .iter()
-            .any(|p| p.name == project.name && !p.archived)
-        {
+        if existing.iter().any(|p| p.name == project.name) {
             drop(storage);
             return Err(rollback_scaffold_state(
                 Path::new(&project.repo_path),
@@ -2692,82 +2516,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rollback_session_metadata_for_unarchive_session_path() {
-        let base_dir = TempDir::new().unwrap();
-        let projects_root = TempDir::new().unwrap();
-        let repo_dir = TempDir::new().unwrap();
-        let app_state = make_test_state(base_dir.path(), projects_root.path());
-
-        let project = create_project(
-            state_from_ref(&app_state),
-            "rollback-session-unarchive".to_string(),
-            repo_dir.path().to_string_lossy().to_string(),
-        )
-        .expect("create project");
-
-        let session_id = Uuid::new_v4();
-        {
-            let storage = app_state.storage.lock().unwrap();
-            let mut stored = storage.load_project(project.id).expect("load project");
-            stored.sessions.push(SessionConfig {
-                id: session_id,
-                label: "session-1".to_string(),
-                worktree_path: Some("/tmp/worktree".to_string()),
-                worktree_branch: Some("session-1".to_string()),
-                archived: true,
-                kind: "claude".to_string(),
-                github_issue: None,
-                initial_prompt: None,
-                done_commits: vec![],
-                auto_worker_session: false,
-            });
-            storage
-                .save_project(&stored)
-                .expect("save archived session");
-        }
-
-        let error = update_project_with_rollback(
-            &app_state,
-            project.id,
-            |project| {
-                let session = project
-                    .sessions
-                    .iter_mut()
-                    .find(|session| session.id == session_id)
-                    .expect("find archived session");
-                session.archived = false;
-                Ok(())
-            },
-            |project| {
-                if let Some(session) = project
-                    .sessions
-                    .iter_mut()
-                    .find(|session| session.id == session_id)
-                {
-                    session.archived = true;
-                }
-                Ok(())
-            },
-            |()| Err::<(), String>("spawn failed".to_string()),
-        )
-        .expect_err("post-save failure should bubble up");
-
-        assert_eq!(error, "spawn failed");
-
-        let stored = app_state
-            .storage
-            .lock()
-            .unwrap()
-            .load_project(project.id)
-            .expect("load project after rollback");
-        assert_eq!(stored.sessions.len(), 1);
-        assert!(
-            stored.sessions[0].archived,
-            "failed unarchive path should restore archived session metadata"
-        );
-    }
-
-    #[test]
     fn test_rollback_session_metadata_preserves_concurrent_project_updates() {
         let base_dir = TempDir::new().unwrap();
         let projects_root = TempDir::new().unwrap();
@@ -2919,6 +2667,42 @@ mod tests {
     }
 
     #[test]
+    fn test_create_project_rejects_duplicate_name_even_if_existing_project_is_archived() {
+        let base_dir = TempDir::new().unwrap();
+        let projects_root = TempDir::new().unwrap();
+        let app_state = make_test_state(base_dir.path(), projects_root.path());
+        let existing_repo = TempDir::new().unwrap();
+        let new_repo = TempDir::new().unwrap();
+
+        {
+            let storage = app_state.storage.lock().expect("lock storage");
+            storage
+                .save_project(&Project {
+                    id: Uuid::new_v4(),
+                    name: "duplicate-name".to_string(),
+                    repo_path: existing_repo.path().to_string_lossy().to_string(),
+                    created_at: "2026-03-10T00:00:00Z".to_string(),
+                    archived: true,
+                    maintainer: crate::models::MaintainerConfig::default(),
+                    auto_worker: crate::models::AutoWorkerConfig::default(),
+                    prompts: vec![],
+                    sessions: vec![],
+                    staged_session: None,
+                })
+                .expect("save existing project");
+        }
+
+        let error = create_project(
+            state_from_ref(&app_state),
+            "duplicate-name".to_string(),
+            new_repo.path().to_string_lossy().to_string(),
+        )
+        .expect_err("create_project should reject duplicate names regardless of archived flag");
+
+        assert_eq!(error, "A project named 'duplicate-name' already exists");
+    }
+
+    #[test]
     fn test_load_project_succeeds_with_corrupt_sibling_metadata() {
         let base_dir = TempDir::new().unwrap();
         let projects_root = TempDir::new().unwrap();
@@ -2959,6 +2743,36 @@ mod tests {
         .expect_err("load_project should reject invalid names");
 
         assert!(error.contains("Invalid project name: invalid/name"));
+    }
+
+    #[test]
+    fn test_list_projects_includes_projects_marked_archived_in_storage() {
+        let base_dir = TempDir::new().unwrap();
+        let projects_root = TempDir::new().unwrap();
+        let app_state = make_test_state(base_dir.path(), projects_root.path());
+
+        {
+            let storage = app_state.storage.lock().expect("lock storage");
+            storage
+                .save_project(&Project {
+                    id: Uuid::new_v4(),
+                    name: "stored-project".to_string(),
+                    repo_path: projects_root.path().join("stored-project").to_string_lossy().to_string(),
+                    created_at: "2026-03-10T00:00:00Z".to_string(),
+                    archived: true,
+                    maintainer: crate::models::MaintainerConfig::default(),
+                    auto_worker: crate::models::AutoWorkerConfig::default(),
+                    prompts: vec![],
+                    sessions: vec![],
+                    staged_session: None,
+                })
+                .expect("save archived-flagged project");
+        }
+
+        let inventory = list_projects(state_from_ref(&app_state)).expect("list projects");
+
+        assert_eq!(inventory.projects.len(), 1);
+        assert_eq!(inventory.projects[0].name, "stored-project");
     }
 
     #[test]

@@ -5,8 +5,6 @@ import { showToast } from "./toast";
 import {
   activeSessionId,
   activeNote,
-  archiveView,
-  archivedProjects,
   expandedProjects,
   focusTarget,
   hotkeyAction,
@@ -62,8 +60,6 @@ describe("Sidebar provider indicator", () => {
     activeSessionId.set(null);
     sessionStatuses.set(new Map());
     showKeyHints.set(false);
-    archiveView.set(false);
-    archivedProjects.set([]);
     focusTarget.set(null);
     expandedProjects.set(new Set());
     workspaceMode.set("development");
@@ -74,8 +70,6 @@ describe("Sidebar provider indicator", () => {
 
     vi.mocked(command).mockImplementation(async (cmd: string) => {
       if (cmd === "list_projects") return { projects: [], corrupt_entries: [] };
-      if (cmd === "list_archived_projects")
-        return { projects: [], corrupt_entries: [] };
       return;
     });
   });
@@ -129,8 +123,6 @@ describe("Sidebar provider indicator", () => {
           ],
         };
       }
-      if (cmd === "list_archived_projects")
-        return { projects: [], corrupt_entries: [] };
       return;
     });
 

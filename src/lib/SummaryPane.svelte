@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fromStore } from "svelte/store";
   import { command, listen } from "$lib/backend";
-  import { projects, archivedProjects, sessionStatuses, type Project, type SessionStatus } from "./stores";
+  import { projects, sessionStatuses, type Project, type SessionStatus } from "./stores";
 
   interface Props {
     sessionId: string;
@@ -16,14 +16,12 @@
 
   const projectsState = fromStore(projects);
   let projectList: Project[] = $derived(projectsState.current);
-  const archivedProjectsState = fromStore(archivedProjects);
-  let archivedProjectList: Project[] = $derived(archivedProjectsState.current);
   const sessionStatusesState = fromStore(sessionStatuses);
   let statuses: Map<string, SessionStatus> = $derived(sessionStatusesState.current);
   let commits: CommitInfo[] = $state([]);
 
   let session = $derived(
-    [...projectList, ...archivedProjectList].flatMap((p) =>
+    projectList.flatMap((p) =>
       p.sessions.map((s) => ({ ...s, projectId: p.id }))
     ).find((s) => s.id === sessionId) ?? null
   );

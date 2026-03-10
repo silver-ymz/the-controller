@@ -44,7 +44,6 @@ async fn main() {
         .route("/api/resize_pty", post(resize_pty))
         .route("/api/close_session", post(close_session))
         .route("/api/create_session", post(create_session))
-        .route("/api/list_archived_projects", post(list_archived_projects))
         .route("/api/merge_session_branch", post(merge_session_branch))
         .route("/ws", get(ws_upgrade))
         .fallback(post(fallback_handler))
@@ -75,8 +74,7 @@ async fn list_projects(
     let inventory = storage
         .list_projects()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let filtered = inventory.filter_projects(|project| !project.archived);
-    Ok(Json(serde_json::to_value(filtered).unwrap()))
+    Ok(Json(serde_json::to_value(inventory).unwrap()))
 }
 
 async fn check_onboarding(
@@ -292,23 +290,6 @@ async fn create_session(
         StatusCode::NOT_IMPLEMENTED,
         "create_session not yet wired".to_string(),
     ))
-}
-
-async fn list_archived_projects(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let inventory = storage
-        .list_projects()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let filtered = inventory.filter_projects(|project| {
-        project.archived || project.sessions.iter().any(|session| session.archived)
-    });
-    Ok(Json(serde_json::to_value(filtered).unwrap()))
 }
 
 async fn merge_session_branch(

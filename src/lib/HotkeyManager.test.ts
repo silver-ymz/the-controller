@@ -150,20 +150,20 @@ describe('HotkeyManager', () => {
       unsub();
     });
 
-    it('a dispatches archive-project when no focus', () => {
-      let captured: any = null;
-      const unsub = hotkeyAction.subscribe((v) => { captured = v; });
-      pressKey('a');
-      expect(captured).toEqual({ type: 'archive-project' });
-      unsub();
-    });
-
-    it('a dispatches archive-session when session focused', () => {
+    it('a does not dispatch any archive action', () => {
       focusTarget.set({ type: 'session', sessionId: 'sess-1', projectId: 'proj-1' });
       let captured: any = null;
       const unsub = hotkeyAction.subscribe((v) => { captured = v; });
       pressKey('a');
-      expect(captured).toEqual({ type: 'archive-session', sessionId: 'sess-1', projectId: 'proj-1' });
+      expect(captured).toBeNull();
+      unsub();
+    });
+
+    it('A does not dispatch archive-view actions', () => {
+      let captured: any = null;
+      const unsub = hotkeyAction.subscribe((v) => { captured = v; });
+      pressKey('A');
+      expect(captured).toBeNull();
       unsub();
     });
 

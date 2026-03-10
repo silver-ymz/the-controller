@@ -185,11 +185,6 @@ export type HotkeyAction =
   | { type: "focus-terminal" }
   | { type: "toggle-help" }
   | { type: "delete-project"; projectId?: string }
-  | { type: "archive-project"; projectId?: string }
-  | { type: "archive-session"; sessionId: string; projectId: string }
-  | { type: "unarchive-session"; sessionId: string; projectId: string }
-  | { type: "unarchive-project"; projectId: string }
-  | { type: "toggle-archive-view" }
   | { type: "create-issue"; projectId: string; repoPath: string }
   | {
       type: "pick-issue-for-session";
@@ -224,8 +219,6 @@ export type HotkeyAction =
 
 export const hotkeyAction = writable<HotkeyAction>(null);
 export const showKeyHints = writable<boolean>(false);
-export const archiveView = writable<boolean>(false);
-export const archivedProjects = writable<Project[]>([]);
 export const sidebarVisible = writable<boolean>(true);
 
 export const expandedProjects = writable<Set<string>>(new Set());

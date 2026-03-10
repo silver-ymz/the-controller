@@ -39,7 +39,6 @@ const baseProjects: Project[] = [
       makeSession({
         id: "sess-2",
         label: "session-2",
-        archived: true,
         github_issue: null,
       }),
     ],
@@ -67,10 +66,9 @@ describe("ProjectTree", () => {
     onSessionSelect = (sessionId: string, projectId: string) => onSessionSelectSpy(sessionId, projectId);
   });
 
-  function renderTree(mode: "active" | "archived", focus: FocusTarget = null, statuses = new Map<string, SessionStatus>()) {
+  function renderTree(focus: FocusTarget = null, statuses = new Map<string, SessionStatus>()) {
     return render(ProjectTree, {
       projects: baseProjects,
-      mode,
       expandedProjectSet: new Set(["proj-1"]),
       activeSession: "sess-1",
       currentFocus: focus,
@@ -83,12 +81,12 @@ describe("ProjectTree", () => {
   }
 
   it("renders active-mode session rows with issue badge and status classes", () => {
-    const { container, getByText, queryByText } = renderTree("active", null, new Map([["sess-1", "working"]]));
+    const { container, getByText, queryByText } = renderTree(null, new Map([["sess-1", "working"]]));
 
     expect(getByText("Project One")).toBeTruthy();
     expect(getByText("session-1")).toBeTruthy();
     expect(getByText("#42")).toBeTruthy();
-    expect(queryByText("session-2")).toBeNull();
+    expect(getByText("session-2")).toBeTruthy();
 
     const row = container.querySelector('[data-session-id="sess-1"]');
     expect(row?.classList.contains("active")).toBe(true);
@@ -98,7 +96,7 @@ describe("ProjectTree", () => {
   });
 
   it("calls session callbacks on active row click", async () => {
-    const { container } = renderTree("active");
+    const { container } = renderTree();
     const row = container.querySelector('[data-session-id="sess-1"]') as HTMLElement;
 
     row.click();
@@ -107,14 +105,11 @@ describe("ProjectTree", () => {
     expect(onSessionFocusSpy).toHaveBeenCalledWith("sess-1", "proj-1");
   });
 
-  it("renders archived sessions as non-interactive rows", () => {
-    const { container, getByText, queryByText } = renderTree("archived");
-
-    expect(getByText("session-2")).toBeTruthy();
-    expect(queryByText("session-1")).toBeNull();
+  it("renders all visible sessions as interactive rows", () => {
+    const { container } = renderTree();
 
     const row = container.querySelector('[data-session-id="sess-2"]') as HTMLElement;
-    expect(row.getAttribute("role")).toBeNull();
-    expect(row.classList.contains("archived")).toBe(true);
+    expect(row.getAttribute("role")).toBe("button");
+    expect(row.classList.contains("archived")).toBe(false);
   });
 });

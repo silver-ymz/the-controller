@@ -6,12 +6,9 @@
     projects,
     activeSessionId,
     sidebarVisible,
-
     workspaceMode,
     workspaceModePickerVisible,
     selectedSessionProvider,
-    archiveView,
-    archivedProjects,
     focusTarget,
     expandedProjects,
     dispatchHotkeyAction,
@@ -41,10 +38,6 @@
   let activeId: string | null = $derived(activeSessionIdState.current);
   const focusTargetState = fromStore(focusTarget);
   let currentFocus: FocusTarget = $derived(focusTargetState.current);
-  const archiveViewState = fromStore(archiveView);
-  let isArchiveView = $derived(archiveViewState.current);
-  const archivedProjectsState = fromStore(archivedProjects);
-  let archivedProjectList: Project[] = $derived(archivedProjectsState.current);
   const expandedProjectsState = fromStore(expandedProjects);
   let expandedSet: Set<string> = $derived(expandedProjectsState.current);
   const workspaceModeState = fromStore(workspaceMode);
@@ -163,14 +156,11 @@
       }
       return result;
     }
-    const list = isArchiveView ? archivedProjectList : projectList;
     const result: SidebarItem[] = [];
-    for (const p of list) {
+    for (const p of projectList) {
       result.push({ type: "project", projectId: p.id });
       if (!expandedSet.has(p.id)) continue;
-      const sessions = isArchiveView
-        ? p.sessions.filter(s => s.archived && !s.auto_worker_session)
-        : p.sessions.filter(s => !s.archived && !s.auto_worker_session);
+      const sessions = p.sessions.filter(s => !s.auto_worker_session);
       for (const s of sessions) {
         result.push({ type: "session", sessionId: s.id, projectId: p.id });
       }
@@ -194,9 +184,7 @@
     const len = items.length;
     const next = items[((idx + direction) % len + len) % len];
     if (next.type === "session") {
-      if (!isArchiveView) {
-        activeSessionId.set(next.sessionId);
-      }
+      activeSessionId.set(next.sessionId);
       focusTarget.set({ type: "session", sessionId: next.sessionId, projectId: next.projectId });
     } else if (next.type === "agent") {
       focusTarget.set({ type: "agent", agentKind: next.agentKind, projectId: next.projectId });
@@ -208,15 +196,14 @@
   }
 
   function navigateProject(direction: 1 | -1) {
-    const list = isArchiveView ? archivedProjectList : projectList;
-    if (list.length === 0) return;
+    if (projectList.length === 0) return;
     const focusedProjectId = currentFocus?.type === "project" || currentFocus?.type === "session" || currentFocus?.type === "agent" || currentFocus?.type === "agent-panel" || currentFocus?.type === "note" || currentFocus?.type === "notes-editor"
       ? currentFocus.projectId
       : null;
     let idx = -1;
-    if (focusedProjectId) idx = list.findIndex(p => p.id === focusedProjectId);
-    const len = list.length;
-    const next = list[((idx + direction) % len + len) % len];
+    if (focusedProjectId) idx = projectList.findIndex(p => p.id === focusedProjectId);
+    const len = projectList.length;
+    const next = projectList[((idx + direction) % len + len) % len];
     focusTarget.set({ type: "project", projectId: next.id });
   }
 
@@ -237,25 +224,6 @@
       return;
     }
     dispatchAction({ type: "delete-project" });
-  }
-
-  function dispatchArchiveAction() {
-    if (isArchiveView) {
-      if (currentFocus?.type === "session") {
-        dispatchAction({ type: "unarchive-session", sessionId: currentFocus.sessionId, projectId: currentFocus.projectId });
-      } else if (currentFocus?.type === "project") {
-        dispatchAction({ type: "unarchive-project", projectId: currentFocus.projectId });
-      }
-      return;
-    }
-
-    if (currentFocus?.type === "session") {
-      dispatchAction({ type: "archive-session", sessionId: currentFocus.sessionId, projectId: currentFocus.projectId });
-    } else if (currentFocus?.type === "project") {
-      dispatchAction({ type: "archive-project", projectId: currentFocus.projectId });
-    } else {
-      dispatchAction({ type: "archive-project" });
-    }
   }
 
   function dispatchIssuePicker(opts?: { kind?: "claude" | "codex"; background?: boolean }) {
@@ -301,12 +269,6 @@
         return true;
       case "delete":
         dispatchDeleteAction();
-        return true;
-      case "archive":
-        dispatchArchiveAction();
-        return true;
-      case "toggle-archive-view":
-        dispatchAction({ type: "toggle-archive-view" });
         return true;
       case "create-session":
         dispatchIssuePicker({ kind: currentSessionProvider });
@@ -373,9 +335,7 @@
           }
           expandedProjects.set(next);
         } else if (currentFocus?.type === "session") {
-          if (!isArchiveView) {
-            activeSessionId.set(currentFocus.sessionId);
-          }
+          activeSessionId.set(currentFocus.sessionId);
           dispatchAction({ type: "focus-terminal" });
         } else if (currentFocus?.type === "agent") {
           focusTarget.set({ type: "agent-panel", agentKind: currentFocus.agentKind, projectId: currentFocus.projectId });

@@ -3,7 +3,6 @@
 
   interface Props {
     projects: Project[];
-    mode: "active" | "archived";
     expandedProjectSet: Set<string>;
     activeSession: string | null;
     currentFocus: FocusTarget;
@@ -16,7 +15,6 @@
 
   let {
     projects,
-    mode,
     expandedProjectSet,
     activeSession,
     currentFocus,
@@ -26,96 +24,70 @@
     onSessionFocus,
     onSessionSelect,
   }: Props = $props();
-
-  function isArchivedMode() {
-    return mode === "archived";
-  }
 </script>
 
-{#if isArchivedMode() && projects.length === 0}
-  <div class="empty-state">No archived sessions</div>
-{:else}
-  {#each projects as project, i (project.id)}
-    {@const visibleSessions = isArchivedMode()
-      ? project.sessions.filter((s) => s.archived && !s.auto_worker_session)
-      : project.sessions.filter((s) => !s.archived && !s.auto_worker_session)}
-    <div class="project-item">
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="project-header"
-        class:focus-target={currentFocus?.type === "project" && currentFocus.projectId === project.id}
-        tabindex="0"
-        data-project-id={project.id}
-        onfocusin={(e: FocusEvent) => {
-          if (e.target === e.currentTarget) onProjectFocus(project.id);
-        }}
-      >
-        <button class="btn-expand" onclick={() => onToggleProject(project.id)}>
-          {expandedProjectSet.has(project.id) ? "\u25BC" : "\u25B6"}
-        </button>
-        <span class="project-name">{project.name}</span>
-        <span class="session-count">{visibleSessions.length}</span>
-      </div>
-
-      {#if expandedProjectSet.has(project.id)}
-        <div class="session-list">
-          {#each visibleSessions as session (session.id)}
-            {#if isArchivedMode()}
-              <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-              <div
-                class="session-item archived"
-                class:focus-target={currentFocus?.type === "session" && currentFocus.sessionId === session.id}
-                data-session-id={session.id}
-                tabindex="0"
-                onfocusin={() => {
-                  onSessionFocus(session.id, project.id);
-                }}
-              >
-                <span class="status-dot archived-dot">&cir;</span>
-                <span class="session-label">{session.label}</span>
-              </div>
-            {:else}
-              <div
-                class="session-item"
-                class:active={activeSession === session.id}
-                class:focus-target={currentFocus?.type === "session" && currentFocus.sessionId === session.id}
-                data-session-id={session.id}
-                role="button"
-                tabindex="0"
-                onclick={() => {
-                  onSessionSelect(session.id, project.id);
-                  onSessionFocus(session.id, project.id);
-                }}
-                onfocusin={() => {
-                  onSessionFocus(session.id, project.id);
-                }}
-                onkeydown={(e: KeyboardEvent) => {
-                  if (e.key === "Enter" || e.key === " ") onSessionSelect(session.id, project.id);
-                }}
-              >
-                <span
-                  class="status-dot"
-                  class:idle={getSessionStatus(session.id) === "idle"}
-                  class:working={getSessionStatus(session.id) === "working"}
-                >
-                  {getSessionStatus(session.id) === "exited" ? "\u25CB" : "\u25CF"}
-                </span>
-                <span class="session-label">{session.label}</span>
-                {#if project.staged_session?.session_id === session.id}
-                  <span class="staged-badge">staged</span>
-                {/if}
-                {#if session.github_issue}
-                  <span class="issue-badge">#{session.github_issue.number}</span>
-                {/if}
-              </div>
-            {/if}
-          {/each}
-        </div>
-      {/if}
+{#each projects as project (project.id)}
+  {@const visibleSessions = project.sessions.filter((s) => !s.auto_worker_session)}
+  <div class="project-item">
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="project-header"
+      class:focus-target={currentFocus?.type === "project" && currentFocus.projectId === project.id}
+      tabindex="0"
+      data-project-id={project.id}
+      onfocusin={(e: FocusEvent) => {
+        if (e.target === e.currentTarget) onProjectFocus(project.id);
+      }}
+    >
+      <button class="btn-expand" onclick={() => onToggleProject(project.id)}>
+        {expandedProjectSet.has(project.id) ? "\u25BC" : "\u25B6"}
+      </button>
+      <span class="project-name">{project.name}</span>
+      <span class="session-count">{visibleSessions.length}</span>
     </div>
-  {/each}
-{/if}
+
+    {#if expandedProjectSet.has(project.id)}
+      <div class="session-list">
+        {#each visibleSessions as session (session.id)}
+          <div
+            class="session-item"
+            class:active={activeSession === session.id}
+            class:focus-target={currentFocus?.type === "session" && currentFocus.sessionId === session.id}
+            data-session-id={session.id}
+            role="button"
+            tabindex="0"
+            onclick={() => {
+              onSessionSelect(session.id, project.id);
+              onSessionFocus(session.id, project.id);
+            }}
+            onfocusin={() => {
+              onSessionFocus(session.id, project.id);
+            }}
+            onkeydown={(e: KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " ") onSessionSelect(session.id, project.id);
+            }}
+          >
+            <span
+              class="status-dot"
+              class:idle={getSessionStatus(session.id) === "idle"}
+              class:working={getSessionStatus(session.id) === "working"}
+            >
+              {getSessionStatus(session.id) === "exited" ? "\u25CB" : "\u25CF"}
+            </span>
+            <span class="session-label">{session.label}</span>
+            {#if project.staged_session?.session_id === session.id}
+              <span class="staged-badge">staged</span>
+            {/if}
+            {#if session.github_issue}
+              <span class="issue-badge">#{session.github_issue.number}</span>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </div>
+{/each}
 
 <style>
   .project-item {
@@ -199,14 +171,6 @@
     border-radius: 4px;
   }
 
-  .session-item.archived {
-    opacity: 0.6;
-  }
-
-  .archived-dot {
-    color: #6c7086;
-  }
-
   .status-dot {
     font-size: 10px;
     color: #6c7086;
@@ -248,12 +212,5 @@
     border-radius: 3px;
     white-space: nowrap;
     flex-shrink: 0;
-  }
-
-  .empty-state {
-    padding: 24px 16px;
-    color: #6c7086;
-    font-size: 13px;
-    text-align: center;
   }
 </style>

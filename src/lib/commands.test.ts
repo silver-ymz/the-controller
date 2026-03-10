@@ -82,6 +82,8 @@ describe("command registry", () => {
     const map = buildKeyMap("development");
     expect(map.has("c")).toBe(true); // create-session (dev)
     expect(map.get("c")).toBe("create-session");
+    expect(map.has("a")).toBe(false);
+    expect(map.has("A")).toBe(false);
     expect(map.has("x")).toBe(false);
     expect(map.has("X")).toBe(false);
     expect(map.has("C")).toBe(false);
@@ -133,7 +135,11 @@ describe("command registry", () => {
     expect(sess.entries.map(entry => entry.key)).not.toContain("C");
 
     const proj = sections.find(s => s.label === "Projects")!;
-    expect(proj.entries).toHaveLength(8);
+    expect(proj.entries).toHaveLength(6);
+    expect(proj.entries.map(entry => entry.key)).not.toContain("a");
+    expect(proj.entries.map(entry => entry.key)).not.toContain("A");
+    expect(proj.entries.map(entry => entry.description)).not.toContain("Archive focused item (session or project)");
+    expect(proj.entries.map(entry => entry.description)).not.toContain("View archived projects");
 
     const panels = sections.find(s => s.label === "Panels")!;
     expect(panels.entries).toHaveLength(5);

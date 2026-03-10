@@ -144,7 +144,7 @@ impl AutoWorkerScheduler {
         };
 
         for project in &projects {
-            if !project.auto_worker.enabled || project.archived {
+            if !project.auto_worker.enabled {
                 continue;
             }
             let issues = match fetch_issues_sync(&project.repo_path) {
@@ -274,7 +274,7 @@ impl AutoWorkerScheduler {
                 };
 
                 for project in &projects {
-                    if !project.auto_worker.enabled || project.archived {
+                    if !project.auto_worker.enabled {
                         continue;
                     }
                     if active_sessions.contains_key(&project.id) {
@@ -344,7 +344,7 @@ impl AutoWorkerScheduler {
         let mut candidates = Vec::new();
 
         for project in &projects {
-            if !project.auto_worker.enabled || project.archived {
+            if !project.auto_worker.enabled {
                 continue;
             }
 

@@ -2,14 +2,12 @@
   import { fromStore } from "svelte/store";
   import Terminal from "./Terminal.svelte";
   import SummaryPane from "./SummaryPane.svelte";
-  import { projects, activeSessionId, hotkeyAction, focusTarget, archiveView, type Project } from "./stores";
+  import { projects, activeSessionId, hotkeyAction, focusTarget, type Project } from "./stores";
 
   const projectsState = fromStore(projects);
   let projectList: Project[] = $derived(projectsState.current);
   const activeSessionIdState = fromStore(activeSessionId);
   let activeSession: string | null = $derived(activeSessionIdState.current);
-  const archiveViewState = fromStore(archiveView);
-  let isArchiveView: boolean = $derived(archiveViewState.current);
   let terminalComponents: Record<string, Terminal> = $state({});
   let allSessionIds: Set<string> = $derived(
     new Set(projectList.flatMap((p) => p.sessions.map((s) => s.id))),
@@ -49,7 +47,7 @@
 <div class="terminal-manager" class:focused={isFocused} onfocusin={handleFocusIn}>
   {#each allSessions as session (session.id)}
     {@const sessionId = session.id}
-    <div class="terminal-wrapper" class:visible={!isArchiveView && activeSession === sessionId}>
+    <div class="terminal-wrapper" class:visible={activeSession === sessionId}>
       {#if focusedSessionId === sessionId}
         <SummaryPane {sessionId} />
       {/if}
@@ -59,14 +57,7 @@
     </div>
   {/each}
 
-  {#if focusedSessionId && (isArchiveView || !allSessionIds.has(focusedSessionId))}
-    <div class="archived-summary visible">
-      <SummaryPane sessionId={focusedSessionId} />
-      <div class="archived-notice">Session archived</div>
-    </div>
-  {/if}
-
-  {#if !activeSession && !(focusedSessionId && (isArchiveView || !allSessionIds.has(focusedSessionId)))}
+  {#if !activeSession}
     <div class="empty-state">
       <div class="empty-content">
         <div class="empty-title">No active session</div>
@@ -103,27 +94,6 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }
-
-  .archived-summary {
-    position: absolute;
-    inset: 0;
-    display: none;
-    flex-direction: column;
-    background: #1e1e2e;
-  }
-
-  .archived-summary.visible {
-    display: flex;
-  }
-
-  .archived-notice {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    color: #6c7086;
-    font-size: 14px;
   }
 
   .empty-state {

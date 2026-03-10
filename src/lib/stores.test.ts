@@ -9,7 +9,6 @@ import {
   showKeyHints,
   appConfig,
   onboardingComplete,
-  archiveView,
   focusTarget,
   sidebarVisible,
   workspaceMode,
@@ -72,10 +71,6 @@ describe('stores', () => {
 
   it('onboardingComplete defaults to false', () => {
     expect(get(onboardingComplete)).toBe(false);
-  });
-
-  it('archiveView defaults to false', () => {
-    expect(get(archiveView)).toBe(false);
   });
 
   it('focusTarget defaults to null', () => {

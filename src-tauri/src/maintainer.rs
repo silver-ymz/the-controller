@@ -161,7 +161,7 @@ impl MaintainerScheduler {
                 };
 
                 for project in &projects {
-                    if !project.maintainer.enabled || project.archived {
+                    if !project.maintainer.enabled {
                         continue;
                     }
 

@@ -2,7 +2,7 @@
   import { fromStore } from "svelte/store";
   import { command, listen } from "$lib/backend";
   import { refreshProjectsFromBackend } from "./project-listing";
-  import { projects, activeSessionId, sessionStatuses, maintainerStatuses, maintainerErrors, autoWorkerStatuses, hotkeyAction, showKeyHints, archiveView, archivedProjects, focusTarget, expandedProjects, focusTerminalSoon, workspaceMode, activeNote, noteEntries, selectedSessionProvider, type CorruptProjectEntry, type Project, type ProjectInventory, type FocusTarget, type SessionStatus, type MaintainerStatus, type AutoWorkerStatus, type NoteEntry } from "./stores";
+  import { projects, activeSessionId, sessionStatuses, maintainerStatuses, maintainerErrors, autoWorkerStatuses, hotkeyAction, showKeyHints, focusTarget, expandedProjects, focusTerminalSoon, workspaceMode, activeNote, noteEntries, selectedSessionProvider, type CorruptProjectEntry, type Project, type ProjectInventory, type FocusTarget, type SessionStatus, type MaintainerStatus, type AutoWorkerStatus, type NoteEntry } from "./stores";
   import { showToast } from "./toast";
   import { focusAfterSessionDelete, focusAfterProjectDelete } from "./focus-helpers";
   import { sendFinishBranchPrompt } from "./finish-branch";
@@ -25,17 +25,11 @@
   let expandedProjectSet: Set<string> = $derived(expandedProjectsState.current);
   let deleteTarget: Project | null = $state(null);
   let deleteSessionTarget: { sessionId: string; projectId: string; label: string } | null = $state(null);
-  let archiveSessionTarget: { sessionId: string; projectId: string; label: string } | null = $state(null);
-  let archiveProjectTarget: Project | null = $state(null);
   let mergeSessionTarget: { sessionId: string; projectId: string; label: string } | null = $state(null);
   let mergeInProgress = $state(false);
   let finishBranchTarget: { sessionId: string; kind?: string } | null = $state(null);
-  const archiveViewState = fromStore(archiveView);
-  let isArchiveView = $derived(archiveViewState.current);
   const workspaceModeState = fromStore(workspaceMode);
   let currentMode = $derived(workspaceModeState.current);
-  const archivedProjectsState = fromStore(archivedProjects);
-  let archivedProjectList: Project[] = $derived(archivedProjectsState.current);
   const selectedSessionProviderState = fromStore(selectedSessionProvider);
   let currentSessionProvider = $derived(selectedSessionProviderState.current);
   let currentSessionProviderLabel = $derived(currentSessionProvider === "codex" ? "Codex" : "Claude");
@@ -44,13 +38,6 @@
   let showNewNoteModal = $state(false);
   let newNoteProjectId = $state("");
   const activeNoteState = fromStore(activeNote);
-
-  // Load archived projects when entering archive view
-  $effect(() => {
-    if (isArchiveView) {
-      loadArchivedProjects();
-    }
-  });
   const projectsState = fromStore(projects);
   let projectList: Project[] = $derived(projectsState.current);
   const activeSessionIdState = fromStore(activeSessionId);
@@ -140,11 +127,10 @@
         case "delete-session": {
           const targetSessionId = action.sessionId ?? activeSession;
           if (targetSessionId) {
-            const searchList = isArchiveView ? archivedProjectList : projectList;
             const targetProjectId = action.projectId
-              ?? searchList.find((p) => p.sessions.some((s) => s.id === targetSessionId))?.id;
+              ?? projectList.find((p) => p.sessions.some((s) => s.id === targetSessionId))?.id;
             if (targetProjectId) {
-              const project = searchList.find((p) => p.id === targetProjectId);
+              const project = projectList.find((p) => p.id === targetProjectId);
               const session = project?.sessions.find((s) => s.id === targetSessionId);
               deleteSessionTarget = {
                 sessionId: targetSessionId,
@@ -156,48 +142,14 @@
           break;
         }
         case "delete-project": {
-          const searchList = isArchiveView ? archivedProjectList : projectList;
-          const project = action.projectId
-            ? searchList.find((p) => p.id === action.projectId)
-            : (searchList.find((p) =>
-                p.sessions.some((s) => s.id === activeSession),
-              ) ?? searchList[0]);
-          if (project) {
-            deleteTarget = project;
-          }
-          break;
-        }
-        case "archive-project": {
           const project = action.projectId
             ? projectList.find((p) => p.id === action.projectId)
             : (projectList.find((p) =>
                 p.sessions.some((s) => s.id === activeSession),
               ) ?? projectList[0]);
-          if (project) archiveProjectTarget = project;
-          break;
-        }
-        case "archive-session": {
-          const proj = projectList.find((p) => p.id === action.projectId);
-          const sess = proj?.sessions.find((s) => s.id === action.sessionId);
-          if (sess) {
-            archiveSessionTarget = {
-              sessionId: action.sessionId,
-              projectId: action.projectId,
-              label: sess.label,
-            };
+          if (project) {
+            deleteTarget = project;
           }
-          break;
-        }
-        case "unarchive-session": {
-          unarchiveSession(action.projectId, action.sessionId);
-          break;
-        }
-        case "unarchive-project": {
-          unarchiveProject(action.projectId);
-          break;
-        }
-        case "toggle-archive-view": {
-          archiveView.update(v => !v);
           break;
         }
         case "merge-session": {
@@ -271,7 +223,7 @@
 
         // Cleanup: backend already deleted the session and worktree, just refresh.
         unlisteners.push(listen<string>(`session-cleanup:${session.id}`, () => {
-          const nextFocus = focusAfterSessionDelete(projectList, project.id, session.id, isArchiveView);
+          const nextFocus = focusAfterSessionDelete(projectList, project.id, session.id);
           clearSessionTracking(session.id);
           activeSessionId.update(current => {
             if (current !== session.id) return current;
@@ -279,7 +231,7 @@
             return null;
           });
           focusTarget.set(nextFocus);
-          refreshProjectLists();
+          loadProjects();
         }));
 
         // Hook-based status: precise idle/working from Claude Code hooks.
@@ -354,16 +306,6 @@
     }
   }
 
-  async function loadArchivedProjects() {
-    try {
-      const result = await command<ProjectInventory>("list_archived_projects");
-      archivedProjects.set(result.projects);
-      surfaceCorruptProjectWarnings(result.corrupt_entries);
-    } catch (err) {
-      showToast(String(err), "error");
-    }
-  }
-
   function surfaceCorruptProjectWarnings(entries: CorruptProjectEntry[]) {
     const unseen = entries.filter((entry) => !surfacedCorruptProjectWarnings.has(corruptProjectWarningKey(entry)));
     if (unseen.length === 0) return;
@@ -388,16 +330,6 @@
 
   function corruptProjectWarningKey(entry: CorruptProjectEntry) {
     return `${entry.project_file}:${entry.error}`;
-  }
-
-  async function unarchiveProject(projectId: string) {
-    try {
-      await command("unarchive_project", { projectId });
-      await loadArchivedProjects();
-      await loadProjects();
-    } catch (err) {
-      showToast(String(err), "error");
-    }
   }
 
   function toggleProject(projectId: string) {
@@ -434,9 +366,8 @@
     activeSessionId.set(sessionId);
   }
 
-  async function maybeRemoveInProgressLabel(projectId: string, sessionId: string, fromArchivedList = false) {
-    const list = fromArchivedList ? archivedProjectList : projectList;
-    const project = list.find((p) => p.id === projectId);
+  async function maybeRemoveInProgressLabel(projectId: string, sessionId: string) {
+    const project = projectList.find((p) => p.id === projectId);
     const session = project?.sessions.find((s) => s.id === sessionId);
     if (session?.github_issue && project) {
       command("remove_github_label", {
@@ -460,17 +391,11 @@
     });
   }
 
-  async function refreshProjectLists() {
-    await loadProjects();
-    if (isArchiveView) await loadArchivedProjects();
-  }
-
   async function closeSession(projectId: string, sessionId: string, deleteWorktree: boolean) {
     try {
-      const list = isArchiveView ? archivedProjectList : projectList;
-      const nextFocus = focusAfterSessionDelete(list, projectId, sessionId, isArchiveView);
+      const nextFocus = focusAfterSessionDelete(projectList, projectId, sessionId);
 
-      await maybeRemoveInProgressLabel(projectId, sessionId, isArchiveView);
+      await maybeRemoveInProgressLabel(projectId, sessionId);
 
       await command("close_session", { projectId, sessionId, deleteWorktree });
       clearSessionTracking(sessionId);
@@ -480,55 +405,6 @@
         return null;
       });
       focusTarget.set(nextFocus);
-      await refreshProjectLists();
-    } catch (e) {
-      showToast(String(e), "error");
-    }
-  }
-
-  async function archiveSession(projectId: string, sessionId: string) {
-    try {
-      // Find the active session above the one being archived
-      const project = projectList.find(p => p.id === projectId);
-      const activeSessions = project?.sessions.filter(s => !s.archived) ?? [];
-      const idx = activeSessions.findIndex(s => s.id === sessionId);
-      const prevSession = idx > 0 ? activeSessions[idx - 1] : null;
-
-      await maybeRemoveInProgressLabel(projectId, sessionId);
-
-      await command("archive_session", { projectId, sessionId });
-      clearSessionTracking(sessionId);
-      activeSessionId.update(current => current === sessionId ? (prevSession?.id ?? null) : current);
-      if (prevSession) {
-        focusTarget.set({ type: "session", sessionId: prevSession.id, projectId });
-      } else {
-        focusTarget.set({ type: "project", projectId });
-      }
-      await refreshProjectLists();
-    } catch (e) {
-      showToast(String(e), "error");
-    }
-  }
-
-  async function unarchiveSession(projectId: string, sessionId: string) {
-    try {
-      await command("unarchive_session", { projectId, sessionId });
-      markSession(sessionId, "working");
-      activeSessionId.set(sessionId);
-      await refreshProjectLists();
-    } catch (e) {
-      showToast(String(e), "error");
-    }
-  }
-
-  async function archiveProject(projectId: string) {
-    try {
-      await command("archive_project", { projectId });
-      activeSessionId.update(current => {
-        const project = projectList.find(p => p.id === projectId);
-        if (project?.sessions.some(s => s.id === current)) return null;
-        return current;
-      });
       await loadProjects();
     } catch (e) {
       showToast(String(e), "error");
@@ -657,7 +533,7 @@
 
 <aside class="sidebar" bind:this={sidebarEl}>
   <div class="sidebar-header">
-    <h2>{isArchiveView ? "Archives" : currentMode === "agents" ? "Agents" : currentMode === "notes" ? "Notes" : "Development"}</h2>
+    <h2>{currentMode === "agents" ? "Agents" : currentMode === "notes" ? "Notes" : "Development"}</h2>
   </div>
 
   <div class="project-list">
@@ -693,8 +569,7 @@
       />
     {:else}
       <ProjectTree
-        projects={isArchiveView ? archivedProjectList : projectList}
-        mode={isArchiveView ? "archived" : "active"}
+        projects={projectList}
         {expandedProjectSet}
         {activeSession}
         {currentFocus}
@@ -716,22 +591,7 @@
 
   <div class="sidebar-footer">
     <div class="footer-left">
-      {#if currentMode !== "agents" && currentMode !== "notes"}
-        <div class="footer-tabs">
-          <button
-            class="footer-tab"
-            class:active={!isArchiveView}
-            onclick={() => archiveView.set(false)}
-          >Active</button>
-          <button
-            class="footer-tab"
-            class:active={isArchiveView}
-            onclick={() => archiveView.set(true)}
-          >Archives</button>
-        </div>
-      {:else}
-        <div class="footer-spacer"></div>
-      {/if}
+      <div class="footer-spacer"></div>
       <div class="provider-indicator">Provider: {currentSessionProviderLabel}</div>
     </div>
     <button
@@ -774,7 +634,7 @@
   {#if deleteSessionTarget}
     <DeleteSessionModal
       sessionLabel={deleteSessionTarget.label}
-      isArchived={isArchiveView}
+      isArchived={false}
       onUntrack={() => {
         if (deleteSessionTarget) {
           closeSession(deleteSessionTarget.projectId, deleteSessionTarget.sessionId, false);
@@ -788,36 +648,6 @@
         deleteSessionTarget = null;
       }}
       onClose={() => (deleteSessionTarget = null)}
-    />
-  {/if}
-
-  {#if archiveSessionTarget}
-    <ConfirmModal
-      title="Archive Session"
-      message={`Archive "${archiveSessionTarget.label}"? The terminal will be stopped.`}
-      confirmLabel="Archive"
-      onConfirm={() => {
-        if (archiveSessionTarget) {
-          archiveSession(archiveSessionTarget.projectId, archiveSessionTarget.sessionId);
-        }
-        archiveSessionTarget = null;
-      }}
-      onClose={() => (archiveSessionTarget = null)}
-    />
-  {/if}
-
-  {#if archiveProjectTarget}
-    <ConfirmModal
-      title="Archive Project"
-      message={`Archive "${archiveProjectTarget.name}" and all its sessions?`}
-      confirmLabel="Archive"
-      onConfirm={() => {
-        if (archiveProjectTarget) {
-          archiveProject(archiveProjectTarget.id);
-        }
-        archiveProjectTarget = null;
-      }}
-      onClose={() => (archiveProjectTarget = null)}
     />
   {/if}
 
@@ -857,15 +687,13 @@
       projectId={deleteTarget.id}
       projectName={deleteTarget.name}
       onDeleted={async () => {
-        const list = isArchiveView ? archivedProjectList : projectList;
-        const nextFocus = focusAfterProjectDelete(list, deleteTarget!.id, expandedProjectSet, isArchiveView);
+        const nextFocus = focusAfterProjectDelete(projectList, deleteTarget!.id, expandedProjectSet);
         activeSessionId.update(current => {
           if (deleteTarget!.sessions.some(s => s.id === current)) return nextFocus?.type === "session" ? nextFocus.sessionId : null;
           return current;
         });
         deleteTarget = null;
         await loadProjects();
-        if (isArchiveView) await loadArchivedProjects();
         focusTarget.set(nextFocus);
       }}
       onClose={() => (deleteTarget = null)}
@@ -950,34 +778,8 @@
     min-width: 0;
   }
 
-  .footer-tabs {
-    display: flex;
-  }
-
   .footer-spacer {
     min-height: 31px;
-  }
-
-  .footer-tab {
-    flex: 1;
-    background: none;
-    border: none;
-    color: #6c7086;
-    padding: 8px 0;
-    font-size: 12px;
-    cursor: pointer;
-    box-shadow: none;
-    text-align: center;
-  }
-
-  .footer-tab:hover {
-    color: #cdd6f4;
-    background: #313244;
-  }
-
-  .footer-tab.active {
-    color: #cdd6f4;
-    border-bottom: 2px solid #89b4fa;
   }
 
   .provider-indicator {

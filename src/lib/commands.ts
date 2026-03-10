@@ -11,8 +11,6 @@ export type CommandId =
   | "fuzzy-finder"
   | "new-project"
   | "delete"
-  | "archive"
-  | "toggle-archive-view"
   | "create-session"
   | "finish-branch"
   | "toggle-sidebar"
@@ -83,8 +81,6 @@ export const commands: CommandDef[] = [
   // ── Projects ──
   { id: "new-project", key: "n", section: "Projects", description: "New project", mode: "development" },
   { id: "delete", key: "d", section: "Projects", description: "Delete focused item (session or project)", mode: "development" },
-  { id: "archive", key: "a", section: "Projects", description: "Archive focused item (session or project)", mode: "development" },
-  { id: "toggle-archive-view", key: "A", section: "Projects", description: "View archived projects", mode: "development" },
   { id: "create-issue", key: "i", section: "Projects", description: "Create GitHub issue for focused project", mode: "development" },
   { id: "triage-untriaged", key: "t", section: "Projects", description: "Triage issues (untriaged)", mode: "development" },
   { id: "triage-triaged", key: "T", section: "Projects", description: "View triaged issues", mode: "development" },

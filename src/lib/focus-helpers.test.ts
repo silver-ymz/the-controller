@@ -34,25 +34,25 @@ function makeProject(id: string, sessionIds: string[]): Project {
 describe("focusAfterSessionDelete", () => {
   it("focuses the session above when deleting a non-first session", () => {
     const projects = [makeProject("p1", ["s1", "s2", "s3"])];
-    const result = focusAfterSessionDelete(projects, "p1", "s2", false);
+    const result = focusAfterSessionDelete(projects, "p1", "s2");
     expect(result).toEqual({ type: "session", sessionId: "s1", projectId: "p1" });
   });
 
   it("focuses the parent project when deleting the first session", () => {
     const projects = [makeProject("p1", ["s1", "s2"])];
-    const result = focusAfterSessionDelete(projects, "p1", "s1", false);
+    const result = focusAfterSessionDelete(projects, "p1", "s1");
     expect(result).toEqual({ type: "project", projectId: "p1" });
   });
 
   it("focuses the parent project when deleting the only session", () => {
     const projects = [makeProject("p1", ["s1"])];
-    const result = focusAfterSessionDelete(projects, "p1", "s1", false);
+    const result = focusAfterSessionDelete(projects, "p1", "s1");
     expect(result).toEqual({ type: "project", projectId: "p1" });
   });
 
   it("returns null for unknown project", () => {
     const projects = [makeProject("p1", ["s1"])];
-    const result = focusAfterSessionDelete(projects, "unknown", "s1", false);
+    const result = focusAfterSessionDelete(projects, "unknown", "s1");
     expect(result).toBeNull();
   });
 });
@@ -64,7 +64,7 @@ describe("focusAfterProjectDelete", () => {
       makeProject("p2", ["s3"]),
     ];
     const expanded = new Set(["p1"]);
-    const result = focusAfterProjectDelete(projects, "p2", expanded, false);
+    const result = focusAfterProjectDelete(projects, "p2", expanded);
     expect(result).toEqual({ type: "session", sessionId: "s2", projectId: "p1" });
   });
 
@@ -74,7 +74,7 @@ describe("focusAfterProjectDelete", () => {
       makeProject("p2", ["s3"]),
     ];
     const expanded = new Set<string>();
-    const result = focusAfterProjectDelete(projects, "p2", expanded, false);
+    const result = focusAfterProjectDelete(projects, "p2", expanded);
     expect(result).toEqual({ type: "project", projectId: "p1" });
   });
 
@@ -84,21 +84,21 @@ describe("focusAfterProjectDelete", () => {
       makeProject("p2", ["s3"]),
     ];
     const expanded = new Set(["p1"]);
-    const result = focusAfterProjectDelete(projects, "p2", expanded, false);
+    const result = focusAfterProjectDelete(projects, "p2", expanded);
     expect(result).toEqual({ type: "project", projectId: "p1" });
   });
 
   it("returns null when deleting the topmost project", () => {
     const projects = [makeProject("p1", ["s1"])];
     const expanded = new Set<string>();
-    const result = focusAfterProjectDelete(projects, "p1", expanded, false);
+    const result = focusAfterProjectDelete(projects, "p1", expanded);
     expect(result).toBeNull();
   });
 
   it("returns null for unknown project", () => {
     const projects = [makeProject("p1", ["s1"])];
     const expanded = new Set<string>();
-    const result = focusAfterProjectDelete(projects, "unknown", expanded, false);
+    const result = focusAfterProjectDelete(projects, "unknown", expanded);
     expect(result).toBeNull();
   });
 });
