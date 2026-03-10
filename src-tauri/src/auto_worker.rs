@@ -88,19 +88,49 @@ impl AutoWorkerScheduler {
             if !project.auto_worker.enabled || project.archived {
                 continue;
             }
-            let mut issues = match fetch_issues_sync(&project.repo_path) {
+            let issues = match fetch_issues_sync(&project.repo_path) {
                 Ok(issues) => issues,
                 Err(_) => continue,
             };
-            if migrate_issues_sync(&project.repo_path, &mut issues).is_err() {
-                continue;
-            }
             for issue in &issues {
                 let labels: Vec<&str> = issue.labels.iter().map(|l| l.name.as_str()).collect();
                 if labels.contains(&LABEL_IN_PROGRESS) {
                     eprintln!("Auto-worker: removing stale in-progress label from #{}", issue.number);
                     let _ = remove_label_sync(&project.repo_path, issue.number, LABEL_IN_PROGRESS);
                 }
+            }
+        }
+    }
+
+    /// Migrate legacy issue labels in the background.
+    /// Runs once on startup without blocking the poll loop.
+    fn migrate_labels_background(app_handle: &AppHandle) {
+        let state = match app_handle.try_state::<AppState>() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let projects = {
+            let storage = match state.storage.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            match storage.list_projects() {
+                Ok(p) => p,
+                Err(_) => return,
+            }
+        };
+
+        for project in &projects {
+            if !project.auto_worker.enabled || project.archived {
+                continue;
+            }
+            let mut issues = match fetch_issues_sync(&project.repo_path) {
+                Ok(issues) => issues,
+                Err(_) => continue,
+            };
+            if let Err(e) = migrate_issues_sync(&project.repo_path, &mut issues) {
+                eprintln!("Auto-worker: label migration failed for {}: {}", project.name, e);
             }
         }
     }
@@ -112,6 +142,14 @@ impl AutoWorkerScheduler {
             // On startup, clean up stale `in-progress` labels from any previous run.
             // No sessions are active yet, so any `in-progress` label is orphaned.
             Self::cleanup_stale_labels(&app_handle);
+
+            // Migrate legacy labels in a background thread so the poll loop
+            // can start immediately. Migration is slow (~2-5s per issue via
+            // gh API) and was previously blocking the scheduler for minutes.
+            let migration_handle = app_handle.clone();
+            std::thread::spawn(move || {
+                Self::migrate_labels_background(&migration_handle);
+            });
 
             loop {
                 std::thread::sleep(Duration::from_secs(POLL_INTERVAL_SECS));
@@ -222,18 +260,13 @@ impl AutoWorkerScheduler {
                         continue;
                     }
 
-                    let mut issues = match fetch_issues_sync(&project.repo_path) {
+                    let issues = match fetch_issues_sync(&project.repo_path) {
                         Ok(issues) => issues,
                         Err(e) => {
                             eprintln!("Auto-worker: failed to fetch issues for {}: {}", project.name, e);
                             continue;
                         }
                     };
-
-                    if let Err(e) = migrate_issues_sync(&project.repo_path, &mut issues) {
-                        eprintln!("Auto-worker: failed to migrate issue labels for {}: {}", project.name, e);
-                        continue;
-                    }
 
                     let eligible = match pick_eligible_issue(&issues) {
                         Some(issue) => issue.clone(),
@@ -407,9 +440,11 @@ fn apply_issue_migration(issue: &mut GithubIssue, migration: &LabelMigration) {
     }
 }
 
-fn migrate_issues_sync(repo_path: &str, issues: &mut [GithubIssue]) -> Result<(), String> {
+/// Migrate legacy labels on all issues. Returns the number of issues migrated.
+fn migrate_issues_sync(repo_path: &str, issues: &mut [GithubIssue]) -> Result<usize, String> {
     ensure_standard_labels_exist_sync(repo_path)?;
 
+    let mut count = 0;
     for issue in issues {
         let migration = migration_for_issue(issue);
         if migration.is_empty() {
@@ -424,9 +459,10 @@ fn migrate_issues_sync(repo_path: &str, issues: &mut [GithubIssue]) -> Result<()
         }
 
         apply_issue_migration(issue, &migration);
+        count += 1;
     }
 
-    Ok(())
+    Ok(count)
 }
 
 fn spawn_auto_worker_session(
