@@ -149,24 +149,25 @@
       ),
     );
 
-    // Prevent xterm.js scrollback scrolling when in normal mode.
-    // This app runs TUI apps (Claude Code / Codex) that use alternate screen.
-    // If the alternate-screen escape was missed (race condition), xterm.js
-    // stays in normal mode and wheel events scroll through stale shell output
-    // instead of being forwarded to the TUI. This handler catches that case
-    // by converting wheel events to arrow keys when the buffer has scrollback.
-    // When in alternate screen mode, xterm.js already handles this correctly.
+    // In alternate screen mode, xterm.js converts wheel events to arrow keys
+    // (because there's no scrollback). Claude Code interprets those arrows as
+    // input history navigation instead of scrolling. Fix: send SGR mouse wheel
+    // escape sequences directly to the inner process via send_raw_to_pty, which
+    // bypasses tmux's terminal parser. Claude Code's crossterm has mouse capture
+    // enabled and will handle these as scroll events.
     term.attachCustomWheelEventHandler((ev: WheelEvent) => {
       if (term!.buffer.active.type === 'alternate') {
-        return true; // xterm.js converts to arrow keys — correct behavior
+        ev.preventDefault();
+        if (ev.deltaY !== 0) {
+          // SGR mouse encoding: \x1b[<button;col;rowM
+          // Button 64 = scroll up, 65 = scroll down
+          const button = ev.deltaY < 0 ? 64 : 65;
+          const seq = `\x1b[<${button};1;1M`;
+          invoke("send_raw_to_pty", { sessionId, data: seq }).catch(() => {});
+        }
+        return false;
       }
-      // Normal mode: prevent scrollback scrolling, send arrow keys to PTY
-      ev.preventDefault();
-      if (ev.deltaY !== 0) {
-        const direction = ev.deltaY < 0 ? '\x1b[A' : '\x1b[B';
-        writeToPty(direction);
-      }
-      return false;
+      return true;
     });
 
     // Connect user input to PTY (gated until initialization settles)
