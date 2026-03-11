@@ -14,6 +14,7 @@
   import IssuePickerModal from "./lib/IssuePickerModal.svelte";
   import PromptPickerModal from "./lib/PromptPickerModal.svelte";
   import SecureEnvModal from "./lib/SecureEnvModal.svelte";
+  import DeploySetupModal from "./lib/DeploySetupModal.svelte";
   import TriagePanel from "./lib/TriagePanel.svelte";
   import AssignedIssuesPanel from "./lib/AssignedIssuesPanel.svelte";
   import KeystrokeVisualizer from "./lib/KeystrokeVisualizer.svelte";
@@ -21,6 +22,7 @@
   import AgentDashboard from "./lib/AgentDashboard.svelte";
   import NotesEditor from "./lib/NotesEditor.svelte";
   import ArchitectureExplorer from "./lib/ArchitectureExplorer.svelte";
+  import InfrastructureDashboard from "./lib/InfrastructureDashboard.svelte";
   import { refreshProjectsFromBackend } from "./lib/project-listing";
   import { showToast } from "./lib/toast";
   import { appConfig, architectureViews, createArchitectureViewState, onboardingComplete, hotkeyAction, showKeyHints, sidebarVisible, workspaceModePickerVisible, workspaceMode, focusTarget, projects, sessionStatuses, activeSessionId, expandedProjects, dispatchHotkeyAction, focusTerminalSoon, selectedSessionProvider, type ArchitectureResult, type Config, type GithubIssue, type Project, type SavedPrompt, type SessionStatus, type TriageCategory } from "./lib/stores";
@@ -31,6 +33,7 @@
   let assignedIssuesPanelOpen = $state(false);
   let promptPickerTarget: { projectId: string } | null = $state(null);
   let secureEnvRequest: { requestId: string; projectId: string; projectName: string; key: string } | null = $state(null);
+  let deploySetupOpen = $state(false);
 
   const sidebarVisibleState = fromStore(sidebarVisible);
   const showKeyHintsState = fromStore(showKeyHints);
@@ -96,6 +99,29 @@
         promptPickerTarget = { projectId: action.projectId };
       } else if (action?.type === "generate-architecture") {
         generateArchitectureForProject(action.projectId, action.repoPath);
+      } else if (action?.type === "deploy-project") {
+        command<boolean>("is_deploy_provisioned").then(async (provisioned) => {
+          if (!provisioned) {
+            deploySetupOpen = true;
+          } else {
+            const project = projectsState.current.find((p) => p.id === action.projectId);
+            if (!project) return;
+            try {
+              showToast("Deploying...", "info");
+              const result = await command<{ url: string; coolify_uuid: string }>("deploy_project", {
+                request: {
+                  projectName: project.name,
+                  repoPath: project.repo_path,
+                  subdomain: project.name.toLowerCase().replace(/[^a-z0-9-]/g, "-"),
+                  projectType: "node",
+                },
+              });
+              showToast(`Deployed to ${result.url}`, "info");
+            } catch (e) {
+              showToast(String(e), "error");
+            }
+          }
+        });
       }
     });
     return unsub;
@@ -491,6 +517,8 @@
           />
         {:else if workspaceModeState.current === "notes"}
           <NotesEditor />
+        {:else if workspaceModeState.current === "infrastructure"}
+          <InfrastructureDashboard />
         {:else}
           <TerminalManager />
         {/if}
@@ -537,6 +565,12 @@
     {/if}
     {#if workspaceModePickerVisibleState.current}
       <WorkspaceModePicker />
+    {/if}
+    {#if deploySetupOpen}
+      <DeploySetupModal
+        onComplete={() => { deploySetupOpen = false; showToast("Deploy setup complete", "info"); }}
+        onClose={() => { deploySetupOpen = false; }}
+      />
     {/if}
   {/if}
 {/if}

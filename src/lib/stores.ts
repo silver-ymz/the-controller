@@ -177,7 +177,8 @@ export type WorkspaceMode =
   | "development"
   | "agents"
   | "notes"
-  | "architecture";
+  | "architecture"
+  | "infrastructure";
 export const workspaceMode = writable<WorkspaceMode>("development");
 export const workspaceModePickerVisible = writable<boolean>(false);
 export type SessionProvider = "claude" | "codex";
@@ -271,6 +272,8 @@ export type HotkeyAction =
   | { type: "unstage-session-inplace"; projectId: string }
   | { type: "toggle-maintainer-view" }
   | { type: "open-issue-in-browser" }
+  | { type: "deploy-project"; projectId: string; repoPath: string }
+  | { type: "rollback-deploy"; projectId: string }
   | null;
 
 export const hotkeyAction = writable<HotkeyAction>(null);

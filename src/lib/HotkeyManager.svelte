@@ -130,6 +130,12 @@
       if (newFocus !== currentFocus) focusTarget.set(newFocus);
       return;
     }
+    if (key === "i") {
+      workspaceMode.set("infrastructure");
+      const newFocus = focusForModeSwitch(currentFocus, "infrastructure", activeId, projectList);
+      if (newFocus !== currentFocus) focusTarget.set(newFocus);
+      return;
+    }
     // Any other key (including Escape) cancels
   }
 
@@ -159,6 +165,13 @@
         for (const n of notes) {
           result.push({ type: "note", filename: n.filename, projectId: p.id });
         }
+      }
+      return result;
+    }
+    if (currentMode === "infrastructure") {
+      const result: SidebarItem[] = [];
+      for (const p of projectList) {
+        result.push({ type: "project", projectId: p.id });
       }
       return result;
     }
@@ -402,6 +415,20 @@
       case "toggle-maintainer-view":
         dispatchAction({ type: "toggle-maintainer-view" });
         return true;
+      case "deploy-project": {
+        const project = getFocusedProject();
+        if (project) {
+          dispatchAction({ type: "deploy-project", projectId: project.id, repoPath: project.repo_path });
+        }
+        return true;
+      }
+      case "rollback-deploy": {
+        const project = getFocusedProject();
+        if (project) {
+          dispatchAction({ type: "rollback-deploy", projectId: project.id });
+        }
+        return true;
+      }
       default: {
         const _exhaustive: never = id;
         return false;
