@@ -814,14 +814,16 @@ fn find_staging_port(base_port: u16) -> Result<u16, String> {
         .checked_add(STAGING_PORT_OFFSET)
         .ok_or("Port overflow")?;
     for candidate in start..start.saturating_add(100) {
-        if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
+        let ipv4_free = std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok();
+        let ipv6_free = std::net::TcpListener::bind(("::1", candidate)).is_ok();
+        if ipv4_free && ipv6_free {
             return Ok(candidate);
         }
     }
     Err(format!(
         "No free port found in range {}-{}",
         start,
-        start + 100
+        start.saturating_add(99)
     ))
 }
 
@@ -858,6 +860,8 @@ pub async fn stage_session(
 
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+
+    let _staging_guard = state.staging_lock.lock().await;
 
     // Extract data under a short-lived storage lock to avoid deadlock with pty_manager
     let (repo_path, branch, worktree_path) = {
@@ -1055,7 +1059,7 @@ pub async fn stage_session(
     let log_stderr = log_file
         .try_clone()
         .map_err(|e| format!("Failed to clone log file: {}", e))?;
-    let child = std::process::Command::new("bash")
+    let mut child = std::process::Command::new("bash")
         .args(["./dev.sh", &port.to_string()])
         .current_dir(&wt)
         .env("CONTROLLER_SOCKET", crate::status_socket::staged_socket_path())
@@ -1066,9 +1070,12 @@ pub async fn stage_session(
         .map_err(|e| format!("Failed to spawn staged instance: {}", e))?;
 
     let pid = child.id();
-    // Deliberately leak the child handle — we manage the process via PID/process group,
-    // not via the Child handle. This avoids zombie entries from an unwaited child.
-    std::mem::forget(child);
+    // Reap the child in a background thread to prevent zombie entries.
+    // We manage the process lifetime via PID/process group (kill_process_group),
+    // not via this Child handle.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 
     // Save staged session info — if save fails, kill the orphan process
     let save_result = (|| -> Result<(), String> {
@@ -2083,6 +2090,7 @@ mod tests {
             issue_cache: Arc::new(Mutex::new(IssueCache::new())),
             secure_env_request: Mutex::new(None),
             emitter: crate::emitter::NoopEmitter::new(),
+            staging_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -3346,5 +3354,18 @@ mod staging_tests {
         let port = find_staging_port(base).unwrap();
         assert!(port > occupied_port);
         assert!(port <= occupied_port + 100);
+    }
+
+    #[test]
+    fn test_find_staging_port_checks_ipv6() {
+        // Bind on IPv6 only — find_staging_port must detect this.
+        // Skip gracefully on systems without IPv6 loopback.
+        let Ok(listener) = std::net::TcpListener::bind("[::1]:0") else {
+            return;
+        };
+        let occupied_port = listener.local_addr().unwrap().port();
+        let base = occupied_port.checked_sub(STAGING_PORT_OFFSET).unwrap();
+        let port = find_staging_port(base).unwrap();
+        assert_ne!(port, occupied_port, "must skip port occupied on IPv6");
     }
 }
