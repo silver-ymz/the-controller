@@ -805,15 +805,56 @@ pub fn cancel_secure_env_request(
 const COMMIT_POLL_INTERVAL_SECS: u64 = 3;
 const MAX_COMMIT_WAIT_SECS: u64 = 60;
 const MAX_REBASE_WAIT_SECS: u64 = 360; // 6 minutes
+const STAGING_PORT_OFFSET: u16 = 1000;
+
+/// Find a free port for the staged Controller instance.
+/// Starts at base_port + 1000 and increments until a free port is found.
+fn find_staging_port(base_port: u16) -> Result<u16, String> {
+    let start = base_port
+        .checked_add(STAGING_PORT_OFFSET)
+        .ok_or("Port overflow")?;
+    for candidate in start..start.saturating_add(100) {
+        if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "No free port found in range {}-{}",
+        start,
+        start + 100
+    ))
+}
+
+/// Kill a process group by PID. Sends SIGTERM to the group, then SIGKILL after 2s
+/// if the group is still alive.
+pub(crate) fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        use libc::{kill, SIGTERM, SIGKILL};
+        if let Ok(pgid) = i32::try_from(pid) {
+            unsafe { kill(-pgid, SIGTERM); }
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                // Only send SIGKILL if the process group is still alive
+                // (kill with signal 0 checks existence without sending a signal)
+                if unsafe { kill(-pgid, 0) } == 0 {
+                    unsafe { kill(-pgid, SIGKILL); }
+                }
+            });
+        }
+    }
+}
 
 #[tauri::command]
-pub async fn stage_session_inplace(
+pub async fn stage_session(
     state: State<'_, AppState>,
     _app_handle: AppHandle,
     project_id: String,
     session_id: String,
 ) -> Result<(), String> {
     use crate::models::StagedSession;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
 
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
@@ -829,8 +870,19 @@ pub async fn stage_session_inplace(
             return Err("Staging is only supported for the-controller".to_string());
         }
 
-        if project.staged_session.is_some() {
-            return Err("A session is already staged — unstage it first".to_string());
+        if let Some(staged) = &project.staged_session {
+            // Check if the staged process is still alive
+            #[cfg(unix)]
+            let alive = unsafe { libc::kill(staged.pid as i32, 0) } == 0;
+            #[cfg(not(unix))]
+            let alive = false;
+            if alive {
+                return Err("A session is already staged — unstage it first".to_string());
+            }
+            // Stale record — clear it
+            let mut p = project.clone();
+            p.staged_session = None;
+            storage.save_project(&p).map_err(|e| e.to_string())?;
         }
 
         let session = project
@@ -958,33 +1010,83 @@ pub async fn stage_session_inplace(
         }
     }
 
-    // 3. Proceed with staging — re-acquire storage lock
-    let rp = repo_path.clone();
-    let br = branch.clone();
-    let original_branch =
-        tokio::task::spawn_blocking(move || WorktreeManager::stage_inplace(&rp, &br))
-            .await
-            .map_err(|e| format!("Task failed: {}", e))??;
+    // 3. Launch a separate Controller instance from the worktree
+    let _ = state
+        .emitter
+        .emit("staging-status", "Preparing staged instance...");
 
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| e.to_string())?;
+    // Ensure node_modules exists in the worktree
+    let node_modules = PathBuf::from(&worktree_path).join("node_modules");
+    if !node_modules.exists() {
+        let _ = state
+            .emitter
+            .emit("staging-status", "Installing dependencies...");
+        let wt = worktree_path.clone();
+        let install_status = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("npm")
+                .arg("install")
+                .current_dir(&wt)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        })
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("npm install failed: {}", e))?;
 
-    let staging_branch = format!("staging/{}", branch);
-    project.staged_session = Some(StagedSession {
-        session_id: session_uuid,
-        original_branch,
-        staging_branch,
-    });
+        if !install_status.success() {
+            return Err("npm install failed in worktree".to_string());
+        }
+    }
 
-    storage.save_project(&project).map_err(|e| e.to_string())?;
+    let port = find_staging_port(1420)?;
+
+    let _ = state
+        .emitter
+        .emit("staging-status", &format!("Starting on port {}...", port));
+
+    let wt = worktree_path.clone();
+    let child = std::process::Command::new("bash")
+        .args(["./dev.sh", &port.to_string()])
+        .current_dir(&wt)
+        .env("CONTROLLER_SOCKET", crate::status_socket::staged_socket_path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("Failed to spawn staged instance: {}", e))?;
+
+    let pid = child.id();
+    // Deliberately leak the child handle — we manage the process via PID/process group,
+    // not via the Child handle. This avoids zombie entries from an unwaited child.
+    std::mem::forget(child);
+
+    // Save staged session info — if save fails, kill the orphan process
+    let save_result = (|| -> Result<(), String> {
+        let storage = state.storage.lock().map_err(|e| e.to_string())?;
+        let mut project = storage
+            .load_project(project_uuid)
+            .map_err(|e| e.to_string())?;
+
+        project.staged_session = Some(StagedSession {
+            session_id: session_uuid,
+            pid,
+            port,
+        });
+
+        storage.save_project(&project).map_err(|e| e.to_string())
+    })();
+
+    if let Err(e) = save_result {
+        kill_process_group(pid);
+        return Err(e);
+    }
 
     Ok(())
 }
 
 #[tauri::command]
-pub fn unstage_session_inplace(state: State<AppState>, project_id: String) -> Result<(), String> {
+pub fn unstage_session(state: State<AppState>, project_id: String) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
 
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
@@ -997,11 +1099,11 @@ pub fn unstage_session_inplace(state: State<AppState>, project_id: String) -> Re
         .take()
         .ok_or("No session is currently staged")?;
 
-    WorktreeManager::unstage_inplace(
-        &project.repo_path,
-        &staged.original_branch,
-        &staged.staging_branch,
-    )?;
+    // Kill the staged Controller process group
+    kill_process_group(staged.pid);
+
+    // Clean up the staged socket
+    let _ = std::fs::remove_file(crate::status_socket::staged_socket_path());
 
     storage.save_project(&project).map_err(|e| e.to_string())?;
     Ok(())
@@ -3213,5 +3315,27 @@ mod tests {
         .expect("cancel secure env request");
 
         assert!(app_state.secure_env_request.lock().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    #[test]
+    fn test_find_free_port_returns_offset_port_when_free() {
+        // Port 59123 is unlikely to be in use
+        let port = find_staging_port(58123).unwrap();
+        assert_eq!(port, 59123); // base + 1000
+    }
+
+    #[test]
+    fn test_find_free_port_skips_occupied() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_port = listener.local_addr().unwrap().port();
+        let base = occupied_port - 1000;
+        let port = find_staging_port(base).unwrap();
+        assert!(port > occupied_port);
+        assert!(port <= occupied_port + 100);
     }
 }
