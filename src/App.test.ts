@@ -339,6 +339,76 @@ describe("App screenshot flow", () => {
   });
 });
 
+describe("App default provider config", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // @ts-expect-error compile-time constants injected in app builds
+    globalThis.__BUILD_COMMIT__ = "test-commit";
+    // @ts-expect-error compile-time constants injected in app builds
+    globalThis.__BUILD_BRANCH__ = "test-branch";
+    // @ts-expect-error compile-time constants injected in app builds
+    globalThis.__DEV_PORT__ = "1420";
+
+    projects.set([baseProject]);
+    activeSessionId.set(null);
+    focusTarget.set({ type: "project", projectId: "proj-1" });
+    hotkeyAction.set(null);
+    showKeyHints.set(false);
+    sidebarVisible.set(true);
+    selectedSessionProvider.set("claude");
+    workspaceMode.set("development");
+    architectureViews.set(new Map());
+    onboardingComplete.set(true);
+    appConfig.set({ projects_root: "/tmp/projects" });
+    sessionStatuses.set(new Map());
+    expandedProjects.set(new Set());
+  });
+
+  it("initializes the selected provider from codex config", async () => {
+    vi.mocked(command).mockImplementation(async (cmd: string) => {
+      if (cmd === "restore_sessions") return;
+      if (cmd === "check_onboarding") {
+        return {
+          projects_root: "/tmp/projects",
+          default_provider: "codex",
+        };
+      }
+      return;
+    });
+
+    render(App);
+
+    await waitFor(() => {
+      expect(selectedSessionProvider.subscribe).toBeDefined();
+      expect(screen.queryByText("Send Screenshot To")).not.toBeInTheDocument();
+    });
+
+    expect((await import("svelte/store")).get(selectedSessionProvider)).toBe("codex");
+  });
+
+  it("defaults to claude when config omits default_provider", async () => {
+    selectedSessionProvider.set("codex");
+
+    vi.mocked(command).mockImplementation(async (cmd: string) => {
+      if (cmd === "restore_sessions") return;
+      if (cmd === "check_onboarding") {
+        return {
+          projects_root: "/tmp/projects",
+        };
+      }
+      return;
+    });
+
+    render(App);
+
+    await waitFor(() => {
+      expect(mocks.setTitle).toHaveBeenCalled();
+    });
+
+    expect((await import("svelte/store")).get(selectedSessionProvider)).toBe("claude");
+  });
+});
+
 describe("Window title updates on staging", () => {
   beforeEach(() => {
     vi.clearAllMocks();

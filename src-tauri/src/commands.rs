@@ -1305,7 +1305,10 @@ pub fn save_onboarding_config(state: State<AppState>, projects_root: String) -> 
 
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     let base_dir = storage.base_dir();
-    let cfg = config::Config { projects_root };
+    let cfg = config::Config {
+        projects_root,
+        default_provider: config::ConfigDefaultProvider::ClaudeCode,
+    };
     config::save_config(&base_dir, &cfg).map_err(|e| e.to_string())
 }
 
@@ -2175,6 +2178,7 @@ mod tests {
             base_dir,
             &Config {
                 projects_root: projects_root.to_string_lossy().to_string(),
+                default_provider: crate::config::ConfigDefaultProvider::ClaudeCode,
             },
         )
         .expect("save_config");

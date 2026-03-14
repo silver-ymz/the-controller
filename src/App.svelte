@@ -24,7 +24,7 @@
   import VoiceMode from "./lib/VoiceMode.svelte";
   import { refreshProjectsFromBackend } from "./lib/project-listing";
   import { showToast } from "./lib/toast";
-  import { appConfig, architectureViews, createArchitectureViewState, onboardingComplete, hotkeyAction, showKeyHints, sidebarVisible, workspaceModePickerVisible, workspaceMode, focusTarget, projects, sessionStatuses, activeSessionId, expandedProjects, dispatchHotkeyAction, focusTerminalSoon, selectedSessionProvider, type ArchitectureResult, type Config, type GithubIssue, type Project, type SavedPrompt, type SessionStatus } from "./lib/stores";
+  import { appConfig, architectureViews, createArchitectureViewState, onboardingComplete, hotkeyAction, showKeyHints, sidebarVisible, workspaceModePickerVisible, workspaceMode, focusTarget, projects, sessionStatuses, activeSessionId, expandedProjects, dispatchHotkeyAction, focusTerminalSoon, selectedSessionProvider, sessionProviderFromConfig, type ArchitectureResult, type Config, type GithubIssue, type Project, type SavedPrompt, type SessionStatus } from "./lib/stores";
   let ready = $state(false);
   let issuesModalTarget: { projectId: string; repoPath: string } | null = $state(null);
   let promptPickerTarget: { projectId: string } | null = $state(null);
@@ -445,6 +445,7 @@
         const config = await command<Config | null>("check_onboarding");
         if (config) {
           appConfig.set(config);
+          selectedSessionProvider.set(sessionProviderFromConfig(config.default_provider));
           onboardingComplete.set(true);
         }
       } catch (e) {

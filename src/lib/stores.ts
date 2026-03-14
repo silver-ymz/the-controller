@@ -126,7 +126,10 @@ export interface ProjectInventory {
 
 export interface Config {
   projects_root: string;
+  default_provider?: ConfigDefaultProvider;
 }
+
+export type ConfigDefaultProvider = "claude-code" | "codex";
 
 export interface NoteEntry {
   filename: string;
@@ -184,6 +187,12 @@ export const workspaceMode = writable<WorkspaceMode>("development");
 export const workspaceModePickerVisible = writable<boolean>(false);
 export type SessionProvider = "claude" | "codex";
 export const selectedSessionProvider = writable<SessionProvider>("claude");
+
+export function sessionProviderFromConfig(
+  provider: ConfigDefaultProvider | undefined,
+): SessionProvider {
+  return provider === "codex" ? "codex" : "claude";
+}
 
 export const activeNote = writable<{
   folder: string;

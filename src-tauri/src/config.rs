@@ -3,9 +3,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigDefaultProvider {
+    #[default]
+    ClaudeCode,
+    Codex,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub projects_root: String,
+    #[serde(default)]
+    pub default_provider: ConfigDefaultProvider,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,12 +163,42 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = Config {
             projects_root: "/home/user/projects".to_string(),
+            default_provider: ConfigDefaultProvider::ClaudeCode,
         };
 
         save_config(tmp.path(), &config).expect("save_config should succeed");
         let loaded = load_config(tmp.path()).expect("load_config should return Some");
 
         assert_eq!(loaded.projects_root, "/home/user/projects");
+        assert_eq!(loaded.default_provider, ConfigDefaultProvider::ClaudeCode);
+    }
+
+    #[test]
+    fn test_save_config_writes_default_provider_field() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config {
+            projects_root: "/home/user/projects".to_string(),
+            default_provider: ConfigDefaultProvider::ClaudeCode,
+        };
+
+        save_config(tmp.path(), &config).expect("save_config should succeed");
+        let json = fs::read_to_string(config_path(tmp.path())).expect("config.json should exist");
+
+        assert!(json.contains(r#""default_provider": "claude-code""#));
+    }
+
+    #[test]
+    fn test_save_and_load_config_with_codex_default_provider() {
+        let tmp = TempDir::new().unwrap();
+        let config = Config {
+            projects_root: "/home/user/projects".to_string(),
+            default_provider: ConfigDefaultProvider::Codex,
+        };
+
+        save_config(tmp.path(), &config).expect("save_config should succeed");
+        let loaded = load_config(tmp.path()).expect("load_config should return Some");
+
+        assert_eq!(loaded.default_provider, ConfigDefaultProvider::Codex);
     }
 
     #[test]
@@ -208,6 +248,20 @@ mod tests {
         fs::write(config_path(tmp.path()), "not valid json").unwrap();
         let result = load_config(tmp.path());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_config_without_default_provider_uses_claude_code() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            config_path(tmp.path()),
+            r#"{"projects_root":"/home/user/projects"}"#,
+        )
+        .unwrap();
+
+        let result = load_config(tmp.path()).expect("load_config should return Some");
+
+        assert_eq!(result.default_provider, ConfigDefaultProvider::ClaudeCode);
     }
 
     #[test]
