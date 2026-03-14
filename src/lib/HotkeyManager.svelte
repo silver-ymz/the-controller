@@ -123,6 +123,12 @@
       if (newFocus !== currentFocus) focusTarget.set(newFocus);
       return;
     }
+    if (key === "v") {
+      workspaceMode.set("voice");
+      const newFocus = focusForModeSwitch(currentFocus, "voice", activeId, projectList);
+      if (newFocus !== currentFocus) focusTarget.set(newFocus);
+      return;
+    }
     // Any other key (including Escape) cancels
   }
 
@@ -567,6 +573,17 @@
         e.stopPropagation();
         e.preventDefault();
         dispatchAction({ type: "open-issue-in-browser" });
+        pushKeystroke(e.key);
+        return;
+      }
+    }
+
+    // Voice mode: d = debug, t = transcript
+    if (currentMode === "voice") {
+      if (e.key === "d" || e.key === "t") {
+        e.stopPropagation();
+        e.preventDefault();
+        dispatchAction({ type: "voice-toggle-panel", panel: e.key === "d" ? "debug" : "transcript" });
         pushKeystroke(e.key);
         return;
       }

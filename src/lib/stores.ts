@@ -178,7 +178,8 @@ export type WorkspaceMode =
   | "agents"
   | "notes"
   | "architecture"
-  | "infrastructure";
+  | "infrastructure"
+  | "voice";
 export const workspaceMode = writable<WorkspaceMode>("development");
 export const workspaceModePickerVisible = writable<boolean>(false);
 export type SessionProvider = "claude" | "codex";
@@ -273,6 +274,7 @@ export type HotkeyAction =
   | { type: "open-issue-in-browser" }
   | { type: "deploy-project"; projectId: string; repoPath: string }
   | { type: "rollback-deploy"; projectId: string }
+  | { type: "voice-toggle-panel"; panel: "debug" | "transcript" }
   | null;
 
 export const hotkeyAction = writable<HotkeyAction>(null);
