@@ -16,10 +16,9 @@ fn live_chat_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-const SYSTEM_PROMPT: &str = "You are a voice assistant. Reply in 1–2 sentences max. \
-Be direct — no filler like \"Sure!\", \"Great question!\", \"Of course!\". Just answer. \
-Never use lists, bullet points, markdown, or code blocks. Speak as briefly as a human would in casual conversation.";
+const SYSTEM_PROMPT: &str = "You are in a live voice chat. Your replies are spoken aloud via TTS.";
 
+#[derive(Clone)]
 pub struct Conversation {
     pub messages: Vec<(String, String)>, // (role, content)
     persona: Option<String>,
@@ -163,6 +162,6 @@ mod tests {
     #[test]
     fn conversation_uses_default_system_prompt() {
         let conv = Conversation::new(None);
-        assert!(conv.system_prompt().contains("voice assistant"));
+        assert!(conv.system_prompt().contains("voice chat"));
     }
 }
