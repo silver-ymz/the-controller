@@ -139,6 +139,12 @@
             role="option"
             tabindex="0"
             aria-selected={i === selectedIndex}
+            onkeydown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                selectDirectory(entry);
+              }
+            }}
           >
             <span class="entry-name">{entry.name}</span>
             <span class="entry-path">{entry.path}</span>

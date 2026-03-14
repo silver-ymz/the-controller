@@ -25,6 +25,16 @@ pnpm install
 pnpm tauri dev
 ```
 
+Before considering local work finished, run:
+
+```bash
+pnpm check
+cd src-tauri && cargo fmt --check
+cd src-tauri && cargo clippy -- -D warnings
+```
+
+`pnpm check` is a real gate in this repo. Do not ignore warnings and do not assume Rust formatting is already clean.
+
 ### tmux Configuration
 
 If you use Claude Code inside tmux to develop this project, add the following to `~/.tmux.conf` for a cleaner UI:

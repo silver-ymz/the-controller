@@ -2,6 +2,8 @@
 
 All keyboard input flows through `HotkeyManager.svelte`. Hotkey definitions live in `src/lib/commands.ts`.
 
+When you change hotkeys, overlays, or other UI behavior in this area, finish by running `pnpm check`, `cd src-tauri && cargo fmt --check`, and `cd src-tauri && cargo clippy -- -D warnings`. The frontend check fails on warnings, not just errors.
+
 ## Workspace Modes
 
 The Controller has six workspace modes, each with its own hotkeys. Press `Space` then a key to switch:

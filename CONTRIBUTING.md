@@ -21,6 +21,7 @@ Bad examples:
 ## Quality bar
 
 - PRs must pass all existing tests (`pnpm test` and `cd src-tauri && cargo test`).
+- PRs must also pass the repo's format/lint gates: `pnpm check`, `cd src-tauri && cargo fmt --check`, and `cd src-tauri && cargo clippy -- -D warnings`.
 - If your change is behavioral, include a test or explain why one isn't feasible.
 - Keep changes focused — one concern per PR.
 

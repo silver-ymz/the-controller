@@ -12,7 +12,7 @@
   let { folders, onSubmit, onClose }: Props = $props();
 
   let title = $state("");
-  let selectedFolder = $state(folders.length > 0 ? folders[0] : NEW_FOLDER_SENTINEL);
+  let selectedFolder = $state(NEW_FOLDER_SENTINEL);
   let newFolderName = $state("");
   let folderSelectEl: HTMLSelectElement | undefined = $state();
   let newFolderInput: HTMLInputElement | undefined = $state();
@@ -21,6 +21,13 @@
   let isNewFolder = $derived(selectedFolder === NEW_FOLDER_SENTINEL);
   let resolvedFolder = $derived(isNewFolder ? newFolderName.trim() : selectedFolder);
   let canSubmit = $derived(title.trim() !== "" && resolvedFolder !== "");
+
+  $effect(() => {
+    selectedFolder =
+      folders.length > 0 && selectedFolder === NEW_FOLDER_SENTINEL
+        ? folders[0]
+        : selectedFolder;
+  });
 
   onMount(() => {
     if (isNewFolder) {
@@ -54,7 +61,14 @@
   }
 </script>
 
-<div class="overlay" onclick={onClose} onkeydown={handleKeydown} role="dialog">
+<div
+  class="overlay"
+  onclick={onClose}
+  onkeydown={handleKeydown}
+  role="dialog"
+  tabindex="-1"
+  aria-modal="true"
+>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="modal" onclick={(e) => e.stopPropagation()} role="presentation">
     <div class="modal-header">New Note</div>

@@ -2,6 +2,10 @@
   import { onMount } from "svelte";
   import { command } from "$lib/backend";
 
+  const HETZNER_KEY_INPUT_ID = "deploy-hetzner-key";
+  const CLOUDFLARE_KEY_INPUT_ID = "deploy-cloudflare-key";
+  const ROOT_DOMAIN_INPUT_ID = "deploy-root-domain";
+
   interface Props {
     onComplete: () => void;
     onClose: () => void;
@@ -58,14 +62,22 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div class="overlay" onclick={onClose} role="dialog" onkeydown={handleKeydown}>
+<div
+  class="overlay"
+  onclick={onClose}
+  role="dialog"
+  onkeydown={handleKeydown}
+  tabindex="-1"
+  aria-modal="true"
+>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="modal" onclick={(e) => e.stopPropagation()}>
+  <div class="modal" onclick={(e) => e.stopPropagation()} role="presentation">
     <div class="modal-title">Deploy Setup — Step {step} of 3</div>
 
     {#if step === 1}
-      <label class="field-label">Hetzner API Key</label>
+      <label class="field-label" for={HETZNER_KEY_INPUT_ID}>Hetzner API Key</label>
       <input
+        id={HETZNER_KEY_INPUT_ID}
         bind:this={inputEl}
         bind:value={hetznerKey}
         type="password"
@@ -74,16 +86,18 @@
       />
       <p class="hint">Get one from Hetzner Cloud Console → Security → API Tokens</p>
     {:else if step === 2}
-      <label class="field-label">Cloudflare API Key</label>
+      <label class="field-label" for={CLOUDFLARE_KEY_INPUT_ID}>Cloudflare API Key</label>
       <input
+        id={CLOUDFLARE_KEY_INPUT_ID}
         bind:this={inputEl}
         bind:value={cloudflareKey}
         type="password"
         class="field-input"
         placeholder="Enter your Cloudflare API token"
       />
-      <label class="field-label">Root Domain</label>
+      <label class="field-label" for={ROOT_DOMAIN_INPUT_ID}>Root Domain</label>
       <input
+        id={ROOT_DOMAIN_INPUT_ID}
         bind:value={rootDomain}
         type="text"
         class="field-input"
