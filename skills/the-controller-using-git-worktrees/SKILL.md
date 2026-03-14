@@ -104,7 +104,7 @@ Auto-detect and run appropriate setup:
 
 ```bash
 # Node.js
-if [ -f package.json ]; then npm install; fi
+if [ -f package.json ]; then pnpm install; fi
 
 # Rust
 if [ -f Cargo.toml ]; then cargo build; fi
@@ -123,7 +123,7 @@ Run tests to ensure worktree starts clean:
 
 ```bash
 # Examples - use project-appropriate command
-npm test
+pnpm test
 cargo test
 pytest
 go test ./...
@@ -183,8 +183,8 @@ You: I'm using the the-controller-using-git-worktrees skill to set up an isolate
 [Check .worktrees/ - exists]
 [Verify ignored - git check-ignore confirms .worktrees/ is ignored]
 [Create worktree: git worktree add .worktrees/auth -b feature/auth]
-[Run npm install]
-[Run npm test - 47 passing]
+[Run pnpm install]
+[Run pnpm test - 47 passing]
 
 Worktree ready at /Users/jesse/myproject/.worktrees/auth
 Tests passing (47 tests, 0 failures)

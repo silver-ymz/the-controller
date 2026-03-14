@@ -14,15 +14,15 @@ Built with Tauri v2 + Svelte 5 + Rust.
 Install prerequisites:
 
 - [Rust](https://rustup.rs/) + Tauri v2
-- [Node.js](https://nodejs.org/) + npm
+- [Node.js](https://nodejs.org/) + pnpm
 - tmux (`brew install tmux`)
 - espeak-ng (`brew install espeak-ng`) — required for voice mode TTS
 
 Then:
 
 ```bash
-npm install
-npm run tauri dev
+pnpm install
+pnpm tauri dev
 ```
 
 ### tmux Configuration

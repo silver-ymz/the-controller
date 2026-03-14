@@ -29,7 +29,7 @@ ps -p $(lsof -t -i :1420) -o command=
 # Code changes MUST go to that directory, not a worktree
 
 # 3. Playwright dependencies
-npm install  # worktrees need their own node_modules
+pnpm install  # worktrees need their own node_modules
 ```
 
 **Silent failure trap**: The axum server has a `fallback_handler` that returns `null` for any unregistered API route. If a feature silently does nothing in browser mode, check if the API endpoint exists in `src-tauri/src/bin/server.rs`.
@@ -61,13 +61,13 @@ Run with:
 
 ```bash
 # Default: headless (no focus stealing, same browser engine)
-npx playwright test <file> --project=e2e --trace on
+pnpm exec playwright test <file> --project=e2e --trace on
 
 # Optional: headed (opens a visible browser window — steals focus on macOS)
-npx playwright test <file> --project=e2e --headed
+pnpm exec playwright test <file> --project=e2e --headed
 ```
 
-**Use headless by default.** It runs the exact same browser engine and rendering pipeline — no accuracy loss. Pass `--trace on` to get DOM snapshots, screenshots, network logs, and console output at every step, then review with `npx playwright show-trace <trace.zip>`.
+**Use headless by default.** It runs the exact same browser engine and rendering pipeline — no accuracy loss. Pass `--trace on` to get DOM snapshots, screenshots, network logs, and console output at every step, then review with `pnpm exec playwright show-trace <trace.zip>`.
 
 Only use `--headed` when you need live visual interaction (e.g., pausing with `await page.pause()` to manually inspect state).
 

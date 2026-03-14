@@ -1493,7 +1493,7 @@ That should be enough to render the view."#;
             top_level_directories: vec!["docs".to_string()],
             files: vec![RepoEvidenceFile {
                 path: "README.md".to_string(),
-                snippet: "# README\n```bash\nnpm install\n```\n".to_string(),
+                snippet: "# README\n```bash\npnpm install\n```\n".to_string(),
             }],
         };
 
@@ -1504,7 +1504,7 @@ That should be enough to render the view."#;
             "prompt evidence should not open raw markdown fences"
         );
         assert!(prompt.contains("### README.md"));
-        assert!(prompt.contains("Snippet lines:\n| # README\n| ```bash\n| npm install\n| ```"));
+        assert!(prompt.contains("Snippet lines:\n| # README\n| ```bash\n| pnpm install\n| ```"));
     }
 
     #[test]

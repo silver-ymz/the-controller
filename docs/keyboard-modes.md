@@ -145,7 +145,7 @@ Press `v` again to unstage (kills the staged instance).
 **What happens when you stage:**
 1. Worktree is committed (prompts Claude to commit if dirty)
 2. Branch is rebased onto main if behind
-3. `npm install` runs in the worktree if needed
+3. `pnpm install` runs in the worktree if needed
 4. `./dev.sh <port>` launches a separate Controller instance
 5. Main Controller title bar shows "staging: session-label"
 

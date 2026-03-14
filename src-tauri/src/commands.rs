@@ -1028,7 +1028,7 @@ pub async fn stage_session(
             .emit("staging-status", "Installing dependencies...");
         let wt = worktree_path.clone();
         let install_status = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("npm")
+            std::process::Command::new("pnpm")
                 .arg("install")
                 .current_dir(&wt)
                 .stdout(Stdio::null())
@@ -1037,10 +1037,10 @@ pub async fn stage_session(
         })
         .await
         .map_err(|e| format!("Task failed: {}", e))?
-        .map_err(|e| format!("npm install failed: {}", e))?;
+        .map_err(|e| format!("pnpm install failed: {}", e))?;
 
         if !install_status.success() {
-            return Err("npm install failed in worktree".to_string());
+            return Err("pnpm install failed in worktree".to_string());
         }
     }
 
