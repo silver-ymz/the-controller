@@ -23,9 +23,7 @@ const CODEX_FULL_PERMISSION_ARGS: [&str; 4] = [
     "never",
 ];
 
-const CURSOR_FULL_PERMISSION_ARGS: [&str; 1] = [
-    "--yolo"
-];
+const CURSOR_FULL_PERMISSION_ARGS: [&str; 1] = ["--yolo"];
 
 /// Build command-line arguments for spawned assistant sessions.
 /// Keeps Claude-specific hooks and applies full permissions for Codex.
@@ -247,19 +245,13 @@ mod tests {
     fn cursor_agent_args_use_continue_flag() {
         let session_id = Uuid::new_v4();
         let args = build_session_args("cursor-agent", session_id, true, None);
-        assert_eq!(
-            args,
-            vec!["--continue".to_string(), "--yolo".to_string()]
-        );
+        assert_eq!(args, vec!["--continue".to_string(), "--yolo".to_string()]);
     }
 
     #[test]
     fn cursor_agent_args_include_positional_prompt() {
         let session_id = Uuid::new_v4();
         let args = build_session_args("cursor-agent", session_id, false, Some("fix this"));
-        assert_eq!(
-            args,
-            vec!["--yolo".to_string(), "fix this".to_string()]
-        );
+        assert_eq!(args, vec!["--yolo".to_string(), "fix this".to_string()]);
     }
 }
