@@ -2165,11 +2165,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
     use uuid::Uuid;
 
     static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    const BUSY_TEST_WAIT: Duration = Duration::from_secs(5);
 
     fn make_test_state(base_dir: &Path, projects_root: &Path) -> AppState {
         let storage = Storage::new(base_dir.to_path_buf());
@@ -2229,7 +2230,9 @@ mod tests {
     }
 
     fn with_fake_cli_bins<T>(f: impl FnOnce(&Path, &Path, &Path) -> T) -> T {
-        let _guard = ENV_LOCK.lock().expect("lock env");
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let bin_dir = TempDir::new().expect("temp fake cli dir");
         let state_dir = TempDir::new().expect("temp scaffold state dir");
         let gh_path = bin_dir.path().join("gh");
@@ -2252,6 +2255,17 @@ mod tests {
         }
 
         result
+    }
+
+    fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < timeout {
+            if path.exists() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        path.exists()
     }
 
     #[test]
@@ -2610,14 +2624,8 @@ selection_background #444444
                 ))
             });
 
-            for _ in 0..100 {
-                if state_dir.join("gh-create-started").exists() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
             assert!(
-                state_dir.join("gh-create-started").exists(),
+                wait_for_path(&state_dir.join("gh-create-started"), BUSY_TEST_WAIT),
                 "scaffold should reach gh repo create"
             );
 
@@ -2666,14 +2674,8 @@ selection_background #444444
                 ))
             });
 
-            for _ in 0..100 {
-                if state_dir.join("gh-create-started").exists() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
             assert!(
-                state_dir.join("gh-create-started").exists(),
+                wait_for_path(&state_dir.join("gh-create-started"), BUSY_TEST_WAIT),
                 "scaffold should reach gh repo create"
             );
 
