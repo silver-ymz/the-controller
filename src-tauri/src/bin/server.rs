@@ -92,8 +92,8 @@ async fn main() {
             .to_string()
     });
 
-    let serve_dir = ServeDir::new(&dist_dir)
-        .not_found_service(ServeFile::new(format!("{}/index.html", dist_dir)));
+    let serve_dir =
+        ServeDir::new(&dist_dir).fallback(ServeFile::new(format!("{}/index.html", dist_dir)));
 
     let app = Router::new()
         .route("/api/list_projects", post(list_projects))
