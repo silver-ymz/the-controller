@@ -63,13 +63,9 @@ pub fn run() {
             {
                 let app_state = app.state::<state::AppState>();
                 let emitter = app_state.emitter.clone();
-                let base_dir = app_state
-                    .storage
-                    .lock()
-                    .map(|s| s.base_dir())
-                    .map_err(|e| {
-                        eprintln!("Failed to lock storage for keybindings setup: {e}");
-                    });
+                let base_dir = app_state.storage.lock().map(|s| s.base_dir()).map_err(|e| {
+                    eprintln!("Failed to lock storage for keybindings setup: {e}");
+                });
                 if let Ok(base_dir) = base_dir {
                     keybindings::ensure_keybindings_file(&base_dir);
                     keybindings::start_watcher(base_dir, emitter);
