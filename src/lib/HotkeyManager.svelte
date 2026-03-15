@@ -21,7 +21,8 @@
   } from "./stores";
   import { toggleKeystrokeVisualizer, pushKeystroke } from "./keystroke-visualizer";
   import { showToast } from "./toast";
-  import { buildKeyMap, type CommandId } from "./commands";
+  import { buildKeyMap, type CommandId, type CommandDef } from "./commands";
+  import { resolvedCommands } from "./keybindings";
   import { focusForModeSwitch } from "./focus-helpers";
 
   let lastEscapeTime = 0;
@@ -41,7 +42,9 @@
   let expandedSet: Set<string> = $derived(expandedProjectsState.current);
   const workspaceModeState = fromStore(workspaceMode);
   let currentMode = $derived(workspaceModeState.current);
-  let keyMap = $derived(buildKeyMap(currentMode));
+  const resolvedCommandsState = fromStore(resolvedCommands);
+  let resolvedCmds: CommandDef[] = $derived(resolvedCommandsState.current);
+  let keyMap = $derived(buildKeyMap(currentMode, resolvedCmds));
   const noteEntriesState = fromStore(noteEntries);
   let noteEntriesMap = $derived(noteEntriesState.current);
   const noteFoldersState = fromStore(noteFolders);
@@ -440,6 +443,24 @@
     }
   }
 
+  // Build a lookup from external command ID → resolved key for Meta+ handling
+  function getExternalKey(cmdId: string): string | undefined {
+    const cmd = resolvedCmds.find((c) => c.id === cmdId && !c.hidden);
+    return cmd?.key;
+  }
+
+  function matchMetaKey(cmdKey: string | undefined, e: KeyboardEvent): boolean {
+    if (!cmdKey) return false;
+    if (cmdKey.startsWith("Meta+")) {
+      return e.metaKey && e.key === cmdKey.slice(5);
+    }
+    // Legacy format: ⌘x
+    if (cmdKey.startsWith("⌘")) {
+      return e.metaKey && e.key === cmdKey.slice(1);
+    }
+    return false;
+  }
+
   function onKeydown(e: KeyboardEvent) {
     // Ignore modifier-only keypresses
     if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
@@ -447,41 +468,46 @@
     // Ignore held-down key repeats to prevent toast/action spam
     if (e.repeat) return;
 
-    // Cmd+S/Cmd+D: screenshot → direct to the-controller session
-    // Cmd+Shift+S/Cmd+Shift+D: screenshot → session picker
-    if (e.metaKey && (e.key === "s" || e.key === "d")) {
-      e.stopPropagation();
-      e.preventDefault();
-      dispatchAction({
-        type: "screenshot-to-session",
-        direct: !e.shiftKey,
-        cropped: e.key === "d",
-      });
-      pushKeystroke("⌘" + e.key.toUpperCase());
-      return;
-    }
+    // External Meta+ commands
+    if (e.metaKey) {
+      // Screenshot
+      if (
+        matchMetaKey(getExternalKey("screenshot"), e) ||
+        matchMetaKey(getExternalKey("screenshot-cropped"), e)
+      ) {
+        e.stopPropagation();
+        e.preventDefault();
+        dispatchAction({
+          type: "screenshot-to-session",
+          direct: !e.shiftKey,
+          cropped: matchMetaKey(getExternalKey("screenshot-cropped"), e),
+        });
+        pushKeystroke("⌘" + e.key.toUpperCase());
+        return;
+      }
 
-    // Cmd+K: toggle keystroke visualizer
-    if (e.metaKey && e.key === "k") {
-      e.stopPropagation();
-      e.preventDefault();
-      toggleKeystrokeVisualizer();
-      return;
-    }
+      // Keystroke visualizer
+      if (matchMetaKey(getExternalKey("keystroke-visualizer"), e)) {
+        e.stopPropagation();
+        e.preventDefault();
+        toggleKeystrokeVisualizer();
+        return;
+      }
 
-    // Cmd+T: toggle foreground session provider
-    if (e.metaKey && e.key === "t") {
-      if (isDialogOpen()) return;
-      if (isEditableElementFocused() && !isTerminalFocused()) return;
-      e.stopPropagation();
-      e.preventDefault();
-      selectedSessionProvider.update((provider) => {
-        if (provider === "claude") return "codex";
-        if (provider === "codex") return "cursor-agent";
-        return "claude";
-      });
-      pushKeystroke("⌘T");
-      return;
+      // Toggle session provider
+      if (matchMetaKey(getExternalKey("toggle-session-provider"), e)) {
+        if (isDialogOpen()) return;
+        if (isEditableElementFocused() && !isTerminalFocused()) return;
+        e.stopPropagation();
+        e.preventDefault();
+        selectedSessionProvider.update((provider) => {
+          if (provider === "claude") return "codex";
+          if (provider === "codex") return "cursor-agent";
+          return "claude";
+        });
+        pushKeystroke("⌘T");
+        return;
+      }
     }
 
     // Workspace mode intercepts all keys
