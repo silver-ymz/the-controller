@@ -7,6 +7,7 @@ export const authError = writable(false);
 
 function getAuthToken(): string | null {
   if (isTauri) return null;
+  if (typeof window === "undefined" || typeof sessionStorage === "undefined") return null;
   // Check sessionStorage first (token is moved here after initial URL read)
   const stored = sessionStorage.getItem("authToken");
   if (stored) return stored;
@@ -64,6 +65,10 @@ function connectWebSocket(): WebSocket {
 
 function getSharedWebSocket(): WebSocket {
   if (!sharedWs || sharedWs.readyState === WebSocket.CLOSED || sharedWs.readyState === WebSocket.CLOSING) {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     sharedWs = connectWebSocket();
   }
   return sharedWs;
