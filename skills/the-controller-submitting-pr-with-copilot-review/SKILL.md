@@ -28,10 +28,10 @@ digraph pr_workflow {
     fix_local [label="Fix local review issues"];
     create_pr [label="3. Create PR with summary"];
     request_copilot [label="4. Request Copilot review"];
-    wait_copilot [label="5. Wait for Copilot\n(poll every 60s)"];
-    check_comments [label="6. Check review comments"];
+    wait_copilot [label="5. Wait for Copilot\n& CI (poll every 60s)"];
+    check_comments [label="6. Check review comments\n& CI status"];
     no_comments [label="Done — PR is clean"];
-    resolve_comments [label="7. Resolve comments\n(subagent)"];
+    resolve_comments [label="7. Resolve comments\n& CI failures (subagent)"];
     hide_comments [label="8. Hide resolved comments\n& top comments"];
     budget_check [label="Round < 8?", shape=diamond];
     force_stop [label="Done — budget exhausted\n(report to user)"];
@@ -120,27 +120,43 @@ PR_NUMBER=$(gh pr view --json number -q '.number')
 gh pr edit "$PR_NUMBER" --add-reviewer 'copilot-pull-request-reviewer[bot]'
 ```
 
-## Step 5: Wait for Copilot Review
+## Step 5: Wait for Copilot Review and CI
 
-Poll until Copilot's review appears. Copilot typically takes 5–10 minutes.
+Poll until both Copilot's review appears AND CI checks complete. Both typically take 5–10 minutes, so wait for them in the same loop.
 
 ```bash
 # Poll every 60 seconds, timeout after 15 minutes
 PREVIOUS_COUNT=0  # init before first round; update after each round
-FOUND=false
+COPILOT_DONE=false
+CI_DONE=false
 for i in $(seq 1 15); do
-  REVIEW_COUNT=$(gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/reviews \
-    --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length')
-  if [ "$REVIEW_COUNT" -gt "$PREVIOUS_COUNT" ]; then
-    echo "New Copilot review detected"
-    PREVIOUS_COUNT=$REVIEW_COUNT
-    FOUND=true
+  # Check Copilot review
+  if [ "$COPILOT_DONE" = false ]; then
+    REVIEW_COUNT=$(gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/reviews \
+      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length')
+    if [ "$REVIEW_COUNT" -gt "$PREVIOUS_COUNT" ]; then
+      echo "New Copilot review detected"
+      PREVIOUS_COUNT=$REVIEW_COUNT
+      COPILOT_DONE=true
+    fi
+  fi
+
+  # Check CI status
+  if [ "$CI_DONE" = false ]; then
+    CI_STATUS=$(gh pr checks "$PR_NUMBER" --json state --jq '.[].state' 2>/dev/null | sort -u)
+    if ! echo "$CI_STATUS" | grep -qE "PENDING|QUEUED|IN_PROGRESS"; then
+      echo "CI checks completed"
+      CI_DONE=true
+    fi
+  fi
+
+  if [ "$COPILOT_DONE" = true ] && [ "$CI_DONE" = true ]; then
     break
   fi
   sleep 60
 done
-if [ "$FOUND" = false ]; then
-  echo "Timeout: no new Copilot review after 15 minutes"
+if [ "$COPILOT_DONE" = false ] || [ "$CI_DONE" = false ]; then
+  echo "Timeout: Copilot=$COPILOT_DONE CI=$CI_DONE after 15 minutes"
 fi
 ```
 
@@ -183,11 +199,18 @@ if [ -z "$THREADS" ]; then
 fi
 ```
 
-If no new unresolved comments, the PR is clean. Report success and stop.
+If no new unresolved comments AND CI is green, the PR is clean. Report success and stop.
 
-## Step 7: Resolve Comments (Subagent)
+If CI failed, check the failure logs and fix before proceeding:
 
-Dispatch a subagent to address Copilot's feedback. This keeps the main context clean.
+```bash
+# View failed checks
+gh pr checks "$PR_NUMBER" --json name,state,link --jq '.[] | select(.state == "FAILURE")'
+```
+
+## Step 7: Resolve Comments and CI Failures (Subagent)
+
+Dispatch a subagent to address both Copilot's feedback and CI failures in one pass. This keeps the main context clean.
 
 **Subagent prompt template:**
 
@@ -197,12 +220,20 @@ For each comment, evaluate whether it's valid:
 
 {PASTE COMMENT BODIES AND FILE LOCATIONS}
 
-For valid issues:
+Additionally, the following CI checks failed:
+
+{PASTE FAILED CHECK NAMES AND LOG SNIPPETS}
+
+For valid Copilot issues:
 - Fix the code
 - Run format/lint checks
 - Commit the fix
 
-For invalid/noise comments:
+For CI failures:
+- Read the failure logs, identify root cause, fix
+- Re-run the project's test/lint/build commands locally to verify
+
+For invalid/noise Copilot comments:
 - Note why it's not applicable
 
 Return: summary of what was fixed and what was skipped (with reasoning).
@@ -216,7 +247,7 @@ git push
 
 ## Step 8: Hide Resolved Comments and Top Comments
 
-After fixing, resolve all Copilot review threads and hide the top-level review comments:
+Replace `{OWNER}`, `{REPO}`, `{PR_NUMBER}` with actual values. Note: GraphQL `author.login` omits the `[bot]` suffix — use `copilot-pull-request-reviewer` (not `copilot-pull-request-reviewer[bot]`).
 
 ```bash
 # Resolve all unresolved Copilot review threads
