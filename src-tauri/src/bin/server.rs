@@ -1,10 +1,11 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        State as AxumState, WebSocketUpgrade,
+        Request, State as AxumState, WebSocketUpgrade,
     },
     http::StatusCode,
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -74,12 +75,54 @@ async fn main() {
         .route("/api/commit_notes", post(api_commit_notes))
         .route("/ws", get(ws_upgrade))
         .fallback_service(serve_dir)
+        .layer(middleware::from_fn(auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    println!("Server listening on http://localhost:3001");
+    let token = std::env::var("CONTROLLER_AUTH_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    match &token {
+        Some(t) => println!("Server listening on http://0.0.0.0:3001?token={}", t),
+        None => println!("Server listening on http://0.0.0.0:3001 (no auth)"),
+    }
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+// --- Auth middleware ---
+
+async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
+    let token = match std::env::var("CONTROLLER_AUTH_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => return Ok(next.run(req).await), // No token configured = no auth
+    };
+
+    // Skip auth for static files (non-API, non-WS)
+    let path = req.uri().path();
+    if !path.starts_with("/api/") && path != "/ws" {
+        return Ok(next.run(req).await);
+    }
+
+    // Check Authorization header or query param
+    let authorized = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v) == token)
+        .unwrap_or(false)
+        || req
+            .uri()
+            .query()
+            .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token=")))
+            .map(|t| t == token)
+            .unwrap_or(false);
+
+    if authorized {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
 }
 
 // --- Route handlers ---
