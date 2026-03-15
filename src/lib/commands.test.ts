@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { commands, getHelpSections, buildKeyMap } from "./commands";
+import { applyOverrides, commands, getHelpSections, buildKeyMap } from "./commands";
 
 describe("command registry", () => {
   it("every non-external command has a unique key within its mode", () => {
@@ -232,5 +232,55 @@ describe("command registry", () => {
   it("getHelpSections returns sections for infrastructure mode", () => {
     const sections = getHelpSections("infrastructure");
     expect(sections.map(s => s.label)).toEqual(["Navigation", "Sessions", "Panels", "Infrastructure"]);
+  });
+});
+
+describe("applyOverrides", () => {
+  it("returns defaults when no overrides", () => {
+    const result = applyOverrides(commands, {});
+    expect(result).toBe(commands); // same reference
+  });
+
+  it("overrides a single key", () => {
+    const result = applyOverrides(commands, { "navigate-next": "h" });
+    const cmd = result.find((c) => c.id === "navigate-next" && !c.hidden);
+    expect(cmd?.key).toBe("h");
+  });
+
+  it("does not modify hidden aliases", () => {
+    const result = applyOverrides(commands, { "expand-collapse": "x" });
+    const hidden = result.filter(
+      (c) => c.id === "expand-collapse" && c.hidden,
+    );
+    for (const h of hidden) {
+      const original = commands.find((c) => c.id === h.id && c.key === h.key);
+      expect(original).toBeDefined();
+    }
+  });
+
+  it("overrides Meta+ commands", () => {
+    const result = applyOverrides(commands, { screenshot: "Meta+x" });
+    const cmd = result.find((c) => c.id === "screenshot" && !c.hidden);
+    expect(cmd?.key).toBe("Meta+x");
+  });
+
+  it("ignores unknown command IDs", () => {
+    const result = applyOverrides(commands, { nonexistent: "x" });
+    expect(result).toEqual(commands);
+  });
+
+  it("clears helpKey when override is applied", () => {
+    const result = applyOverrides(commands, { "navigate-next": "h" });
+    const cmd = result.find((c) => c.id === "navigate-next" && !c.hidden);
+    expect(cmd?.helpKey).toBeUndefined();
+  });
+});
+
+describe("buildKeyMap with overrides", () => {
+  it("uses overridden key", () => {
+    const resolved = applyOverrides(commands, { "navigate-next": "h" });
+    const map = buildKeyMap("development", resolved);
+    expect(map.get("h")).toBe("navigate-next");
+    expect(map.has("j")).toBe(false);
   });
 });

@@ -173,10 +173,40 @@ export function getHelpSections(mode?: WorkspaceMode): HelpSection[] {
   })).filter(s => s.entries.length > 0);
 }
 
+/**
+ * Takes the default commands array and a map of command_id→key overrides.
+ * Returns a new array with keys replaced for non-hidden commands.
+ * Hidden aliases keep their original keys.
+ * If overrides is empty, returns the original array (same reference).
+ */
+export function applyOverrides(
+  cmds: CommandDef[],
+  overrides: Record<string, string>,
+): CommandDef[] {
+  const keys = Object.keys(overrides);
+  if (keys.length === 0) return cmds;
+
+  // Check if any override actually matches a known command id
+  const ids = new Set(cmds.map(c => c.id));
+  const hasMatch = keys.some(k => ids.has(k as CommandId | ExternalCommandId));
+  if (!hasMatch) return cmds;
+
+  return cmds.map(cmd => {
+    if (cmd.hidden) return cmd;
+    const override = overrides[cmd.id];
+    if (override === undefined) return cmd;
+    return { ...cmd, key: override, helpKey: undefined };
+  });
+}
+
 // Build key→CommandId map for handleHotkey (excludes external commands)
-export function buildKeyMap(mode?: WorkspaceMode): Map<string, CommandId> {
+export function buildKeyMap(
+  mode?: WorkspaceMode,
+  resolvedCommands?: CommandDef[],
+): Map<string, CommandId> {
+  const cmds = resolvedCommands ?? commands;
   const map = new Map<string, CommandId>();
-  for (const cmd of commands) {
+  for (const cmd of cmds) {
     if (cmd.handledExternally) continue;
     if (mode && cmd.mode && cmd.mode !== mode) continue;
     map.set(cmd.key, cmd.id as CommandId);
