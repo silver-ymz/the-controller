@@ -53,6 +53,16 @@ const KNOWN_COMMANDS: &[&str] = &[
     "rollback-deploy",
 ];
 
+/// Commands handled externally (outside `buildKeyMap`) that require a `Meta+`
+/// prefix to be dispatched via `matchMetaKey` in the frontend. Assigning a bare
+/// key to these will silently never fire.
+const META_REQUIRED_COMMANDS: &[&str] = &[
+    "screenshot",
+    "screenshot-cropped",
+    "toggle-session-provider",
+    "keystroke-visualizer",
+];
+
 pub fn parse_keybindings(content: &str) -> KeybindingsResult {
     let mut overrides = HashMap::new();
     let mut warnings = Vec::new();
@@ -88,6 +98,12 @@ pub fn parse_keybindings(content: &str) -> KeybindingsResult {
         }
 
         overrides.insert(command.to_string(), key.to_string());
+
+        if META_REQUIRED_COMMANDS.contains(&command) && !key.starts_with("Meta+") {
+            warnings.push(format!(
+                "command '{command}' requires Meta+ prefix (e.g. Meta+{key})"
+            ));
+        }
     }
 
     KeybindingsResult {
@@ -233,8 +249,14 @@ pub fn start_watcher(base_dir: PathBuf, emitter: Arc<dyn crate::emitter::EventEm
                         continue;
                     }
                     let result = load_keybindings(&base_dir);
-                    if let Ok(payload) = serde_json::to_string(&result) {
-                        let _ = emitter.emit("keybindings-changed", &payload);
+                    if result.warnings.is_empty() {
+                        if let Ok(payload) = serde_json::to_string(&result) {
+                            let _ = emitter.emit("keybindings-changed", &payload);
+                        }
+                    } else {
+                        for w in &result.warnings {
+                            eprintln!("keybindings warning: {w}");
+                        }
                     }
                 }
                 Ok(Err(e)) => {
@@ -433,5 +455,56 @@ mod tests {
             result.overrides.get("screenshot"),
             Some(&"Meta+x".to_string())
         );
+    }
+
+    #[test]
+    fn test_external_command_bare_key_warns() {
+        for cmd in META_REQUIRED_COMMANDS {
+            let content = format!("{cmd} x\n");
+            let result = parse_keybindings(&content);
+            // Override is still recorded so the user sees their config
+            assert_eq!(result.overrides.get(*cmd).unwrap(), "x");
+            // But a warning is emitted
+            assert_eq!(
+                result.warnings.len(),
+                1,
+                "expected exactly one warning for bare-key {cmd}"
+            );
+            assert!(
+                result.warnings[0].contains("requires Meta+ prefix"),
+                "warning should mention Meta+ prefix for {cmd}: {}",
+                result.warnings[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_external_command_meta_key_no_warning() {
+        let content = "screenshot Meta+x\nscreenshot-cropped Meta+d\n";
+        let result = parse_keybindings(content);
+        assert!(
+            result.warnings.is_empty(),
+            "Meta+ prefixed external commands should not warn"
+        );
+    }
+
+    #[test]
+    fn test_malformed_file_produces_warnings_so_watcher_skips_emit() {
+        let tmp = TempDir::new().unwrap();
+        // Write a file with a valid override and a malformed line (mid-edit save)
+        fs::write(
+            keybindings_path(tmp.path()),
+            "navigate-next j\nincomplete-line-no-key\n",
+        )
+        .unwrap();
+        let result = load_keybindings(tmp.path());
+        // The parser returns the valid override but also a warning
+        assert_eq!(result.overrides.get("navigate-next").unwrap(), "j");
+        assert!(
+            !result.warnings.is_empty(),
+            "expected warnings for malformed line"
+        );
+        assert!(result.warnings[0].contains("malformed line"));
+        // Because warnings are non-empty, start_watcher would skip emitting this result
     }
 }

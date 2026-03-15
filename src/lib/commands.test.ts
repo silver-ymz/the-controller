@@ -274,6 +274,22 @@ describe("applyOverrides", () => {
     const cmd = result.find((c) => c.id === "navigate-next" && !c.hidden);
     expect(cmd?.helpKey).toBeUndefined();
   });
+
+  it("applies override to hidden-but-sole commands like navigate-prev", () => {
+    const result = applyOverrides(commands, { "navigate-prev": "g" });
+    const cmd = result.find((c) => c.id === "navigate-prev");
+    expect(cmd?.key).toBe("g");
+  });
+
+  it("still skips hidden entries that are true aliases (non-hidden sibling exists)", () => {
+    const result = applyOverrides(commands, { "expand-collapse": "x" });
+    // The non-hidden entry should be overridden
+    const nonHidden = result.find((c) => c.id === "expand-collapse" && !c.hidden);
+    expect(nonHidden?.key).toBe("x");
+    // The hidden Enter alias should keep its original key
+    const hiddenEnter = result.find((c) => c.id === "expand-collapse" && c.hidden && c.key === "Enter");
+    expect(hiddenEnter).toBeDefined();
+  });
 });
 
 describe("buildKeyMap with overrides", () => {
@@ -342,5 +358,46 @@ describe("getHelpSections with metaKey", () => {
     expect(allKeys).toContain("⌃k");
     expect(allKeys).not.toContain("⌘s");
     expect(allKeys).not.toContain("⌘k");
+  });
+});
+
+describe("getHelpSections composed keys after overrides", () => {
+  it("non-dev mode shows composed navigate keys after override", () => {
+    const resolved = applyOverrides(commands, { "navigate-next": "h", "navigate-prev": "g" });
+    const sections = getHelpSections("agents", resolved);
+    const nav = sections.find(s => s.label === "Navigation")!;
+    const navEntry = nav.entries.find(e => e.description.includes("Next / previous"));
+    expect(navEntry?.key).toBe("h / g");
+  });
+
+  it("non-dev mode shows composed expand-collapse keys after override", () => {
+    const resolved = applyOverrides(commands, { "expand-collapse": "x" });
+    const sections = getHelpSections("agents", resolved);
+    const nav = sections.find(s => s.label === "Navigation")!;
+    const expandEntry = nav.entries.find(e => e.description.includes("Expand/collapse"));
+    expect(expandEntry?.key).toBe("x / Enter");
+  });
+
+  it("non-dev mode shows dynamic screenshot-picker key after override", () => {
+    const resolved = applyOverrides(commands, { screenshot: "Meta+x", "screenshot-cropped": "Meta+y" });
+    const sections = getHelpSections("agents", resolved, "cmd");
+    const sess = sections.find(s => s.label === "Sessions")!;
+    const pickerEntry = sess.entries.find(e => e.description === "Screenshot → pick session");
+    expect(pickerEntry?.key).toBe("⌘X / ⌘Y");
+  });
+
+  it("dev mode debug section shows dynamic screenshot-picker key after override", () => {
+    const resolved = applyOverrides(commands, { screenshot: "Meta+x", "screenshot-cropped": "Meta+y" });
+    const sections = getHelpSections("development", resolved, "cmd");
+    const debug = sections.find(s => s.label === "Debug")!;
+    const pickerEntry = debug.entries.find(e => e.description === "Screenshot → pick session");
+    expect(pickerEntry?.key).toBe("⌘X / ⌘Y");
+  });
+
+  it("screenshot-picker key defaults to ⌘S / ⌘D with no overrides", () => {
+    const sections = getHelpSections("agents");
+    const sess = sections.find(s => s.label === "Sessions")!;
+    const pickerEntry = sess.entries.find(e => e.description === "Screenshot → pick session");
+    expect(pickerEntry?.key).toBe("⌘S / ⌘D");
   });
 });

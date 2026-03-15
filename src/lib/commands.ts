@@ -140,6 +140,37 @@ function resolveKey(cmds: CommandDef[], id: string): string {
     ?? "?";
 }
 
+/** Uppercase the last character of a key string to produce its Shift variant. */
+function shiftVariant(key: string): string {
+  if (key.length === 0) return key;
+  return key.slice(0, -1) + key.slice(-1).toUpperCase();
+}
+
+/** Build the screenshot-picker display key from the resolved screenshot keys. */
+function screenshotPickerKey(cmds: CommandDef[], fmt: (k: string) => string): string {
+  return `${fmt(shiftVariant(resolveKey(cmds, "screenshot")))} / ${fmt(shiftVariant(resolveKey(cmds, "screenshot-cropped")))}`;
+}
+
+/** Map a command to its help entry, composing paired keys dynamically. */
+function mapCmdToEntry(c: CommandDef, cmds: CommandDef[], fmt: (k: string) => string): HelpEntry {
+  if (c.id === "navigate-next") {
+    return {
+      key: `${fmt(resolveKey(cmds, "navigate-next"))} / ${fmt(resolveKey(cmds, "navigate-prev"))}`,
+      description: c.description,
+    };
+  }
+  if (c.id === "expand-collapse" && !c.mode) {
+    return {
+      key: `${fmt(resolveKey(cmds, "expand-collapse"))} / Enter`,
+      description: c.description,
+    };
+  }
+  if (c.id === "screenshot-picker") {
+    return { key: screenshotPickerKey(cmds, fmt), description: c.description };
+  }
+  return { key: fmt(c.helpKey ?? c.key), description: c.description };
+}
+
 export function getHelpSections(
   mode?: WorkspaceMode,
   resolvedCmds?: CommandDef[],
@@ -171,7 +202,7 @@ export function getHelpSections(
       label: "Debug",
       entries: cmds
         .filter(c => debugIds.has(c.id) && !c.hidden)
-        .map(c => ({ key: fmt(c.helpKey ?? c.key), description: c.description })),
+        .map(c => mapCmdToEntry(c, cmds, fmt)),
     };
 
     const builtSections: Record<string, HelpSection> = { Essentials: essentials, Debug: debug };
@@ -196,7 +227,7 @@ export function getHelpSections(
     entries: cmds
       .filter(c => c.section === section && !c.hidden)
       .filter(c => !c.mode || !mode || c.mode === mode)
-      .map(c => ({ key: fmt(c.helpKey ?? c.key), description: c.description })),
+      .map(c => mapCmdToEntry(c, cmds, fmt)),
   })).filter(s => s.entries.length > 0);
 }
 
@@ -218,8 +249,14 @@ export function applyOverrides(
   const hasMatch = keys.some(k => ids.has(k as CommandId | ExternalCommandId));
   if (!hasMatch) return cmds;
 
+  // IDs that have at least one non-hidden entry are "true aliases" when hidden
+  const idsWithNonHidden = new Set(
+    cmds.filter(c => !c.hidden).map(c => c.id),
+  );
+
   return cmds.map(cmd => {
-    if (cmd.hidden) return cmd;
+    // Skip hidden entries that are true aliases (a non-hidden sibling exists)
+    if (cmd.hidden && idsWithNonHidden.has(cmd.id)) return cmd;
     const override = overrides[cmd.id];
     if (override === undefined) return cmd;
     return { ...cmd, key: override, helpKey: undefined };
