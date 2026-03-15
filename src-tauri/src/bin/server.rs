@@ -13,7 +13,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use the_controller_lib::{
-    config, emitter::WsBroadcastEmitter, note_ai_chat, notes, state::AppState,
+    architecture, commands, config, emitter::WsBroadcastEmitter, models, note_ai_chat, notes,
+    session_args, state::AppState, worktree::WorktreeManager,
 };
 
 use tokio::sync::broadcast;
@@ -58,6 +59,23 @@ async fn main() {
         .route("/api/resize_pty", post(resize_pty))
         .route("/api/close_session", post(close_session))
         .route("/api/create_session", post(create_session))
+        .route("/api/create_project", post(create_project))
+        .route("/api/delete_project", post(delete_project))
+        .route("/api/get_agents_md", post(get_agents_md))
+        .route("/api/update_agents_md", post(update_agents_md))
+        .route("/api/set_initial_prompt", post(set_initial_prompt))
+        .route("/api/check_claude_cli", post(check_claude_cli))
+        .route("/api/home_dir", post(home_dir))
+        .route("/api/save_onboarding_config", post(save_onboarding_config))
+        .route("/api/log_frontend_error", post(log_frontend_error))
+        .route(
+            "/api/copy_image_file_to_clipboard",
+            post(copy_image_file_to_clipboard),
+        )
+        .route("/api/capture_app_screenshot", post(capture_app_screenshot))
+        .route("/api/start_voice_pipeline", post(start_voice_pipeline))
+        .route("/api/stop_voice_pipeline", post(stop_voice_pipeline))
+        .route("/api/load_terminal_theme", post(load_terminal_theme))
         .route("/api/list_archived_projects", post(list_archived_projects))
         .route("/api/generate_architecture", post(generate_architecture))
         .route("/api/merge_session_branch", post(merge_session_branch))
@@ -340,22 +358,470 @@ async fn close_session(
 }
 
 async fn create_session(
-    AxumState(_state): AxumState<Arc<ServerState>>,
-    Json(_args): Json<Value>,
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(args): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "create_session not yet wired".to_string(),
-    ))
+    let project_id = args["projectId"].as_str().unwrap_or_default();
+    let kind = args["kind"].as_str().unwrap_or("claude").to_string();
+    let background = args["background"].as_bool().unwrap_or(false);
+    let initial_prompt = args["initialPrompt"].as_str().map(|s| s.to_string());
+    let github_issue: Option<models::GithubIssue> =
+        serde_json::from_value(args["githubIssue"].clone()).ok();
+
+    let project_uuid =
+        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let session_id = uuid::Uuid::new_v4();
+
+    // Load the project and generate session label
+    let (repo_path, label, base_dir, project_name) = {
+        let storage = state
+            .app
+            .storage
+            .lock()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let project = storage
+            .load_project(project_uuid)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let label = commands::next_session_label(&project.sessions);
+        (
+            project.repo_path.clone(),
+            label,
+            storage.base_dir(),
+            project.name.clone(),
+        )
+    };
+
+    // Create worktree under ~/.the-controller/worktrees/{project_name}/{label}/
+    let worktree_dir = base_dir.join("worktrees").join(&project_name).join(&label);
+
+    let repo_path_clone = repo_path.clone();
+    let label_clone = label.clone();
+    let (session_dir, wt_path, wt_branch) = tokio::task::spawn_blocking(move || {
+        match WorktreeManager::create_worktree(&repo_path_clone, &label_clone, &worktree_dir) {
+            Ok(worktree_path) => {
+                let wt_str = worktree_path
+                    .to_str()
+                    .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?
+                    .to_string();
+                Ok((wt_str.clone(), Some(wt_str), Some(label_clone)))
+            }
+            Err(e) if e == "unborn_branch" => Ok((repo_path_clone, None, None)),
+            Err(e) => Err(e),
+        }
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task failed: {}", e),
+        )
+    })?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // Build initial prompt: explicit prompt takes priority, then GitHub issue context
+    let initial_prompt = initial_prompt.or_else(|| {
+        github_issue.as_ref().map(|issue| {
+            session_args::build_issue_prompt(issue.number, &issue.title, &issue.url, background)
+        })
+    });
+
+    let session_config = models::SessionConfig {
+        id: session_id,
+        label: label.clone(),
+        worktree_path: wt_path.clone(),
+        worktree_branch: wt_branch.clone(),
+        archived: false,
+        kind: kind.clone(),
+        github_issue,
+        initial_prompt: initial_prompt.clone(),
+        done_commits: vec![],
+        auto_worker_session: false,
+    };
+
+    // Save session config to project
+    {
+        let storage = state
+            .app
+            .storage
+            .lock()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let mut project = storage
+            .load_project(project_uuid)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        project.sessions.push(session_config);
+        storage
+            .save_project(&project)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    // Spawn PTY session
+    let pty_manager = state.app.pty_manager.clone();
+    let emitter = state.app.emitter.clone();
+    let spawn_result = tokio::task::spawn_blocking(move || {
+        let mut mgr = pty_manager.lock().map_err(|e| e.to_string())?;
+        mgr.spawn_session(
+            session_id,
+            &session_dir,
+            &kind,
+            emitter,
+            false,
+            initial_prompt.as_deref(),
+            24,
+            80,
+        )
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task failed: {}", e),
+        )
+    })?;
+
+    if let Err(spawn_err) = spawn_result {
+        // Rollback: remove session from project
+        if let Ok(storage) = state.app.storage.lock() {
+            if let Ok(mut project) = storage.load_project(project_uuid) {
+                project.sessions.retain(|s| s.id != session_id);
+                let _ = storage.save_project(&project);
+            }
+        }
+        // Cleanup worktree
+        if let (Some(ref wt_path), Some(ref wt_branch)) = (wt_path, wt_branch) {
+            let _ = WorktreeManager::remove_worktree(wt_path, &repo_path, wt_branch);
+        }
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, spawn_err));
+    }
+
+    Ok(Json(Value::String(session_id.to_string())))
 }
 
 async fn generate_architecture(
-    AxumState(_state): AxumState<Arc<ServerState>>,
-    Json(_args): Json<Value>,
+    Json(args): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let repo_path = args["repoPath"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
+        .to_string();
+
+    let result = tokio::task::spawn_blocking(move || {
+        architecture::generate_architecture_blocking(std::path::Path::new(&repo_path))
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task failed: {}", e),
+        )
+    })?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::to_value(result).unwrap()))
+}
+
+async fn create_project(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let name = args["name"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
+        .to_string();
+    let repo_path = args["repoPath"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
+        .to_string();
+
+    commands::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let path = std::path::Path::new(&repo_path);
+    if !path.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("repo_path is not a directory: {}", repo_path),
+        ));
+    }
+
+    let storage = state
+        .app
+        .storage
+        .lock()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Reject duplicate project names
+    if let Ok(inventory) = storage.list_projects() {
+        if inventory.projects.iter().any(|p| p.name == name) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("A project named '{}' already exists", name),
+            ));
+        }
+    }
+
+    let project = models::Project {
+        id: uuid::Uuid::new_v4(),
+        name: name.clone(),
+        repo_path: repo_path.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        archived: false,
+        maintainer: models::MaintainerConfig::default(),
+        auto_worker: models::AutoWorkerConfig::default(),
+        prompts: vec![],
+        sessions: vec![],
+        staged_session: None,
+    };
+
+    storage
+        .save_project(&project)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // If repo doesn't have agents.md, create default one in config dir
+    let repo_agents = path.join("agents.md");
+    if !repo_agents.exists() {
+        storage
+            .save_agents_md(project.id, &commands::render_agents_md(&project.name))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    // If repo has agents.md but no CLAUDE.md, create symlink
+    commands::ensure_claude_md_symlink(path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::to_value(project).unwrap()))
+}
+
+async fn delete_project(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_id = args["projectId"].as_str().unwrap_or_default();
+    let delete_repo = args["deleteRepo"].as_bool().unwrap_or(false);
+    let id =
+        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let storage = state
+        .app
+        .storage
+        .lock()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let project = storage
+        .load_project(id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Close all PTY sessions and clean up worktrees
+    {
+        let mut pty_manager = state
+            .app
+            .pty_manager
+            .lock()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        for session in &project.sessions {
+            let _ = pty_manager.close_session(session.id);
+            if let (Some(wt_path), Some(branch)) =
+                (&session.worktree_path, &session.worktree_branch)
+            {
+                let _ = WorktreeManager::remove_worktree(wt_path, &project.repo_path, branch);
+            }
+        }
+    }
+
+    // Delete project metadata
+    storage
+        .delete_project_dir(id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Optionally delete the repo directory
+    if delete_repo && std::path::Path::new(&project.repo_path).exists() {
+        std::fs::remove_dir_all(&project.repo_path).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to delete repo: {}", e),
+            )
+        })?;
+    }
+
+    Ok(Json(Value::Null))
+}
+
+async fn get_agents_md(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_id = args["projectId"].as_str().unwrap_or_default();
+    let id =
+        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let storage = state
+        .app
+        .storage
+        .lock()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let project = storage
+        .load_project(id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let content = storage
+        .get_agents_md(&project)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(Value::String(content)))
+}
+
+async fn update_agents_md(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_id = args["projectId"].as_str().unwrap_or_default();
+    let content = args["content"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing content".to_string()))?;
+    let id =
+        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let storage = state
+        .app
+        .storage
+        .lock()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    storage
+        .save_agents_md(id, content)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(Value::Null))
+}
+
+async fn set_initial_prompt(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_id = args["projectId"].as_str().unwrap_or_default();
+    let session_id = args["sessionId"].as_str().unwrap_or_default();
+    let prompt = args["prompt"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing prompt".to_string()))?
+        .to_string();
+
+    let project_uuid =
+        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let session_uuid =
+        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let storage = state
+        .app
+        .storage
+        .lock()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut project = storage
+        .load_project(project_uuid)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if let Some(session) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
+        if session.initial_prompt.is_none() {
+            session.initial_prompt = Some(prompt);
+            storage
+                .save_project(&project)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+    }
+
+    Ok(Json(Value::Null))
+}
+
+async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(config::check_claude_cli_status)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Task failed: {}", e),
+            )
+        })?;
+    Ok(Json(Value::String(result)))
+}
+
+async fn home_dir() -> Result<Json<Value>, (StatusCode, String)> {
+    let path = dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not determine home directory".to_string(),
+            )
+        })?;
+    Ok(Json(Value::String(path)))
+}
+
+async fn save_onboarding_config(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let projects_root = args["projectsRoot"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectsRoot".to_string()))?
+        .to_string();
+    let default_provider: config::ConfigDefaultProvider =
+        serde_json::from_value(args["defaultProvider"].clone()).unwrap_or_default();
+
+    let path = std::path::Path::new(&projects_root);
+    if !path.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "projects_root is not an existing directory: {}",
+                projects_root
+            ),
+        ));
+    }
+
+    let storage = state
+        .app
+        .storage
+        .lock()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let base_dir = storage.base_dir();
+    let cfg = config::Config {
+        projects_root,
+        default_provider,
+    };
+    config::save_config(&base_dir, &cfg)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(Value::Null))
+}
+
+async fn log_frontend_error(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+    let message = args["message"].as_str().unwrap_or_default();
+    eprintln!("[FRONTEND] {}", message);
+    Ok(Json(Value::Null))
+}
+
+// --- Desktop-only stubs (return NOT_IMPLEMENTED gracefully) ---
+
+async fn copy_image_file_to_clipboard() -> Result<Json<Value>, (StatusCode, String)> {
     Err((
         StatusCode::NOT_IMPLEMENTED,
-        "generate_architecture not yet wired".to_string(),
+        "copy_image_file_to_clipboard is not available in server mode".to_string(),
+    ))
+}
+
+async fn capture_app_screenshot() -> Result<Json<Value>, (StatusCode, String)> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "capture_app_screenshot is not available in server mode".to_string(),
+    ))
+}
+
+async fn start_voice_pipeline() -> Result<Json<Value>, (StatusCode, String)> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "start_voice_pipeline is not available in server mode".to_string(),
+    ))
+}
+
+async fn stop_voice_pipeline() -> Result<Json<Value>, (StatusCode, String)> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "stop_voice_pipeline is not available in server mode".to_string(),
+    ))
+}
+
+async fn load_terminal_theme() -> Result<Json<Value>, (StatusCode, String)> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "load_terminal_theme is not available in server mode".to_string(),
     ))
 }
 

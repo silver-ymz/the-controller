@@ -34,7 +34,7 @@ pub fn ensure_claude_md_symlink(dir: &Path) -> Result<(), String> {
 
 /// Validate a project name. Rejects empty names, names containing `/` or `\`,
 /// and names starting with `.`.
-pub(crate) fn validate_project_name(name: &str) -> Result<(), String> {
+pub fn validate_project_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
         return Err(format!("Invalid project name: {}", name));
     }
@@ -45,7 +45,7 @@ pub(crate) fn validate_project_name(name: &str) -> Result<(), String> {
 /// and returning "session-N-<6-char-uuid>" where N = max + 1. The UUID suffix
 /// guarantees uniqueness even when branches from deleted sessions persist on the
 /// remote.
-pub(crate) fn next_session_label(sessions: &[SessionConfig]) -> String {
+pub fn next_session_label(sessions: &[SessionConfig]) -> String {
     let max_num = sessions
         .iter()
         .filter_map(|s| s.label.strip_prefix("session-"))
