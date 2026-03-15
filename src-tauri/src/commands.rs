@@ -229,7 +229,7 @@ fn rollback_scaffold_state(repo_path: &Path, error: String) -> String {
     }
 }
 
-fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Project, String> {
+pub fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Project, String> {
     let parent_dir = repo_path
         .parent()
         .ok_or_else(|| format!("Invalid repo path: {}", repo_path.display()))?;

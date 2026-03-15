@@ -389,17 +389,83 @@ async fn load_project(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(args): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let id =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let name = args["name"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
+        .to_string();
+    let repo_path = args["repoPath"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
+        .to_string();
+
+    commands::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let path = std::path::Path::new(&repo_path);
+    if !path.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("repo_path is not a directory: {}", repo_path),
+        ));
+    }
+
+    // Validate it's a git repo
+    let git_dir = path.join(".git");
+    if !git_dir.exists() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("not a git repository: {}", repo_path),
+        ));
+    }
+
     let storage = state
         .app
         .storage
         .lock()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let project = storage
-        .load_project(id)
+
+    // Return existing project if one with the same repo_path exists
+    if let Ok(inventory) = storage.list_projects() {
+        let existing = inventory.projects;
+        if let Some(project) = existing.iter().find(|p| p.repo_path == repo_path) {
+            return Ok(Json(serde_json::to_value(project.clone()).unwrap()));
+        }
+        // Reject duplicate project names when creating new
+        if existing.iter().any(|p| p.name == name) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("A project named '{}' already exists", name),
+            ));
+        }
+    }
+
+    let project = models::Project {
+        id: uuid::Uuid::new_v4(),
+        name: name.clone(),
+        repo_path: repo_path.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        archived: false,
+        maintainer: models::MaintainerConfig::default(),
+        auto_worker: models::AutoWorkerConfig::default(),
+        prompts: vec![],
+        sessions: vec![],
+        staged_session: None,
+    };
+
+    storage
+        .save_project(&project)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Only create default agents.md if repo doesn't have one
+    let repo_agents = path.join("agents.md");
+    if !repo_agents.exists() {
+        storage
+            .save_agents_md(project.id, &commands::render_agents_md(&project.name))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    // If repo has agents.md but no CLAUDE.md, create symlink
+    commands::ensure_claude_md_symlink(path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
     Ok(Json(serde_json::to_value(project).unwrap()))
 }
 
@@ -982,11 +1048,29 @@ async fn stop_voice_pipeline() -> Result<Json<Value>, (StatusCode, String)> {
     ))
 }
 
-async fn load_terminal_theme() -> Result<Json<Value>, (StatusCode, String)> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "load_terminal_theme is not available in server mode".to_string(),
-    ))
+async fn load_terminal_theme(
+    AxumState(state): AxumState<Arc<ServerState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let base_dir = {
+        let storage = state
+            .app
+            .storage
+            .lock()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        storage.base_dir()
+    };
+    let theme = tokio::task::spawn_blocking(move || {
+        the_controller_lib::terminal_theme::load_terminal_theme(&base_dir)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task failed: {}", e),
+        )
+    })?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::to_value(theme).unwrap()))
 }
 
 async fn list_archived_projects(
@@ -1096,8 +1180,14 @@ async fn merge_session_branch(
                 );
 
                 let wt_poll = worktree_path.clone();
+                let max_polls = 200; // 600s / 3s
+                let mut poll_count = 0;
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+                    poll_count += 1;
+                    if poll_count >= max_polls {
+                        break; // timeout, let outer retry loop handle it
+                    }
                     let wt_check = wt_poll.clone();
                     let still_rebasing = tokio::task::spawn_blocking(move || {
                         WorktreeManager::is_rebase_in_progress(&wt_check)
@@ -1936,6 +2026,10 @@ async fn trigger_maintainer_check(
             .app
             .emitter
             .emit(&format!("maintainer-status:{}", project_uuid), "error");
+        let _ = state
+            .app
+            .emitter
+            .emit(&format!("maintainer-error:{}", project_uuid), &e);
         (StatusCode::INTERNAL_SERVER_ERROR, e)
     })?;
     {
@@ -2636,16 +2730,17 @@ async fn scaffold_project(
         ));
     }
     let name_clone = name.clone();
-    let project =
-        tokio::task::spawn_blocking(move || scaffold_project_blocking(name_clone, repo_path))
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Task failed: {}", e),
-                )
-            })?
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let project = tokio::task::spawn_blocking(move || {
+        commands::scaffold_project_blocking(name_clone, repo_path)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task failed: {}", e),
+        )
+    })?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let storage = state
         .app
         .storage
@@ -2663,85 +2758,6 @@ async fn scaffold_project(
         .save_project(&project)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::to_value(project).unwrap()))
-}
-
-fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<models::Project, String> {
-    let parent_dir = repo_path
-        .parent()
-        .ok_or_else(|| format!("Invalid repo path: {}", repo_path.display()))?;
-    std::fs::create_dir_all(parent_dir).map_err(|e| e.to_string())?;
-    std::fs::create_dir(&repo_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            format!("Directory already exists: {}", name)
-        } else {
-            e.to_string()
-        }
-    })?;
-    let repo = git2::Repository::init(&repo_path).map_err(|e| e.to_string())?;
-    let sig = repo
-        .signature()
-        .unwrap_or_else(|_| git2::Signature::now("The Controller", "noreply@controller").unwrap());
-    let agents_content = commands::render_agents_md(&name);
-    std::fs::write(repo_path.join("agents.md"), &agents_content)
-        .map_err(|e| format!("failed to write agents.md: {}", e))?;
-    commands::ensure_claude_md_symlink(&repo_path).map_err(|e| e.to_string())?;
-    let plans_dir = repo_path.join("docs").join("plans");
-    std::fs::create_dir_all(&plans_dir)
-        .map_err(|e| format!("failed to create docs/plans: {}", e))?;
-    std::fs::write(plans_dir.join(".gitkeep"), "")
-        .map_err(|e| format!("failed to write .gitkeep: {}", e))?;
-    let mut index = repo.index().map_err(|e| e.to_string())?;
-    index
-        .add_path(std::path::Path::new("agents.md"))
-        .map_err(|e| e.to_string())?;
-    index
-        .add_path(std::path::Path::new("CLAUDE.md"))
-        .map_err(|e| e.to_string())?;
-    index
-        .add_path(std::path::Path::new("docs/plans/.gitkeep"))
-        .map_err(|e| e.to_string())?;
-    index.write().map_err(|e| e.to_string())?;
-    let tree_id = index.write_tree().map_err(|e| e.to_string())?;
-    let tree = repo.find_tree(tree_id).map_err(|e| e.to_string())?;
-    repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
-        .map_err(|e| e.to_string())?;
-    let gh_output = std::process::Command::new("gh")
-        .args([
-            "repo",
-            "create",
-            &name,
-            "--private",
-            "--source=.",
-            "--remote=origin",
-        ])
-        .current_dir(&repo_path)
-        .output()
-        .map_err(|e| format!("Failed to run gh CLI: {}. Is gh installed?", e))?;
-    if !gh_output.status.success() {
-        let stderr = String::from_utf8_lossy(&gh_output.stderr);
-        return Err(format!("Failed to create GitHub repo: {}", stderr.trim()));
-    }
-    let push_output = std::process::Command::new("git")
-        .args(["push", "--set-upstream", "origin", "HEAD"])
-        .current_dir(&repo_path)
-        .output()
-        .map_err(|e| format!("Failed to run git push: {}", e))?;
-    if !push_output.status.success() {
-        let stderr = String::from_utf8_lossy(&push_output.stderr);
-        return Err(format!("Failed to push initial commit: {}", stderr.trim()));
-    }
-    Ok(models::Project {
-        id: uuid::Uuid::new_v4(),
-        name,
-        repo_path: repo_path.to_string_lossy().to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        archived: false,
-        maintainer: models::MaintainerConfig::default(),
-        auto_worker: models::AutoWorkerConfig::default(),
-        prompts: vec![],
-        sessions: vec![],
-        staged_session: None,
-    })
 }
 
 // --- Session Management ---
