@@ -824,7 +824,7 @@ fn find_staging_port(base_port: u16) -> Result<u16, String> {
 
 /// Kill a process group by PID. Sends SIGTERM to the group, then SIGKILL after 2s
 /// if the group is still alive.
-pub(crate) fn kill_process_group(pid: u32) {
+pub fn kill_process_group(pid: u32) {
     #[cfg(unix)]
     {
         use libc::{kill, SIGKILL, SIGTERM};
@@ -1840,7 +1840,7 @@ fn discover_branch_commits(worktree_path: &str) -> Result<Vec<CommitInfo>, Strin
     Ok(commits)
 }
 
-pub(crate) fn validate_maintainer_interval(minutes: u64) -> Result<(), String> {
+pub fn validate_maintainer_interval(minutes: u64) -> Result<(), String> {
     if minutes < 5 {
         return Err("Interval must be at least 5 minutes".to_string());
     }
