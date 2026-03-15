@@ -9,6 +9,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
 use the_controller_lib::{
     config, emitter::WsBroadcastEmitter, note_ai_chat, notes, state::AppState,
@@ -16,6 +17,7 @@ use the_controller_lib::{
 
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 
 struct ServerState {
     app: AppState,
@@ -31,6 +33,18 @@ async fn main() {
         app: app_state,
         ws_tx,
     });
+
+    let dist_dir = std::env::var("CONTROLLER_DIST_DIR").unwrap_or_else(|_| {
+        let exe = std::env::current_exe().unwrap_or_default();
+        exe.parent()
+            .unwrap_or(Path::new("."))
+            .join("dist")
+            .to_string_lossy()
+            .to_string()
+    });
+
+    let serve_dir = ServeDir::new(&dist_dir)
+        .not_found_service(ServeFile::new(format!("{}/index.html", dist_dir)));
 
     let app = Router::new()
         .route("/api/list_projects", post(list_projects))
@@ -59,17 +73,13 @@ async fn main() {
         .route("/api/delete_folder", post(api_delete_folder))
         .route("/api/commit_notes", post(api_commit_notes))
         .route("/ws", get(ws_upgrade))
-        .fallback(post(fallback_handler))
+        .fallback_service(serve_dir)
         .layer(CorsLayer::permissive())
         .with_state(state);
 
     println!("Server listening on http://localhost:3001");
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
     axum::serve(listener, app).await.unwrap();
-}
-
-async fn fallback_handler() -> Json<Value> {
-    Json(Value::Null)
 }
 
 // --- Route handlers ---
