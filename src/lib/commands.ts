@@ -120,7 +120,19 @@ export interface HelpSection {
   entries: HelpEntry[];
 }
 
-export function getHelpSections(mode?: WorkspaceMode): HelpSection[] {
+function resolveKey(cmds: CommandDef[], id: string): string {
+  // Prefer non-hidden (overridable) entry; fall back to hidden (alias) entry
+  return cmds.find(c => c.id === id && !c.hidden)?.key
+    ?? cmds.find(c => c.id === id)?.key
+    ?? "?";
+}
+
+export function getHelpSections(
+  mode?: WorkspaceMode,
+  resolvedCmds?: CommandDef[],
+): HelpSection[] {
+  const cmds = resolvedCmds ?? commands;
+
   if (mode === "development") {
     const essentialIds = new Set(["create-session", "navigate-next", "navigate-prev", "finish-branch", "new-project", "delete", "fuzzy-finder", "expand-collapse", "escape-focus", "escape-forward"]);
     const debugIds = new Set(["screenshot", "screenshot-cropped", "screenshot-picker"]);
@@ -128,13 +140,13 @@ export function getHelpSections(mode?: WorkspaceMode): HelpSection[] {
     const essentials: HelpSection = {
       label: "Essentials",
       entries: [
-        { key: "c", description: "Create session" },
-        { key: "j / k", description: "Next / previous item" },
-        { key: "n", description: "New project" },
-        { key: "d", description: "Delete focused item" },
-        { key: "m", description: "Merge session branch" },
-        { key: "f", description: "Find project (fuzzy finder)" },
-        { key: "l / Enter", description: "Expand/collapse or focus terminal" },
+        { key: resolveKey(cmds, "create-session"), description: "Create session" },
+        { key: `${resolveKey(cmds, "navigate-next")} / ${resolveKey(cmds, "navigate-prev")}`, description: "Next / previous item" },
+        { key: resolveKey(cmds, "new-project"), description: "New project" },
+        { key: resolveKey(cmds, "delete"), description: "Delete focused item" },
+        { key: resolveKey(cmds, "finish-branch"), description: "Merge session branch" },
+        { key: resolveKey(cmds, "fuzzy-finder"), description: "Find project (fuzzy finder)" },
+        { key: `${resolveKey(cmds, "expand-collapse")} / Enter`, description: "Expand/collapse or focus terminal" },
         { key: "Esc", description: "Move focus up" },
         { key: "Esc Esc", description: "Forward escape to terminal" },
       ],
@@ -142,7 +154,7 @@ export function getHelpSections(mode?: WorkspaceMode): HelpSection[] {
 
     const debug: HelpSection = {
       label: "Debug",
-      entries: commands
+      entries: cmds
         .filter(c => debugIds.has(c.id) && !c.hidden)
         .map(c => ({ key: c.helpKey ?? c.key, description: c.description })),
     };
@@ -153,7 +165,7 @@ export function getHelpSections(mode?: WorkspaceMode): HelpSection[] {
       if (builtSections[sectionName]) return builtSections[sectionName];
       return {
         label: sectionName,
-        entries: commands
+        entries: cmds
           .filter(c => c.section === sectionName && !c.hidden)
           .filter(c => !c.mode || c.mode === mode)
           .filter(c => !essentialIds.has(c.id) && !debugIds.has(c.id))
@@ -166,7 +178,7 @@ export function getHelpSections(mode?: WorkspaceMode): HelpSection[] {
 
   return SECTION_ORDER.map(section => ({
     label: section,
-    entries: commands
+    entries: cmds
       .filter(c => c.section === section && !c.hidden)
       .filter(c => !c.mode || !mode || c.mode === mode)
       .map(c => ({ key: c.helpKey ?? c.key, description: c.description })),
