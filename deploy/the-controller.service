@@ -9,6 +9,10 @@
 # The service runs as your user — no sudo, no permission conflicts.
 # Requires lingering so it survives logout:
 #   loginctl enable-linger $USER
+#
+# IMPORTANT: User systemd units do NOT inherit your shell environment
+# (.zshrc/.bashrc). The deploy script snapshots your PATH into server.env
+# so the service can find claude, tmux, node, etc.
 
 [Unit]
 Description=The Controller - Claude Code Session Manager

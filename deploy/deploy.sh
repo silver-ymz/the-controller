@@ -81,16 +81,26 @@ cp -r "$REPO_ROOT/dist/." "$INSTALL_DIR/dist/"
 ENV_FILE="$INSTALL_DIR/server.env"
 if [[ ! -f "$ENV_FILE" ]]; then
   TOKEN=$(openssl rand -hex 24)
+  # Snapshot the current shell PATH so systemd can find claude, tmux, node, etc.
+  # User systemd units don't source .zshrc/.bashrc — without this, binaries
+  # installed via nvm, cargo, homebrew, etc. would be invisible to the service.
   cat > "$ENV_FILE" <<EOF
 CONTROLLER_AUTH_TOKEN=$TOKEN
 CONTROLLER_PORT=$PORT
 CONTROLLER_BIND=127.0.0.1
 CONTROLLER_DIST_DIR=$INSTALL_DIR/dist
+PATH=$PATH
 EOF
   chmod 600 "$ENV_FILE"
   echo "==> Generated auth token in $ENV_FILE"
 else
-  echo "==> Keeping existing $ENV_FILE"
+  echo "==> Keeping existing $ENV_FILE (updating PATH)"
+  # Always refresh PATH — user may have installed new tools since last deploy
+  if grep -q '^PATH=' "$ENV_FILE"; then
+    sed -i.bak "s|^PATH=.*|PATH=$PATH|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+  else
+    echo "PATH=$PATH" >> "$ENV_FILE"
+  fi
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   TOKEN="${CONTROLLER_AUTH_TOKEN:-}"
