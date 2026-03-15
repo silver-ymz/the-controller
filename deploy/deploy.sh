@@ -59,38 +59,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
   check_cmd pnpm
 fi
 
-# ── Build minimal PATH for systemd ───────────────────────────────────
-# User systemd units don't source .zshrc/.bashrc. Instead of dumping the
-# entire shell PATH (which may contain temp/build dirs), we resolve only
-# the directories that contain binaries the server actually needs.
-REQUIRED_BINS=(claude tmux git)
-OPTIONAL_BINS=(node gh nc)
-
-resolve_path() {
-  local dirs=""
-  for bin in "$@"; do
-    local bin_path
-    bin_path=$(command -v "$bin" 2>/dev/null) || continue
-    local dir
-    dir=$(dirname "$bin_path")
-    # Deduplicate
-    case ":$dirs:" in
-      *":$dir:"*) ;;
-      *) dirs="${dirs:+$dirs:}$dir" ;;
-    esac
-  done
-  # Always include basic system paths as fallback
-  for sysdir in /usr/local/bin /usr/bin /bin; do
-    case ":$dirs:" in
-      *":$sysdir:"*) ;;
-      *) dirs="${dirs:+$dirs:}$sysdir" ;;
-    esac
-  done
-  echo "$dirs"
-}
-
-SERVICE_PATH=$(resolve_path "${REQUIRED_BINS[@]}" "${OPTIONAL_BINS[@]}")
-
+# ── Build ────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" == false ]]; then
   echo "==> Building frontend..."
   cd "$REPO_ROOT"
@@ -117,18 +86,11 @@ CONTROLLER_AUTH_TOKEN=$TOKEN
 CONTROLLER_PORT=$PORT
 CONTROLLER_BIND=127.0.0.1
 CONTROLLER_DIST_DIR=$INSTALL_DIR/dist
-PATH=$SERVICE_PATH
 EOF
   chmod 600 "$ENV_FILE"
   echo "==> Generated auth token in $ENV_FILE"
 else
-  echo "==> Keeping existing $ENV_FILE (updating PATH)"
-  # Always refresh PATH — user may have installed new tools since last deploy
-  if grep -q '^PATH=' "$ENV_FILE"; then
-    sed -i.bak "s|^PATH=.*|PATH=$SERVICE_PATH|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-  else
-    echo "PATH=$SERVICE_PATH" >> "$ENV_FILE"
-  fi
+  echo "==> Keeping existing $ENV_FILE"
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   TOKEN="${CONTROLLER_AUTH_TOKEN:-}"
