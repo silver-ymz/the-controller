@@ -1,0 +1,290 @@
+---
+name: the-controller-submitting-pr-with-copilot-review
+description: Use when submitting a PR to GitHub and want automated Copilot review cycles — handles local pre-review, PR creation, Copilot review requests, resolving comments, and iterating until clean
+---
+
+# Submitting PR with Copilot Review
+
+## Overview
+
+Automates the full PR submission lifecycle: local pre-review, PR creation with summary, and iterative Copilot review cycles until the PR is clean or the review budget is exhausted.
+
+**Core principle:** Fix what you can locally first, then let Copilot catch what you missed, resolve its feedback automatically, and repeat.
+
+## When to Use
+
+- Submitting a PR to GitHub where Copilot is enabled as a reviewer
+- Want automated review-fix-resolve cycles instead of manual back-and-forth
+
+## Workflow
+
+```dot
+digraph pr_workflow {
+    rankdir=TB;
+    node [shape=box];
+
+    sync_main [label="1. Sync main branch\n& rebase"];
+    local_review [label="2. Local pre-review\n(subagent)"];
+    fix_local [label="Fix local review issues"];
+    create_pr [label="3. Create PR with summary"];
+    request_copilot [label="4. Request Copilot review"];
+    wait_copilot [label="5. Wait for Copilot\n(poll every 60s)"];
+    check_comments [label="6. Check review comments"];
+    no_comments [label="Done — PR is clean"];
+    resolve_comments [label="7. Resolve comments\n(subagent)"];
+    hide_comments [label="8. Hide resolved comments\n& top comments"];
+    budget_check [label="Round < 8?", shape=diamond];
+    force_stop [label="Done — budget exhausted\n(report to user)"];
+
+    sync_main -> local_review;
+    local_review -> fix_local;
+    fix_local -> create_pr;
+    create_pr -> request_copilot;
+    request_copilot -> wait_copilot;
+    wait_copilot -> check_comments;
+    check_comments -> no_comments [label="no comments"];
+    check_comments -> resolve_comments [label="has comments"];
+    resolve_comments -> hide_comments;
+    hide_comments -> budget_check;
+    budget_check -> request_copilot [label="yes"];
+    budget_check -> force_stop [label="no"];
+}
+```
+
+## Step 1: Sync Main Branch
+
+Before anything else, sync with remote main to catch conflicts early:
+
+```bash
+# Update local main (works in worktrees too)
+main_worktree=$(git worktree list | grep '\[main\]' | awk '{print $1}')
+if [ -n "$main_worktree" ]; then
+  git -C "$main_worktree" pull origin main
+else
+  git fetch origin main:main
+fi
+
+# Rebase current branch onto updated main
+git rebase main
+```
+
+If rebase hits conflicts, resolve them before proceeding. After resolving, run the project's tests and lint checks to make sure nothing broke.
+
+## Step 2: Local Pre-Review (Subagent)
+
+Before creating the PR, dispatch a subagent to review the diff locally. This catches obvious issues without burning Copilot review cycles.
+
+**Subagent prompt template:**
+
+```
+Review the diff between the current branch and main. Focus on:
+- Bugs, logic errors, security issues
+- Missing error handling
+- Code style / lint issues the CI would catch
+- Anything that would fail a code review
+
+Run: git diff main...HEAD
+
+For each issue found, fix it directly. After fixing, run the project's
+format/lint checks to verify. Commit fixes as a separate commit.
+
+Return: summary of issues found and fixed, or "no issues found".
+```
+
+After the subagent returns, verify its fixes compile and pass lint/tests.
+
+## Step 3: Create PR with Summary
+
+Generate a comprehensive PR summary from the commit history:
+
+```bash
+# Get base branch (usually main)
+BASE_BRANCH=main
+
+# Generate PR
+gh pr create --base "$BASE_BRANCH" \
+  --title "<concise title under 70 chars>" \
+  --body "<full PR summary>"
+```
+
+**PR summary should include:**
+- What changed and why (from commit messages + diff analysis)
+- Key design decisions
+- Testing done
+- Breaking changes (if any)
+
+## Step 4: Request Copilot Review
+
+```bash
+PR_NUMBER=$(gh pr view --json number -q '.number')
+gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/requested_reviewers \
+  -f "reviewers[]=copilot-pull-request-reviewer[bot]" 2>/dev/null || true
+
+# Copilot is usually auto-triggered, but explicit request ensures it
+# If the above fails, Copilot may already be reviewing — proceed to wait
+```
+
+## Step 5: Wait for Copilot Review
+
+Poll until Copilot's review appears. Copilot typically takes 5–10 minutes.
+
+```bash
+# Poll every 60 seconds, timeout after 15 minutes
+for i in $(seq 1 15); do
+  REVIEW_COUNT=$(gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/reviews \
+    --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length')
+  if [ "$REVIEW_COUNT" -gt "$PREVIOUS_COUNT" ]; then
+    echo "New Copilot review detected"
+    break
+  fi
+  sleep 60
+done
+```
+
+**IMPORTANT:** Track `PREVIOUS_COUNT` across rounds so you detect NEW reviews, not old ones.
+
+## Step 6: Check Review Comments
+
+```bash
+# Get unresolved Copilot review threads
+THREADS=$(gh api graphql -f query='
+{
+  repository(owner: "{OWNER}", name: "{REPO}") {
+    pullRequest(number: {PR_NUMBER}) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          comments(first: 1) {
+            nodes {
+              author { login }
+              body
+            }
+          }
+        }
+      }
+    }
+  }
+}' --jq '.data.repository.pullRequest.reviewThreads.nodes[]
+  | select(.comments.nodes[0].author.login == "copilot-pull-request-reviewer")
+  | select(.isResolved == false)')
+
+# If no unresolved threads, PR is clean — done
+```
+
+If no new unresolved comments, the PR is clean. Report success and stop.
+
+## Step 7: Resolve Comments (Subagent)
+
+Dispatch a subagent to address Copilot's feedback. This keeps the main context clean.
+
+**Subagent prompt template:**
+
+```
+Copilot left the following review comments on PR #{PR_NUMBER}.
+For each comment, evaluate whether it's valid:
+
+{PASTE COMMENT BODIES AND FILE LOCATIONS}
+
+For valid issues:
+- Fix the code
+- Run format/lint checks
+- Commit the fix
+
+For invalid/noise comments:
+- Note why it's not applicable
+
+Return: summary of what was fixed and what was skipped (with reasoning).
+```
+
+After the subagent returns, push the fixes:
+
+```bash
+git push
+```
+
+## Step 8: Hide Resolved Comments and Top Comments
+
+After fixing, resolve all Copilot review threads and hide the top-level review comments:
+
+```bash
+# Resolve all unresolved Copilot review threads
+gh api graphql -f query='
+{
+  repository(owner: "{OWNER}", name: "{REPO}") {
+    pullRequest(number: {PR_NUMBER}) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          comments(first: 1) {
+            nodes { author { login } }
+          }
+        }
+      }
+    }
+  }
+}' --jq '
+  .data.repository.pullRequest.reviewThreads.nodes[]
+  | select(.comments.nodes[0].author.login == "copilot-pull-request-reviewer")
+  | select(.isResolved == false)
+  | .id' | while IFS= read -r tid; do
+    gh api graphql \
+      -F threadId="$tid" \
+      -f query='mutation($threadId: ID!) {
+        resolveReviewThread(input: {threadId: $threadId}) {
+          thread { isResolved }
+        }
+      }'
+done
+
+# Hide (minimize) Copilot's top-level review comments
+gh api graphql -f query='
+{
+  repository(owner: "{OWNER}", name: "{REPO}") {
+    pullRequest(number: {PR_NUMBER}) {
+      reviews(first: 50) {
+        nodes {
+          id
+          author { login }
+        }
+      }
+    }
+  }
+}' --jq '
+  .data.repository.pullRequest.reviews.nodes[]
+  | select(.author.login == "copilot-pull-request-reviewer")
+  | .id' | while IFS= read -r rid; do
+    gh api graphql \
+      -F subjectId="$rid" \
+      -f query='mutation($subjectId: ID!) {
+        minimizeComment(input: {subjectId: $subjectId, classifier: RESOLVED}) {
+          minimizedComment { isMinimized }
+        }
+      }'
+done
+```
+
+## Step 9: Loop or Stop
+
+Increment the round counter. If round < 8, go back to Step 4 (request Copilot review again).
+
+If round >= 8, stop and report to the user:
+- How many rounds were completed
+- Whether comments remain unresolved
+- Summary of what was fixed across all rounds
+
+## Context Management
+
+This workflow can consume significant context over multiple rounds. Mitigate by:
+
+- **Using subagents** for Step 1 (local review) and Step 6 (resolve comments) — keeps review content out of main context
+- **Compact between rounds** — after each resolve+hide cycle, the main agent only needs to track: round number, PR number, and previous review count
+- **Don't read full diffs in main context** — delegate all diff reading to subagents
+
+## Common Mistakes
+
+- **Forgetting to track review count across rounds** — you'll re-process old reviews. Always compare against `PREVIOUS_COUNT`.
+- **Not pushing after fixes** — Copilot reviews the remote branch, not local. Always `git push` before requesting re-review.
+- **Fixing noise comments** — Copilot sometimes flags valid patterns as issues. The subagent should skip these with reasoning, not blindly fix everything.
+- **Running out of context** — 8 rounds of review content adds up fast. Always use subagents for the heavy lifting.
