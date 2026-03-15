@@ -101,7 +101,7 @@ pub fn parse_keybindings(content: &str) -> KeybindingsResult {
 
         if META_REQUIRED_COMMANDS.contains(&command) && !key.starts_with("Meta+") {
             warnings.push(format!(
-                "command '{command}' requires Meta+ prefix (e.g. Meta+{key})"
+                "command '{command}' requires Meta+ prefix (e.g. Meta+<key>)"
             ));
         }
     }

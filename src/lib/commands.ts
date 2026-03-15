@@ -233,8 +233,10 @@ export function getHelpSections(
 
 /**
  * Takes the default commands array and a map of command_id→key overrides.
- * Returns a new array with keys replaced for non-hidden commands.
- * Hidden aliases keep their original keys.
+ * Returns a new array with overridden keys applied. Hidden entries that
+ * are true aliases (a non-hidden sibling with the same id exists) keep
+ * their original keys; hidden entries that are the sole entry for their
+ * id are still overridable.
  * If overrides is empty, returns the original array (same reference).
  */
 export function applyOverrides(

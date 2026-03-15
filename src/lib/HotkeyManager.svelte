@@ -455,11 +455,11 @@
     if (!cmdKey) return false;
     const modifierActive = currentMetaKey === "ctrl" ? e.ctrlKey : e.metaKey;
     if (cmdKey.startsWith("Meta+")) {
-      return modifierActive && e.key === cmdKey.slice(5);
+      return modifierActive && e.key.toLowerCase() === cmdKey.slice(5).toLowerCase();
     }
     // Legacy format: ⌘x
     if (cmdKey.startsWith("⌘")) {
-      return modifierActive && e.key === cmdKey.slice(1);
+      return modifierActive && e.key.toLowerCase() === cmdKey.slice(1).toLowerCase();
     }
     return false;
   }
@@ -515,12 +515,15 @@
       }
 
       // Regular commands overridden to use Meta+ prefix
-      const metaComposedKey = `Meta+${e.key}`;
-      if (handleHotkey(metaComposedKey)) {
-        e.stopPropagation();
-        e.preventDefault();
-        pushKeystroke(metaSymbol + e.key);
-        return;
+      // Apply same guards as regular hotkeys
+      if (!isTerminalFocused() && !isDialogOpen() && !isEditableElementFocused() && currentFocus?.type !== "notes-editor") {
+        const metaComposedKey = `Meta+${e.key}`;
+        if (handleHotkey(metaComposedKey)) {
+          e.stopPropagation();
+          e.preventDefault();
+          pushKeystroke(metaSymbol + e.key);
+          return;
+        }
       }
     }
 
