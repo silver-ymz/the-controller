@@ -1,4 +1,4 @@
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::new_debouncer;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
@@ -242,21 +242,13 @@ pub fn start_watcher(base_dir: PathBuf, emitter: Arc<dyn crate::emitter::EventEm
         loop {
             match rx.recv() {
                 Ok(Ok(events)) => {
-                    let relevant = events
-                        .iter()
-                        .any(|e| e.kind == DebouncedEventKind::Any && e.path == target);
+                    let relevant = events.iter().any(|e| e.path == target);
                     if !relevant {
                         continue;
                     }
                     let result = load_keybindings(&base_dir);
-                    if result.warnings.is_empty() {
-                        if let Ok(payload) = serde_json::to_string(&result) {
-                            let _ = emitter.emit("keybindings-changed", &payload);
-                        }
-                    } else {
-                        for w in &result.warnings {
-                            eprintln!("keybindings warning: {w}");
-                        }
+                    if let Ok(payload) = serde_json::to_string(&result) {
+                        let _ = emitter.emit("keybindings-changed", &payload);
                     }
                 }
                 Ok(Err(e)) => {
@@ -486,25 +478,5 @@ mod tests {
             result.warnings.is_empty(),
             "Meta+ prefixed external commands should not warn"
         );
-    }
-
-    #[test]
-    fn test_malformed_file_produces_warnings_so_watcher_skips_emit() {
-        let tmp = TempDir::new().unwrap();
-        // Write a file with a valid override and a malformed line (mid-edit save)
-        fs::write(
-            keybindings_path(tmp.path()),
-            "navigate-next j\nincomplete-line-no-key\n",
-        )
-        .unwrap();
-        let result = load_keybindings(tmp.path());
-        // The parser returns the valid override but also a warning
-        assert_eq!(result.overrides.get("navigate-next").unwrap(), "j");
-        assert!(
-            !result.warnings.is_empty(),
-            "expected warnings for malformed line"
-        );
-        assert!(result.warnings[0].contains("malformed line"));
-        // Because warnings are non-empty, start_watcher would skip emitting this result
     }
 }

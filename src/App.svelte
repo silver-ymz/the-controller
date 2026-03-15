@@ -437,7 +437,8 @@
       }
     });
 
-    const unlistenKeybindings = initKeybindings();
+    let cleanupKeybindings: (() => void) | undefined;
+    initKeybindings().then((fn) => { cleanupKeybindings = fn; });
 
     void (async () => {
       updateWindowTitle(__BUILD_BRANCH__, __BUILD_COMMIT__);
@@ -458,9 +459,9 @@
       ready = true;
     })();
 
-    return async () => {
+    return () => {
       unlistenSecureEnv();
-      (await unlistenKeybindings)();
+      cleanupKeybindings?.();
     };
   });
 

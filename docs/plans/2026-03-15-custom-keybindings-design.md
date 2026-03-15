@@ -52,7 +52,7 @@ File change → notify → debounce → re-parse → emit event → frontend reb
 
 - File missing → generate template, use defaults
 - Parse error → keep last valid bindings, warning toast
-- Duplicate key in same mode → last-wins, warning toast
+- Duplicate key in same mode → last-wins (no detection in v1)
 - Unknown command → skip line, warning toast
 
 ## Not in v1
