@@ -7,6 +7,7 @@ pub mod commands;
 pub mod config;
 pub mod deploy;
 pub mod emitter;
+pub mod keybindings;
 pub mod labels;
 pub mod maintainer;
 pub mod models;
@@ -59,6 +60,17 @@ pub fn run() {
             app.manage(app_state);
             cli_install::install_controller_cli();
             skills::sync_skills();
+            {
+                let app_state = app.state::<state::AppState>();
+                let emitter = app_state.emitter.clone();
+                let base_dir = app_state.storage.lock().map(|s| s.base_dir()).map_err(|e| {
+                    eprintln!("Failed to lock storage for keybindings setup: {e}");
+                });
+                if let Ok(base_dir) = base_dir {
+                    keybindings::ensure_keybindings_file(&base_dir);
+                    keybindings::start_watcher(base_dir, emitter);
+                }
+            }
             status_socket::start_listener(app.handle().clone());
             maintainer::MaintainerScheduler::start(app.handle().clone());
             auto_worker::AutoWorkerScheduler::start(app.handle().clone());
@@ -144,6 +156,7 @@ pub fn run() {
             commands::start_voice_pipeline,
             commands::stop_voice_pipeline,
             commands::log_frontend_error,
+            commands::load_keybindings,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

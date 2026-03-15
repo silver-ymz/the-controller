@@ -23,6 +23,7 @@
   import InfrastructureDashboard from "./lib/InfrastructureDashboard.svelte";
   import VoiceMode from "./lib/VoiceMode.svelte";
   import { refreshProjectsFromBackend } from "./lib/project-listing";
+  import { initKeybindings } from "$lib/keybindings";
   import { showToast } from "./lib/toast";
   import { appConfig, architectureViews, createArchitectureViewState, onboardingComplete, hotkeyAction, showKeyHints, sidebarVisible, workspaceModePickerVisible, workspaceMode, focusTarget, projects, sessionStatuses, activeSessionId, expandedProjects, dispatchHotkeyAction, focusTerminalSoon, selectedSessionProvider, sessionProviderFromConfig, type ArchitectureResult, type Config, type GithubIssue, type Project, type SavedPrompt, type SessionStatus } from "./lib/stores";
   let ready = $state(false);
@@ -436,6 +437,9 @@
       }
     });
 
+    let cleanupKeybindings: (() => void) | undefined;
+    initKeybindings().then((fn) => { cleanupKeybindings = fn; });
+
     void (async () => {
       updateWindowTitle(__BUILD_BRANCH__, __BUILD_COMMIT__);
 
@@ -457,6 +461,7 @@
 
     return () => {
       unlistenSecureEnv();
+      cleanupKeybindings?.();
     };
   });
 
