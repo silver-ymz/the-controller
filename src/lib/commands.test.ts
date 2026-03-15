@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyOverrides, commands, getHelpSections, buildKeyMap } from "./commands";
+import { applyOverrides, commands, getHelpSections, buildKeyMap, formatDisplayKey } from "./commands";
 
 describe("command registry", () => {
   it("every non-external command has a unique key within its mode", () => {
@@ -282,5 +282,48 @@ describe("buildKeyMap with overrides", () => {
     const map = buildKeyMap("development", resolved);
     expect(map.get("h")).toBe("navigate-next");
     expect(map.has("j")).toBe(false);
+  });
+});
+
+describe("formatDisplayKey", () => {
+  it("converts Meta+ to ⌘ for cmd", () => {
+    expect(formatDisplayKey("Meta+c", "cmd")).toBe("⌘c");
+  });
+
+  it("converts Meta+ to ⌃ for ctrl", () => {
+    expect(formatDisplayKey("Meta+c", "ctrl")).toBe("⌃c");
+  });
+
+  it("passes through bare keys unchanged", () => {
+    expect(formatDisplayKey("j", "cmd")).toBe("j");
+  });
+
+  it("passes through existing ⌘ prefix unchanged", () => {
+    expect(formatDisplayKey("⌘s", "cmd")).toBe("⌘s");
+  });
+});
+
+describe("getHelpSections with metaKey", () => {
+  it("formats Meta+ overrides as ⌘ in help display", () => {
+    const resolved = applyOverrides(commands, { "create-session": "Meta+c" });
+    const sections = getHelpSections("development", resolved, "cmd");
+    const essentials = sections.find(s => s.label === "Essentials")!;
+    const createEntry = essentials.entries.find(e => e.description === "Create session")!;
+    expect(createEntry.key).toBe("⌘c");
+  });
+
+  it("formats Meta+ overrides as ⌃ when meta is ctrl", () => {
+    const resolved = applyOverrides(commands, { "create-session": "Meta+c" });
+    const sections = getHelpSections("development", resolved, "ctrl");
+    const essentials = sections.find(s => s.label === "Essentials")!;
+    const createEntry = essentials.entries.find(e => e.description === "Create session")!;
+    expect(createEntry.key).toBe("⌃c");
+  });
+
+  it("preserves existing ⌘ keys in default display", () => {
+    const sections = getHelpSections("development", undefined, "cmd");
+    const allKeys = sections.flatMap(s => s.entries.map(e => e.key));
+    expect(allKeys).toContain("⌘s");
+    expect(allKeys).toContain("⌘k");
   });
 });

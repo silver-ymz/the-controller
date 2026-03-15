@@ -512,6 +512,16 @@
         pushKeystroke("⌘T");
         return;
       }
+
+      // Regular commands overridden to use Meta+ prefix
+      const metaComposedKey = `Meta+${e.key}`;
+      if (handleHotkey(metaComposedKey)) {
+        e.stopPropagation();
+        e.preventDefault();
+        const symbol = currentMetaKey === "ctrl" ? "⌃" : "⌘";
+        pushKeystroke(symbol + e.key);
+        return;
+      }
     }
 
     // Workspace mode intercepts all keys

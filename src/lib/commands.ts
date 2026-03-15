@@ -106,6 +106,15 @@ export const commands: CommandDef[] = [
   { id: "rollback-deploy", key: "r", section: "Infrastructure", description: "Rollback last deployment", mode: "infrastructure" },
 ];
 
+/**
+ * Convert `Meta+x` to `⌘x` (cmd) or `⌃x` (ctrl) for display.
+ * Passes through keys that don't contain `Meta+`.
+ */
+export function formatDisplayKey(key: string, meta: "cmd" | "ctrl"): string {
+  const symbol = meta === "ctrl" ? "⌃" : "⌘";
+  return key.replaceAll("Meta+", symbol);
+}
+
 // Section order for help display
 const SECTION_ORDER: CommandSection[] = ["Navigation", "Sessions", "Projects", "Panels", "Agents", "Notes", "Infrastructure"];
 const DEV_SECTION_ORDER: CommandSection[] = ["Essentials", "Debug", "Sessions", "Projects", "Panels"];
@@ -130,8 +139,10 @@ function resolveKey(cmds: CommandDef[], id: string): string {
 export function getHelpSections(
   mode?: WorkspaceMode,
   resolvedCmds?: CommandDef[],
+  metaKeyValue?: "cmd" | "ctrl",
 ): HelpSection[] {
   const cmds = resolvedCmds ?? commands;
+  const fmt = (k: string) => formatDisplayKey(k, metaKeyValue ?? "cmd");
 
   if (mode === "development") {
     const essentialIds = new Set(["create-session", "navigate-next", "navigate-prev", "finish-branch", "new-project", "delete", "fuzzy-finder", "expand-collapse", "escape-focus", "escape-forward"]);
@@ -140,13 +151,13 @@ export function getHelpSections(
     const essentials: HelpSection = {
       label: "Essentials",
       entries: [
-        { key: resolveKey(cmds, "create-session"), description: "Create session" },
-        { key: `${resolveKey(cmds, "navigate-next")} / ${resolveKey(cmds, "navigate-prev")}`, description: "Next / previous item" },
-        { key: resolveKey(cmds, "new-project"), description: "New project" },
-        { key: resolveKey(cmds, "delete"), description: "Delete focused item" },
-        { key: resolveKey(cmds, "finish-branch"), description: "Merge session branch" },
-        { key: resolveKey(cmds, "fuzzy-finder"), description: "Find project (fuzzy finder)" },
-        { key: `${resolveKey(cmds, "expand-collapse")} / Enter`, description: "Expand/collapse or focus terminal" },
+        { key: fmt(resolveKey(cmds, "create-session")), description: "Create session" },
+        { key: `${fmt(resolveKey(cmds, "navigate-next"))} / ${fmt(resolveKey(cmds, "navigate-prev"))}`, description: "Next / previous item" },
+        { key: fmt(resolveKey(cmds, "new-project")), description: "New project" },
+        { key: fmt(resolveKey(cmds, "delete")), description: "Delete focused item" },
+        { key: fmt(resolveKey(cmds, "finish-branch")), description: "Merge session branch" },
+        { key: fmt(resolveKey(cmds, "fuzzy-finder")), description: "Find project (fuzzy finder)" },
+        { key: `${fmt(resolveKey(cmds, "expand-collapse"))} / Enter`, description: "Expand/collapse or focus terminal" },
         { key: "Esc", description: "Move focus up" },
         { key: "Esc Esc", description: "Forward escape to terminal" },
       ],
@@ -156,7 +167,7 @@ export function getHelpSections(
       label: "Debug",
       entries: cmds
         .filter(c => debugIds.has(c.id) && !c.hidden)
-        .map(c => ({ key: c.helpKey ?? c.key, description: c.description })),
+        .map(c => ({ key: fmt(c.helpKey ?? c.key), description: c.description })),
     };
 
     const builtSections: Record<string, HelpSection> = { Essentials: essentials, Debug: debug };
@@ -169,7 +180,7 @@ export function getHelpSections(
           .filter(c => c.section === sectionName && !c.hidden)
           .filter(c => !c.mode || c.mode === mode)
           .filter(c => !essentialIds.has(c.id) && !debugIds.has(c.id))
-          .map(c => ({ key: c.helpKey ?? c.key, description: c.description })),
+          .map(c => ({ key: fmt(c.helpKey ?? c.key), description: c.description })),
       };
     }).filter(s => s.entries.length > 0);
 
@@ -181,7 +192,7 @@ export function getHelpSections(
     entries: cmds
       .filter(c => c.section === section && !c.hidden)
       .filter(c => !c.mode || !mode || c.mode === mode)
-      .map(c => ({ key: c.helpKey ?? c.key, description: c.description })),
+      .map(c => ({ key: fmt(c.helpKey ?? c.key), description: c.description })),
   })).filter(s => s.entries.length > 0);
 }
 

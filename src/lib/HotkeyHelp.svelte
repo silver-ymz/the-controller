@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { fromStore } from "svelte/store";
   import { getHelpSections, type CommandDef } from "./commands";
-  import { resolvedCommands } from "./keybindings";
+  import { resolvedCommands, metaKey } from "./keybindings";
   import { workspaceMode } from "./stores";
 
   interface Props {
@@ -13,8 +13,9 @@
 
   const workspaceModeState = fromStore(workspaceMode);
   const resolvedCommandsState = fromStore(resolvedCommands);
+  const metaKeyState = fromStore(metaKey);
   let resolvedCmds: CommandDef[] = $derived(resolvedCommandsState.current);
-  const sections = $derived(getHelpSections(workspaceModeState.current, resolvedCmds));
+  const sections = $derived(getHelpSections(workspaceModeState.current, resolvedCmds, metaKeyState.current));
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
