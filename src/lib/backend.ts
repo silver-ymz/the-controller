@@ -1,4 +1,9 @@
+import { writable } from "svelte/store";
+
 const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
+
+/** True when the server rejects our auth token (401). */
+export const authError = writable(false);
 
 function getAuthToken(): string | null {
   if (isTauri) return null;
@@ -59,7 +64,13 @@ export async function command<T>(cmd: string, args?: Record<string, unknown>): P
     headers,
     body: JSON.stringify(args ?? {}),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    if (res.status === 401) {
+      authError.set(true);
+      throw new Error("Unauthorized");
+    }
+    throw new Error(await res.text());
+  }
   return res.json();
 }
 
