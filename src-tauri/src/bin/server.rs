@@ -462,15 +462,62 @@ async fn close_session(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(args): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_id = args["projectId"].as_str().unwrap_or_default();
     let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let id =
+    let delete_worktree = args["deleteWorktree"].as_bool().unwrap_or(false);
+    let project_uuid =
+        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let session_uuid =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut pty = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let _ = pty.close_session(id);
+
+    // Close PTY / kill tmux
+    {
+        let mut pty_manager = state
+            .app
+            .pty_manager
+            .lock()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let _ = pty_manager.close_session(session_uuid);
+    }
+
+    // Remove session from project
+    let (repo_path, session) = {
+        let storage = state
+            .app
+            .storage
+            .lock()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let mut project = storage
+            .load_project(project_uuid)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let session = project
+            .sessions
+            .iter()
+            .find(|s| s.id == session_uuid)
+            .cloned();
+        project.sessions.retain(|s| s.id != session_uuid);
+        storage
+            .save_project(&project)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        (project.repo_path.clone(), session)
+    };
+
+    // Optionally delete worktree
+    if delete_worktree {
+        if let Some(session) = session {
+            if let (Some(wt_path), Some(branch)) = (session.worktree_path, session.worktree_branch)
+            {
+                let rp = repo_path;
+                let _ = tokio::task::spawn_blocking(move || {
+                    the_controller_lib::worktree::WorktreeManager::remove_worktree(
+                        &wt_path, &rp, &branch,
+                    )
+                })
+                .await;
+            }
+        }
+    }
+
     Ok(Json(Value::Null))
 }
 
