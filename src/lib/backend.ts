@@ -7,8 +7,20 @@ export const authError = writable(false);
 
 function getAuthToken(): string | null {
   if (isTauri) return null;
+  // Check sessionStorage first (token is moved here after initial URL read)
+  const stored = sessionStorage.getItem("authToken");
+  if (stored) return stored;
   const params = new URLSearchParams(window.location.search);
-  return params.get("token") || null;
+  const token = params.get("token") || null;
+  if (token) {
+    sessionStorage.setItem("authToken", token);
+    // Strip token from URL to avoid leaking via history/referrer
+    params.delete("token");
+    const qs = params.toString();
+    const newUrl = window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+    history.replaceState(null, "", newUrl);
+  }
+  return token;
 }
 
 const authToken = getAuthToken();
@@ -19,8 +31,9 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = 1000;
 
 function connectWebSocket(): WebSocket {
-  const tokenParam = authToken ? `?token=${authToken}` : "";
-  const wsUrl = `ws://${window.location.host}/ws${tokenParam}`;
+  const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+  const tokenParam = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+  const wsUrl = `${scheme}://${window.location.host}/ws${tokenParam}`;
   const ws = new WebSocket(wsUrl);
 
   ws.addEventListener("open", () => {
@@ -29,7 +42,11 @@ function connectWebSocket(): WebSocket {
 
   ws.addEventListener("message", (msg) => {
     for (const listener of wsListeners) {
-      listener(msg);
+      try {
+        listener(msg);
+      } catch (e) {
+        console.error("WebSocket listener error:", e);
+      }
     }
   });
 
