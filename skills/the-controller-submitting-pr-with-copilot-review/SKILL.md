@@ -127,17 +127,19 @@ Poll until Copilot's review appears. Copilot typically takes 5–10 minutes.
 ```bash
 # Poll every 60 seconds, timeout after 15 minutes
 PREVIOUS_COUNT=0  # init before first round; update after each round
+FOUND=false
 for i in $(seq 1 15); do
   REVIEW_COUNT=$(gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/reviews \
     --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length')
   if [ "$REVIEW_COUNT" -gt "$PREVIOUS_COUNT" ]; then
     echo "New Copilot review detected"
     PREVIOUS_COUNT=$REVIEW_COUNT
+    FOUND=true
     break
   fi
   sleep 60
 done
-if [ "$REVIEW_COUNT" -le "$PREVIOUS_COUNT" ]; then
+if [ "$FOUND" = false ]; then
   echo "Timeout: no new Copilot review after 15 minutes"
 fi
 ```
