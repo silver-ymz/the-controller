@@ -1,6 +1,6 @@
 ---
 name: the-controller-submitting-pr-with-copilot-review
-description: Use when submitting a PR to GitHub and want automated Copilot review-fix-resolve cycles instead of manual back-and-forth
+description: Use when you need to submit a PR and iterate on Copilot review feedback automatically
 ---
 
 # Submitting PR with Copilot Review
@@ -136,9 +136,10 @@ for i in $(seq 1 15); do
   fi
   sleep 60
 done
+echo "Timeout: no new Copilot review after 15 minutes"
 ```
 
-**IMPORTANT:** Track `PREVIOUS_COUNT` across rounds so you detect NEW reviews, not old ones.
+**IMPORTANT:** Track `PREVIOUS_COUNT` across rounds so you detect NEW reviews, not old ones. Update `PREVIOUS_COUNT=$REVIEW_COUNT` after each round's review is detected.
 
 ## Step 6: Check Review Comments
 
@@ -171,6 +172,10 @@ THREADS=$(gh api graphql -f query='
   | select(.isResolved == false)')
 
 # If no unresolved threads, PR is clean — done
+if [ -z "$THREADS" ]; then
+  echo "No unresolved comments — PR is clean"
+  exit 0
+fi
 ```
 
 If no new unresolved comments, the PR is clean. Report success and stop.
@@ -279,7 +284,7 @@ If round >= 8, stop and report to the user:
 
 This workflow can consume significant context over multiple rounds. Mitigate by:
 
-- **Using subagents** for Step 1 (local review) and Step 6 (resolve comments) — keeps review content out of main context
+- **Using subagents** for Step 2 (local review) and Step 7 (resolve comments) — keeps review content out of main context
 - **Compact between rounds** — after each resolve+hide cycle, the main agent only needs to track: round number, PR number, and previous review count
 - **Don't read full diffs in main context** — delegate all diff reading to subagents
 
