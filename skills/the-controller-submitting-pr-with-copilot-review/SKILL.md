@@ -199,7 +199,7 @@ if [ -z "$THREADS" ]; then
 fi
 ```
 
-If no new unresolved comments AND CI is green, the PR is clean. Report success and stop.
+If CI is green AND either there are no unresolved comments or all comments are noise (no actionable fixes needed), the PR is clean. Report success and stop — no need to continue the loop.
 
 If CI failed, check the failure logs and fix before proceeding:
 
