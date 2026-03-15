@@ -89,6 +89,78 @@ pub fn load_keybindings(base_dir: &Path) -> KeybindingsResult {
     }
 }
 
+const COMMAND_DEFAULTS: &[(&str, &str, &str)] = &[
+    // Navigation
+    ("navigate-next", "j", "Navigation"),
+    ("navigate-prev", "k", "Navigation"),
+    ("expand-collapse", "l", "Navigation"),
+    ("fuzzy-finder", "f", "Navigation"),
+    // Sessions (development)
+    ("create-session", "c", "Sessions (development)"),
+    ("finish-branch", "m", "Sessions (development)"),
+    ("save-prompt", "P", "Sessions (development)"),
+    ("load-prompt", "p", "Sessions (development)"),
+    ("stage", "v", "Sessions (development)"),
+    ("screenshot", "Meta+s", "Sessions (development)"),
+    ("screenshot-cropped", "Meta+d", "Sessions (development)"),
+    (
+        "toggle-session-provider",
+        "Meta+t",
+        "Sessions (development)",
+    ),
+    // Projects (development)
+    ("new-project", "n", "Projects (development)"),
+    ("delete", "d", "Projects (development)"),
+    ("open-issues-modal", "i", "Projects (development)"),
+    // Panels
+    ("toggle-help", "?", "Panels"),
+    ("keystroke-visualizer", "Meta+k", "Panels"),
+    // Agents (agents)
+    ("toggle-agent", "o", "Agents (agents)"),
+    ("trigger-agent-check", "r", "Agents (agents)"),
+    ("clear-agent-reports", "c", "Agents (agents)"),
+    ("toggle-maintainer-view", "t", "Agents (agents)"),
+    // Notes (notes)
+    ("create-note", "n", "Notes (notes)"),
+    ("delete-note", "d", "Notes (notes)"),
+    ("rename-note", "r", "Notes (notes)"),
+    ("duplicate-note", "y", "Notes (notes)"),
+    ("toggle-note-preview", "p", "Notes (notes)"),
+    // Architecture (architecture)
+    ("generate-architecture", "r", "Architecture (architecture)"),
+    // Infrastructure (infrastructure)
+    ("deploy-project", "d", "Infrastructure (infrastructure)"),
+    ("rollback-deploy", "r", "Infrastructure (infrastructure)"),
+];
+
+pub fn generate_template() -> String {
+    let mut out = String::new();
+    out.push_str("# Keybindings for The Controller\n");
+    out.push_str("# Uncomment and change the key to override a default binding.\n");
+    out.push_str("# Format: command-name key\n");
+    out.push_str("# Use Meta+ prefix for modifier keys (e.g. Meta+s)\n");
+    out.push_str("# Changes are applied automatically — no restart needed.\n");
+
+    let mut current_section = "";
+    for &(command, key, section) in COMMAND_DEFAULTS {
+        if section != current_section {
+            out.push('\n');
+            out.push_str(&format!("# {section}\n"));
+            current_section = section;
+        }
+        out.push_str(&format!("# {command} {key}\n"));
+    }
+
+    out
+}
+
+pub fn ensure_keybindings_file(base_dir: &Path) {
+    let path = keybindings_path(base_dir);
+    if !path.exists() {
+        let _ = fs::write(path, generate_template());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +269,45 @@ mod tests {
             keybindings_path(base),
             PathBuf::from("/tmp/test-base/keybindings")
         );
+    }
+
+    #[test]
+    fn test_generate_template_contains_all_commands() {
+        let template = generate_template();
+        for cmd in KNOWN_COMMANDS {
+            assert!(template.contains(cmd), "template missing command: {cmd}");
+        }
+    }
+
+    #[test]
+    fn test_generate_template_all_lines_are_comments_or_blank() {
+        let template = generate_template();
+        for line in template.lines() {
+            assert!(
+                line.is_empty() || line.starts_with('#'),
+                "line is not a comment or blank: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ensure_keybindings_file_creates_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = keybindings_path(tmp.path());
+        assert!(!path.exists());
+        ensure_keybindings_file(tmp.path());
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# Keybindings for The Controller"));
+    }
+
+    #[test]
+    fn test_ensure_keybindings_file_does_not_overwrite_existing() {
+        let tmp = TempDir::new().unwrap();
+        let path = keybindings_path(tmp.path());
+        fs::write(&path, "navigate-next x\n").unwrap();
+        ensure_keybindings_file(tmp.path());
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "navigate-next x\n");
     }
 }
