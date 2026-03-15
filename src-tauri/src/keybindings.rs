@@ -99,7 +99,10 @@ pub fn parse_keybindings(content: &str) -> KeybindingsResult {
 
         overrides.insert(command.to_string(), key.to_string());
 
-        if META_REQUIRED_COMMANDS.contains(&command) && !key.starts_with("Meta+") {
+        if META_REQUIRED_COMMANDS.contains(&command)
+            && !key.starts_with("Meta+")
+            && !key.starts_with('⌘')
+        {
             warnings.push(format!(
                 "command '{command}' requires Meta+ prefix (e.g. Meta+<key>)"
             ));
@@ -477,6 +480,16 @@ mod tests {
         assert!(
             result.warnings.is_empty(),
             "Meta+ prefixed external commands should not warn"
+        );
+    }
+
+    #[test]
+    fn test_external_command_legacy_symbol_no_warning() {
+        let content = "screenshot ⌘x\nscreenshot-cropped ⌘d\n";
+        let result = parse_keybindings(content);
+        assert!(
+            result.warnings.is_empty(),
+            "⌘-prefixed external commands should not warn"
         );
     }
 }

@@ -517,7 +517,7 @@
       // Regular commands overridden to use Meta+ prefix
       // Apply same guards as regular hotkeys
       if (!isTerminalFocused() && !isDialogOpen() && !isEditableElementFocused() && currentFocus?.type !== "notes-editor") {
-        const metaComposedKey = `Meta+${e.key}`;
+        const metaComposedKey = `Meta+${e.key.toLowerCase()}`;
         if (handleHotkey(metaComposedKey)) {
           e.stopPropagation();
           e.preventDefault();
