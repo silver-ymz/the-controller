@@ -1,0 +1,27 @@
+# User-level systemd unit for The Controller server mode.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/the-controller.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now the-controller
+#
+# The service runs as your user — no sudo, no permission conflicts.
+# Requires lingering so it survives logout:
+#   loginctl enable-linger $USER
+
+[Unit]
+Description=The Controller - Claude Code Session Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.the-controller
+EnvironmentFile=%h/.the-controller/server.env
+ExecStart=%h/.the-controller/server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

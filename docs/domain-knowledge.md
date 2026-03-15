@@ -88,3 +88,30 @@ Session status (idle/working/exited) is detected using Claude Code hooks, not PT
 - Hook commands use `nc -w 2` + `; true` to avoid blocking Claude Code (`timeout` is not available on macOS)
 - Stale socket files are cleaned up on startup
 - Reattached tmux sessions default to "idle" until the next hook fires
+
+## Server Mode (Headless Browser Deployment)
+
+The Controller can run without a desktop environment as a standalone Axum HTTP/WebSocket server (`src-tauri/src/bin/server.rs`). The Vite-built frontend is served as static files and accessed via a web browser.
+
+**How it works:**
+- The `server` Cargo feature gates `axum` and `tower-http` dependencies. The server binary lives at `src/bin/server.rs` with `required-features = ["server"]`.
+- `src/lib/backend.ts` checks for `__TAURI_INTERNALS__` at load time. In desktop mode, commands go through Tauri IPC; in browser mode, they become `POST /api/{command}` requests and events flow over a shared WebSocket at `/ws`.
+- `src-tauri/src/emitter.rs` defines an `EventEmitter` trait with three implementations: `TauriEmitter` (desktop), `WsBroadcastEmitter` (server), and `NoopEmitter` (tests).
+- `status_socket.rs` exposes `start_listener_with_state(Arc<AppState>)` so the server binary can receive Claude Code session hooks without a Tauri `AppHandle`.
+
+**Auth:**
+- Optional bearer token via `CONTROLLER_AUTH_TOKEN` env var.
+- Token is passed as a URL query param (`?token=...`) on first load, moved to `sessionStorage`, and stripped from the URL to avoid leaking via history/referrer.
+- WebSocket auth uses the same token as a query param.
+- Auth middleware skips static file requests; only `/api/*` and `/ws` are gated.
+
+**Desktop-only stubs:** `copy_image_file_to_clipboard`, `capture_app_screenshot`, `start_voice_pipeline`, `stop_voice_pipeline` return errors in server mode since they require native hardware access.
+
+**Graceful shutdown:** The server handles `SIGTERM`/`SIGINT` by cleaning up the Unix domain socket and killing all PTY/tmux sessions.
+
+**Key files:**
+- `src-tauri/src/bin/server.rs` — Axum server (~2800 lines, 40+ routes)
+- `src/lib/backend.ts` — dual-mode command/event routing
+- `src/lib/platform.ts` — lazy Tauri imports with browser fallbacks
+- `src-tauri/src/emitter.rs` — EventEmitter trait + implementations
+- `src-tauri/src/status_socket.rs` — decoupled from AppHandle for server use
