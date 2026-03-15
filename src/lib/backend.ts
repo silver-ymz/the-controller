@@ -53,6 +53,10 @@ function connectWebSocket(): WebSocket {
 
   ws.addEventListener("close", () => {
     if (reconnectTimer) return;
+    // Don't reconnect if auth has failed — avoids infinite retry spam
+    let authFailed = false;
+    authError.subscribe((v) => { authFailed = v; })();
+    if (authFailed) return;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       sharedWs = connectWebSocket();
