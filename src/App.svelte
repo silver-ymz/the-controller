@@ -437,7 +437,7 @@
       }
     });
 
-    initKeybindings();
+    const unlistenKeybindings = initKeybindings();
 
     void (async () => {
       updateWindowTitle(__BUILD_BRANCH__, __BUILD_COMMIT__);
@@ -458,8 +458,9 @@
       ready = true;
     })();
 
-    return () => {
+    return async () => {
       unlistenSecureEnv();
+      (await unlistenKeybindings)();
     };
   });
 

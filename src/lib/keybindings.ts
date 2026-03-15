@@ -26,7 +26,7 @@ function applyResult(result: KeybindingsResult) {
   }
 }
 
-export async function initKeybindings() {
+export async function initKeybindings(): Promise<() => void> {
   try {
     const result = await command<KeybindingsResult>("load_keybindings");
     applyResult(result);
@@ -34,7 +34,7 @@ export async function initKeybindings() {
     // Silently use defaults if backend call fails
   }
 
-  listen<string>("keybindings-changed", (raw) => {
+  const unlisten = await listen<string>("keybindings-changed", (raw) => {
     try {
       const result: KeybindingsResult = JSON.parse(raw);
       applyResult(result);
@@ -42,4 +42,6 @@ export async function initKeybindings() {
       // Keep current bindings on parse error
     }
   });
+
+  return unlisten;
 }

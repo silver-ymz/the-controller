@@ -107,12 +107,16 @@ export const commands: CommandDef[] = [
 ];
 
 /**
- * Convert `Meta+x` to `⌘x` (cmd) or `⌃x` (ctrl) for display.
- * Passes through keys that don't contain `Meta+`.
+ * Convert modifier prefixes for display based on the active meta key.
+ * - `Meta+x` → `⌘x` (cmd) or `⌃x` (ctrl)
+ * - When meta is ctrl, also converts legacy `⌘x` → `⌃x`
  */
 export function formatDisplayKey(key: string, meta: "cmd" | "ctrl"): string {
-  const symbol = meta === "ctrl" ? "⌃" : "⌘";
-  return key.replaceAll("Meta+", symbol);
+  let result = key.replaceAll("Meta+", meta === "ctrl" ? "⌃" : "⌘");
+  if (meta === "ctrl") {
+    result = result.replaceAll("⌘", "⌃");
+  }
+  return result;
 }
 
 // Section order for help display

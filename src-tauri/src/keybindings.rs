@@ -14,6 +14,13 @@ pub struct KeybindingsResult {
     pub meta_key: String,
 }
 
+/// Commands that are recognized in the keybindings config file.
+///
+/// Intentionally excludes commands with hardcoded behavior that cannot be
+/// meaningfully remapped:
+/// - `escape-focus` / `escape-forward` — tied to double-tap Escape logic
+/// - `screenshot-picker` — display alias for Shift+screenshot/screenshot-cropped
+/// - `switch-workspace` — Space triggers workspace mode picker
 const KNOWN_COMMANDS: &[&str] = &[
     "navigate-next",
     "navigate-prev",
@@ -157,6 +164,9 @@ pub fn generate_template() -> String {
     out.push_str("# Format: command-name key\n");
     out.push_str("# Use Meta+ prefix for modifier keys (e.g. Meta+s)\n");
     out.push_str("# Changes are applied automatically — no restart needed.\n");
+    out.push_str("#\n");
+    out.push_str("# Note: Esc (focus navigation), Esc Esc (forward to terminal),\n");
+    out.push_str("# and Space (workspace mode) are not configurable.\n");
     out.push_str("\n# Meta key modifier (cmd or ctrl)\n");
     out.push_str("# Uncomment to remap all Meta+ bindings at once.\n");
     out.push_str("# meta cmd\n");
@@ -177,7 +187,12 @@ pub fn generate_template() -> String {
 pub fn ensure_keybindings_file(base_dir: &Path) {
     let path = keybindings_path(base_dir);
     if !path.exists() {
-        let _ = fs::write(path, generate_template());
+        if let Err(e) = fs::write(&path, generate_template()) {
+            eprintln!(
+                "Failed to write keybindings template to {}: {e}",
+                path.display()
+            );
+        }
     }
 }
 

@@ -29,7 +29,8 @@ Modifier keys use `Meta+` prefix (e.g. `Meta+s`, `Meta+t`).
 - `src-tauri/src/keybindings.rs` — parse, validate, resolve overrides
 - File watcher via `notify` crate, debounced 200ms
 - On change: parse → validate → emit `keybindings-changed` Tauri event
-- Tauri commands: `load_keybindings`, `generate_default_keybindings_file`
+- Tauri command: `load_keybindings`
+- Template auto-generated on first launch via `ensure_keybindings_file`
 
 ### Frontend (Svelte)
 

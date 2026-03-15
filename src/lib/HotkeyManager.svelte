@@ -473,6 +473,7 @@
 
     // External Meta+ commands (modifier depends on meta directive)
     const metaActive = currentMetaKey === "ctrl" ? e.ctrlKey : e.metaKey;
+    const metaSymbol = currentMetaKey === "ctrl" ? "⌃" : "⌘";
     if (metaActive) {
       // Screenshot
       if (
@@ -486,7 +487,7 @@
           direct: !e.shiftKey,
           cropped: matchMetaKey(getExternalKey("screenshot-cropped"), e),
         });
-        pushKeystroke("⌘" + e.key.toUpperCase());
+        pushKeystroke(metaSymbol + e.key.toUpperCase());
         return;
       }
 
@@ -509,7 +510,7 @@
           if (provider === "codex") return "cursor-agent";
           return "claude";
         });
-        pushKeystroke("⌘T");
+        pushKeystroke(metaSymbol + "T");
         return;
       }
 
@@ -518,8 +519,7 @@
       if (handleHotkey(metaComposedKey)) {
         e.stopPropagation();
         e.preventDefault();
-        const symbol = currentMetaKey === "ctrl" ? "⌃" : "⌘";
-        pushKeystroke(symbol + e.key);
+        pushKeystroke(metaSymbol + e.key);
         return;
       }
     }

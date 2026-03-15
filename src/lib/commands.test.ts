@@ -298,8 +298,16 @@ describe("formatDisplayKey", () => {
     expect(formatDisplayKey("j", "cmd")).toBe("j");
   });
 
-  it("passes through existing ⌘ prefix unchanged", () => {
+  it("passes through existing ⌘ prefix unchanged for cmd", () => {
     expect(formatDisplayKey("⌘s", "cmd")).toBe("⌘s");
+  });
+
+  it("converts legacy ⌘ to ⌃ when meta is ctrl", () => {
+    expect(formatDisplayKey("⌘s", "ctrl")).toBe("⌃s");
+  });
+
+  it("converts composite ⌘ strings when meta is ctrl", () => {
+    expect(formatDisplayKey("⌘S / ⌘D", "ctrl")).toBe("⌃S / ⌃D");
   });
 });
 
@@ -325,5 +333,14 @@ describe("getHelpSections with metaKey", () => {
     const allKeys = sections.flatMap(s => s.entries.map(e => e.key));
     expect(allKeys).toContain("⌘s");
     expect(allKeys).toContain("⌘k");
+  });
+
+  it("converts legacy ⌘ keys to ⌃ when meta is ctrl", () => {
+    const sections = getHelpSections("development", undefined, "ctrl");
+    const allKeys = sections.flatMap(s => s.entries.map(e => e.key));
+    expect(allKeys).toContain("⌃s");
+    expect(allKeys).toContain("⌃k");
+    expect(allKeys).not.toContain("⌘s");
+    expect(allKeys).not.toContain("⌘k");
   });
 });
