@@ -8,7 +8,7 @@ function logToBackend(message: string) {
   if (isTauri) {
     import("@tauri-apps/api/core").then(({ invoke }) => {
       invoke("log_frontend_error", { message }).catch(() => {});
-    });
+    }).catch(() => {});
   } else {
     console.error("[frontend]", message);
   }
