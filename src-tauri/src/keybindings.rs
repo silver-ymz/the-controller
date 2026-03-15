@@ -1,0 +1,201 @@
+use serde::Serialize;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KeybindingsResult {
+    pub overrides: HashMap<String, String>,
+    pub warnings: Vec<String>,
+}
+
+const KNOWN_COMMANDS: &[&str] = &[
+    "navigate-next",
+    "navigate-prev",
+    "expand-collapse",
+    "fuzzy-finder",
+    "create-session",
+    "finish-branch",
+    "save-prompt",
+    "load-prompt",
+    "stage",
+    "screenshot",
+    "screenshot-cropped",
+    "toggle-session-provider",
+    "new-project",
+    "delete",
+    "open-issues-modal",
+    "generate-architecture",
+    "toggle-help",
+    "keystroke-visualizer",
+    "toggle-agent",
+    "trigger-agent-check",
+    "clear-agent-reports",
+    "toggle-maintainer-view",
+    "create-note",
+    "delete-note",
+    "rename-note",
+    "duplicate-note",
+    "toggle-note-preview",
+    "deploy-project",
+    "rollback-deploy",
+];
+
+pub fn parse_keybindings(content: &str) -> KeybindingsResult {
+    let mut overrides = HashMap::new();
+    let mut warnings = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 2 {
+            warnings.push(format!("malformed line: {line}"));
+            continue;
+        }
+
+        let command = parts[0];
+        let key = parts[1];
+
+        if !KNOWN_COMMANDS.contains(&command) {
+            warnings.push(format!("unknown command: {command}"));
+            continue;
+        }
+
+        overrides.insert(command.to_string(), key.to_string());
+    }
+
+    KeybindingsResult {
+        overrides,
+        warnings,
+    }
+}
+
+pub fn keybindings_path(base_dir: &Path) -> PathBuf {
+    base_dir.join("keybindings")
+}
+
+pub fn load_keybindings(base_dir: &Path) -> KeybindingsResult {
+    let path = keybindings_path(base_dir);
+    match fs::read_to_string(path) {
+        Ok(content) => parse_keybindings(&content),
+        Err(_) => KeybindingsResult {
+            overrides: HashMap::new(),
+            warnings: Vec::new(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_parse_empty_content() {
+        let result = parse_keybindings("");
+        assert!(result.overrides.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_comments_only() {
+        let result = parse_keybindings("# this is a comment\n# another comment\n");
+        assert!(result.overrides.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_single_override() {
+        let result = parse_keybindings("navigate-next j\n");
+        assert_eq!(result.overrides.get("navigate-next").unwrap(), "j");
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_meta_key() {
+        let result = parse_keybindings("fuzzy-finder ctrl+p\n");
+        assert_eq!(result.overrides.get("fuzzy-finder").unwrap(), "ctrl+p");
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_unknown_command_warns() {
+        let result = parse_keybindings("nonexistent-command x\n");
+        assert!(result.overrides.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("nonexistent-command"));
+    }
+
+    #[test]
+    fn test_parse_malformed_line_warns() {
+        let result = parse_keybindings("just-one-token\n");
+        assert!(result.overrides.is_empty());
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("just-one-token"));
+    }
+
+    #[test]
+    fn test_parse_multiple_overrides() {
+        let content = "navigate-next j\nnavigate-prev k\n";
+        let result = parse_keybindings(content);
+        assert_eq!(result.overrides.len(), 2);
+        assert_eq!(result.overrides.get("navigate-next").unwrap(), "j");
+        assert_eq!(result.overrides.get("navigate-prev").unwrap(), "k");
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_mixed_comments_and_overrides() {
+        let content = "# Navigation\nnavigate-next j\n# Finder\nfuzzy-finder ctrl+p\n";
+        let result = parse_keybindings(content);
+        assert_eq!(result.overrides.len(), 2);
+        assert_eq!(result.overrides.get("navigate-next").unwrap(), "j");
+        assert_eq!(result.overrides.get("fuzzy-finder").unwrap(), "ctrl+p");
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_blank_lines_ignored() {
+        let content = "\n\nnavigate-next j\n\n";
+        let result = parse_keybindings(content);
+        assert_eq!(result.overrides.len(), 1);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_whitespace_trimmed() {
+        let result = parse_keybindings("  navigate-next   j  \n");
+        assert_eq!(result.overrides.get("navigate-next").unwrap(), "j");
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_load_keybindings_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let result = load_keybindings(tmp.path());
+        assert!(result.overrides.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_load_keybindings_with_file() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(keybindings_path(tmp.path()), "navigate-next j\n").unwrap();
+        let result = load_keybindings(tmp.path());
+        assert_eq!(result.overrides.get("navigate-next").unwrap(), "j");
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_keybindings_path() {
+        let base = Path::new("/tmp/test-base");
+        assert_eq!(
+            keybindings_path(base),
+            PathBuf::from("/tmp/test-base/keybindings")
+        );
+    }
+}
