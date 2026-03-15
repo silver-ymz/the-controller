@@ -22,7 +22,7 @@
   import { toggleKeystrokeVisualizer, pushKeystroke } from "./keystroke-visualizer";
   import { showToast } from "./toast";
   import { buildKeyMap, type CommandId, type CommandDef } from "./commands";
-  import { resolvedCommands } from "./keybindings";
+  import { resolvedCommands, metaKey } from "./keybindings";
   import { focusForModeSwitch } from "./focus-helpers";
 
   let lastEscapeTime = 0;
@@ -44,6 +44,8 @@
   let currentMode = $derived(workspaceModeState.current);
   const resolvedCommandsState = fromStore(resolvedCommands);
   let resolvedCmds: CommandDef[] = $derived(resolvedCommandsState.current);
+  const metaKeyState = fromStore(metaKey);
+  let currentMetaKey: "cmd" | "ctrl" = $derived(metaKeyState.current);
   let keyMap = $derived(buildKeyMap(currentMode, resolvedCmds));
   const noteEntriesState = fromStore(noteEntries);
   let noteEntriesMap = $derived(noteEntriesState.current);
@@ -451,12 +453,13 @@
 
   function matchMetaKey(cmdKey: string | undefined, e: KeyboardEvent): boolean {
     if (!cmdKey) return false;
+    const modifierActive = currentMetaKey === "ctrl" ? e.ctrlKey : e.metaKey;
     if (cmdKey.startsWith("Meta+")) {
-      return e.metaKey && e.key === cmdKey.slice(5);
+      return modifierActive && e.key === cmdKey.slice(5);
     }
     // Legacy format: ⌘x
     if (cmdKey.startsWith("⌘")) {
-      return e.metaKey && e.key === cmdKey.slice(1);
+      return modifierActive && e.key === cmdKey.slice(1);
     }
     return false;
   }
@@ -468,8 +471,9 @@
     // Ignore held-down key repeats to prevent toast/action spam
     if (e.repeat) return;
 
-    // External Meta+ commands
-    if (e.metaKey) {
+    // External Meta+ commands (modifier depends on meta directive)
+    const metaActive = currentMetaKey === "ctrl" ? e.ctrlKey : e.metaKey;
+    if (metaActive) {
       // Screenshot
       if (
         matchMetaKey(getExternalKey("screenshot"), e) ||

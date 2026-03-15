@@ -10,6 +10,8 @@ use std::time::Duration;
 pub struct KeybindingsResult {
     pub overrides: HashMap<String, String>,
     pub warnings: Vec<String>,
+    /// Which physical modifier "Meta+" maps to: "cmd" (default) or "ctrl".
+    pub meta_key: String,
 }
 
 const KNOWN_COMMANDS: &[&str] = &[
@@ -47,6 +49,7 @@ const KNOWN_COMMANDS: &[&str] = &[
 pub fn parse_keybindings(content: &str) -> KeybindingsResult {
     let mut overrides = HashMap::new();
     let mut warnings = Vec::new();
+    let mut meta_key = "cmd".to_string();
 
     for line in content.lines() {
         let line = line.trim();
@@ -63,6 +66,15 @@ pub fn parse_keybindings(content: &str) -> KeybindingsResult {
         let command = parts[0];
         let key = parts[1];
 
+        // Special directive: "meta cmd" or "meta ctrl"
+        if command == "meta" {
+            match key {
+                "cmd" | "ctrl" => meta_key = key.to_string(),
+                _ => warnings.push(format!("invalid meta value: {key} (expected cmd or ctrl)")),
+            }
+            continue;
+        }
+
         if !KNOWN_COMMANDS.contains(&command) {
             warnings.push(format!("unknown command: {command}"));
             continue;
@@ -74,6 +86,7 @@ pub fn parse_keybindings(content: &str) -> KeybindingsResult {
     KeybindingsResult {
         overrides,
         warnings,
+        meta_key,
     }
 }
 
@@ -88,6 +101,7 @@ pub fn load_keybindings(base_dir: &Path) -> KeybindingsResult {
         Err(_) => KeybindingsResult {
             overrides: HashMap::new(),
             warnings: Vec::new(),
+            meta_key: "cmd".to_string(),
         },
     }
 }
@@ -143,6 +157,9 @@ pub fn generate_template() -> String {
     out.push_str("# Format: command-name key\n");
     out.push_str("# Use Meta+ prefix for modifier keys (e.g. Meta+s)\n");
     out.push_str("# Changes are applied automatically — no restart needed.\n");
+    out.push_str("\n# Meta key modifier (cmd or ctrl)\n");
+    out.push_str("# Uncomment to remap all Meta+ bindings at once.\n");
+    out.push_str("# meta cmd\n");
 
     let mut current_section = "";
     for &(command, key, section) in COMMAND_DEFAULTS {
@@ -362,5 +379,44 @@ mod tests {
         ensure_keybindings_file(tmp.path());
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, "navigate-next x\n");
+    }
+
+    #[test]
+    fn test_parse_meta_directive_cmd() {
+        let result = parse_keybindings("meta cmd\n");
+        assert_eq!(result.meta_key, "cmd");
+        assert!(result.overrides.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_meta_directive_ctrl() {
+        let result = parse_keybindings("meta ctrl\n");
+        assert_eq!(result.meta_key, "ctrl");
+    }
+
+    #[test]
+    fn test_parse_meta_directive_invalid_warns() {
+        let result = parse_keybindings("meta alt\n");
+        assert_eq!(result.meta_key, "cmd"); // stays default
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("invalid meta value"));
+    }
+
+    #[test]
+    fn test_parse_meta_default_is_cmd() {
+        let result = parse_keybindings("navigate-next h\n");
+        assert_eq!(result.meta_key, "cmd");
+    }
+
+    #[test]
+    fn test_parse_meta_with_overrides() {
+        let content = "meta ctrl\nscreenshot Meta+x\n";
+        let result = parse_keybindings(content);
+        assert_eq!(result.meta_key, "ctrl");
+        assert_eq!(
+            result.overrides.get("screenshot"),
+            Some(&"Meta+x".to_string())
+        );
     }
 }

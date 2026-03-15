@@ -6,21 +6,30 @@ import { showToast } from "$lib/toast";
 interface KeybindingsResult {
   overrides: Record<string, string>;
   warnings: string[];
+  meta_key: string;
 }
 
 export const keybindingOverrides = writable<Record<string, string>>({});
+
+/** Which physical modifier "Meta+" maps to: "cmd" (default) or "ctrl". */
+export const metaKey = writable<"cmd" | "ctrl">("cmd");
 
 export const resolvedCommands = derived(keybindingOverrides, ($overrides) =>
   applyOverrides(commands, $overrides),
 );
 
+function applyResult(result: KeybindingsResult) {
+  keybindingOverrides.set(result.overrides);
+  metaKey.set(result.meta_key === "ctrl" ? "ctrl" : "cmd");
+  for (const w of result.warnings) {
+    showToast(w, "error");
+  }
+}
+
 export async function initKeybindings() {
   try {
     const result = await command<KeybindingsResult>("load_keybindings");
-    keybindingOverrides.set(result.overrides);
-    for (const w of result.warnings) {
-      showToast(w, "error");
-    }
+    applyResult(result);
   } catch {
     // Silently use defaults if backend call fails
   }
@@ -28,10 +37,7 @@ export async function initKeybindings() {
   listen<string>("keybindings-changed", (raw) => {
     try {
       const result: KeybindingsResult = JSON.parse(raw);
-      keybindingOverrides.set(result.overrides);
-      for (const w of result.warnings) {
-        showToast(w, "error");
-      }
+      applyResult(result);
     } catch {
       // Keep current bindings on parse error
     }
