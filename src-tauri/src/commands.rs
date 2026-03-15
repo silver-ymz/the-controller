@@ -2136,6 +2136,14 @@ pub async fn stop_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<()
     Ok(())
 }
 
+#[tauri::command]
+pub async fn load_keybindings(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::keybindings::KeybindingsResult, String> {
+    let base_dir = state.storage.lock().map_err(|e| e.to_string())?.base_dir();
+    Ok(crate::keybindings::load_keybindings(&base_dir))
+}
+
 fn find_main_branch_oid(repo: &git2::Repository) -> Option<git2::Oid> {
     for name in &["refs/heads/main", "refs/heads/master"] {
         if let Ok(reference) = repo.find_reference(name) {

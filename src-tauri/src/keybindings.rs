@@ -1,7 +1,10 @@
+use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct KeybindingsResult {
@@ -159,6 +162,56 @@ pub fn ensure_keybindings_file(base_dir: &Path) {
     if !path.exists() {
         let _ = fs::write(path, generate_template());
     }
+}
+
+pub fn start_watcher(base_dir: PathBuf, emitter: Arc<dyn crate::emitter::EventEmitter>) {
+    // Emit initial state
+    let initial = load_keybindings(&base_dir);
+    if let Ok(payload) = serde_json::to_string(&initial) {
+        let _ = emitter.emit("keybindings-changed", &payload);
+    }
+
+    std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let mut debouncer = match new_debouncer(Duration::from_millis(200), tx) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Failed to create keybindings file watcher: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = debouncer
+            .watcher()
+            .watch(&base_dir, notify::RecursiveMode::NonRecursive)
+        {
+            eprintln!("Failed to watch keybindings directory: {e}");
+            return;
+        }
+
+        let target = keybindings_path(&base_dir);
+        loop {
+            match rx.recv() {
+                Ok(Ok(events)) => {
+                    let relevant = events
+                        .iter()
+                        .any(|e| e.kind == DebouncedEventKind::Any && e.path == target);
+                    if !relevant {
+                        continue;
+                    }
+                    let result = load_keybindings(&base_dir);
+                    if let Ok(payload) = serde_json::to_string(&result) {
+                        let _ = emitter.emit("keybindings-changed", &payload);
+                    }
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Keybindings watcher error: {e:?}");
+                }
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 #[cfg(test)]
