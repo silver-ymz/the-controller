@@ -24,7 +24,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/.the-controller
 EnvironmentFile=%h/.the-controller/server.env
-ExecStart=LOGIN_SHELL -lc 'exec %h/.the-controller/server'
+ExecStart=LOGIN_SHELL -lic 'exec %h/.the-controller/server'
 Restart=on-failure
 RestartSec=5
 
