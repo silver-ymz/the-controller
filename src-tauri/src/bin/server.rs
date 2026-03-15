@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 use the_controller_lib::{
     architecture, commands, config, emitter::WsBroadcastEmitter, models, note_ai_chat, notes,
-    session_args, state::AppState, worktree::WorktreeManager,
+    session_args, state::AppState, status_socket, worktree::WorktreeManager,
 };
 
 use tokio::sync::broadcast;
@@ -22,14 +22,58 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 struct ServerState {
-    app: AppState,
+    app: Arc<AppState>,
     ws_tx: broadcast::Sender<String>,
+}
+
+fn get_port() -> u16 {
+    std::env::var("CONTROLLER_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3001)
+}
+
+fn get_bind_address() -> String {
+    std::env::var("CONTROLLER_BIND").unwrap_or_else(|_| "0.0.0.0".to_string())
+}
+
+async fn shutdown_signal(state: Arc<ServerState>) {
+    let ctrl_c = async { tokio::signal::ctrl_c().await.unwrap() };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .unwrap()
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    println!("\nShutting down...");
+    status_socket::cleanup();
+
+    if let Ok(mut pty_manager) = state.app.pty_manager.lock() {
+        let ids = pty_manager.session_ids();
+        for id in ids {
+            let _ = pty_manager.close_session(id);
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() {
     let (emitter, ws_tx) = WsBroadcastEmitter::new();
-    let app_state = AppState::new(emitter).expect("Failed to initialize app state");
+    let app_state = Arc::new(AppState::new(emitter).expect("Failed to initialize app state"));
+
+    // Start the status socket listener so Claude Code hooks can report session status
+    status_socket::start_listener_with_state(app_state.clone());
 
     let state = Arc::new(ServerState {
         app: app_state,
@@ -95,17 +139,23 @@ async fn main() {
         .fallback_service(serve_dir)
         .layer(middleware::from_fn(auth_middleware))
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state.clone());
 
+    let port = get_port();
+    let bind = get_bind_address();
+    let addr = format!("{}:{}", bind, port);
     let token = std::env::var("CONTROLLER_AUTH_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
     match &token {
-        Some(t) => println!("Server listening on http://0.0.0.0:3001?token={}", t),
-        None => println!("Server listening on http://0.0.0.0:3001 (no auth)"),
+        Some(t) => println!("Server listening on http://{}?token={}", addr, t),
+        None => println!("Server listening on http://{} (no auth)", addr),
     }
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(state))
+        .await
+        .unwrap();
 }
 
 // --- Auth middleware ---
