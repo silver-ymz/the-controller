@@ -1,6 +1,6 @@
 ---
 name: the-controller-submitting-pr-with-copilot-review
-description: Use when submitting a PR to GitHub and want automated Copilot review cycles — handles local pre-review, PR creation, Copilot review requests, resolving comments, and iterating until clean
+description: Use when submitting a PR to GitHub and want automated Copilot review-fix-resolve cycles instead of manual back-and-forth
 ---
 
 # Submitting PR with Copilot Review
@@ -117,11 +117,7 @@ gh pr create --base "$BASE_BRANCH" \
 
 ```bash
 PR_NUMBER=$(gh pr view --json number -q '.number')
-gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/requested_reviewers \
-  -f "reviewers[]=copilot-pull-request-reviewer[bot]" 2>/dev/null || true
-
-# Copilot is usually auto-triggered, but explicit request ensures it
-# If the above fails, Copilot may already be reviewing — proceed to wait
+gh pr edit "$PR_NUMBER" --add-reviewer 'copilot-pull-request-reviewer[bot]'
 ```
 
 ## Step 5: Wait for Copilot Review
@@ -130,6 +126,7 @@ Poll until Copilot's review appears. Copilot typically takes 5–10 minutes.
 
 ```bash
 # Poll every 60 seconds, timeout after 15 minutes
+PREVIOUS_COUNT=0  # init before first round; update after each round
 for i in $(seq 1 15); do
   REVIEW_COUNT=$(gh api repos/{owner}/{repo}/pulls/$PR_NUMBER/reviews \
     --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length')
@@ -145,8 +142,12 @@ done
 
 ## Step 6: Check Review Comments
 
+Replace `{OWNER}`, `{REPO}`, `{PR_NUMBER}` with actual values (e.g. from `gh repo view --json owner,name` and `gh pr view --json number`).
+
 ```bash
 # Get unresolved Copilot review threads
+# NOTE: GraphQL author.login = "copilot-pull-request-reviewer" (no [bot] suffix)
+# REST API user.login = "copilot-pull-request-reviewer[bot]" (with [bot] suffix)
 THREADS=$(gh api graphql -f query='
 {
   repository(owner: "{OWNER}", name: "{REPO}") {
