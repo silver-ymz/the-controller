@@ -502,7 +502,7 @@
       <p class="auth-error-hint">
         Make sure the URL contains a valid <code>?token=</code> parameter matching the server's <code>CONTROLLER_AUTH_TOKEN</code>.
       </p>
-      <button onclick={() => window.location.reload()}>Retry</button>
+      <button onclick={() => { sessionStorage.removeItem("authToken"); window.location.reload(); }}>Retry</button>
     </div>
   </div>
 {:else if ready}
