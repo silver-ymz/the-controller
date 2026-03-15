@@ -11,8 +11,9 @@
 #   loginctl enable-linger $USER
 #
 # IMPORTANT: User systemd units do NOT inherit your shell environment
-# (.zshrc/.bashrc). The deploy script snapshots your PATH into server.env
-# so the service can find claude, tmux, node, etc.
+# (.zshrc/.bashrc). The deploy script resolves the directories of required
+# binaries (claude, tmux, git, node, gh) and writes a minimal PATH into
+# server.env so only known-good directories are included.
 
 [Unit]
 Description=The Controller - Claude Code Session Manager

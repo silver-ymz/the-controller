@@ -59,7 +59,38 @@ if [[ "$SKIP_BUILD" == false ]]; then
   check_cmd pnpm
 fi
 
-# ── Build ────────────────────────────────────────────────────────────
+# ── Build minimal PATH for systemd ───────────────────────────────────
+# User systemd units don't source .zshrc/.bashrc. Instead of dumping the
+# entire shell PATH (which may contain temp/build dirs), we resolve only
+# the directories that contain binaries the server actually needs.
+REQUIRED_BINS=(claude tmux git)
+OPTIONAL_BINS=(node gh nc)
+
+resolve_path() {
+  local dirs=""
+  for bin in "$@"; do
+    local bin_path
+    bin_path=$(command -v "$bin" 2>/dev/null) || continue
+    local dir
+    dir=$(dirname "$bin_path")
+    # Deduplicate
+    case ":$dirs:" in
+      *":$dir:"*) ;;
+      *) dirs="${dirs:+$dirs:}$dir" ;;
+    esac
+  done
+  # Always include basic system paths as fallback
+  for sysdir in /usr/local/bin /usr/bin /bin; do
+    case ":$dirs:" in
+      *":$sysdir:"*) ;;
+      *) dirs="${dirs:+$dirs:}$sysdir" ;;
+    esac
+  done
+  echo "$dirs"
+}
+
+SERVICE_PATH=$(resolve_path "${REQUIRED_BINS[@]}" "${OPTIONAL_BINS[@]}")
+
 if [[ "$SKIP_BUILD" == false ]]; then
   echo "==> Building frontend..."
   cd "$REPO_ROOT"
@@ -81,15 +112,12 @@ cp -r "$REPO_ROOT/dist/." "$INSTALL_DIR/dist/"
 ENV_FILE="$INSTALL_DIR/server.env"
 if [[ ! -f "$ENV_FILE" ]]; then
   TOKEN=$(openssl rand -hex 24)
-  # Snapshot the current shell PATH so systemd can find claude, tmux, node, etc.
-  # User systemd units don't source .zshrc/.bashrc — without this, binaries
-  # installed via nvm, cargo, homebrew, etc. would be invisible to the service.
   cat > "$ENV_FILE" <<EOF
 CONTROLLER_AUTH_TOKEN=$TOKEN
 CONTROLLER_PORT=$PORT
 CONTROLLER_BIND=127.0.0.1
 CONTROLLER_DIST_DIR=$INSTALL_DIR/dist
-PATH=$PATH
+PATH=$SERVICE_PATH
 EOF
   chmod 600 "$ENV_FILE"
   echo "==> Generated auth token in $ENV_FILE"
@@ -97,9 +125,9 @@ else
   echo "==> Keeping existing $ENV_FILE (updating PATH)"
   # Always refresh PATH — user may have installed new tools since last deploy
   if grep -q '^PATH=' "$ENV_FILE"; then
-    sed -i.bak "s|^PATH=.*|PATH=$PATH|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+    sed -i.bak "s|^PATH=.*|PATH=$SERVICE_PATH|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
   else
-    echo "PATH=$PATH" >> "$ENV_FILE"
+    echo "PATH=$SERVICE_PATH" >> "$ENV_FILE"
   fi
   # shellcheck disable=SC1090
   source "$ENV_FILE"
