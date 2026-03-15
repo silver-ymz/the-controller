@@ -74,6 +74,12 @@ pub fn parse_keybindings(content: &str) -> KeybindingsResult {
             continue;
         }
 
+        // Strip trailing inline comments (e.g. "navigate-next j # vim-style")
+        let line = match line.find(" #") {
+            Some(pos) => line[..pos].trim(),
+            None => line,
+        };
+
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() != 2 {
             warnings.push(format!("malformed line: {line}"));
@@ -180,7 +186,7 @@ pub fn generate_template() -> String {
     let mut out = String::new();
     out.push_str("# Keybindings for The Controller\n");
     out.push_str("# Uncomment and change the key to override a default binding.\n");
-    out.push_str("# Format: command-name key\n");
+    out.push_str("# Format: command-name key  (inline comments with # are supported)\n");
     out.push_str("# Use Meta+ prefix for modifier keys (e.g. Meta+s)\n");
     out.push_str("# Changes are applied automatically — no restart needed.\n");
     out.push_str("#\n");
@@ -290,9 +296,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_meta_key() {
-        let result = parse_keybindings("fuzzy-finder ctrl+p\n");
-        assert_eq!(result.overrides.get("fuzzy-finder").unwrap(), "ctrl+p");
+    fn test_parse_meta_prefixed_key() {
+        let result = parse_keybindings("fuzzy-finder Meta+p\n");
+        assert_eq!(result.overrides.get("fuzzy-finder").unwrap(), "Meta+p");
         assert!(result.warnings.is_empty());
     }
 
@@ -310,6 +316,13 @@ mod tests {
         assert!(result.overrides.is_empty());
         assert_eq!(result.warnings.len(), 1);
         assert!(result.warnings[0].contains("just-one-token"));
+    }
+
+    #[test]
+    fn test_parse_inline_comments() {
+        let result = parse_keybindings("navigate-next h # vim-style\n");
+        assert_eq!(result.overrides.get("navigate-next").unwrap(), "h");
+        assert!(result.warnings.is_empty());
     }
 
     #[test]
