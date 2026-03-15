@@ -9,12 +9,40 @@ function getAuthToken(): string | null {
 const authToken = getAuthToken();
 
 let sharedWs: WebSocket | null = null;
+let wsListeners: Array<(msg: MessageEvent) => void> = [];
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectDelay = 1000;
+
+function connectWebSocket(): WebSocket {
+  const tokenParam = authToken ? `?token=${authToken}` : "";
+  const wsUrl = `ws://${window.location.host}/ws${tokenParam}`;
+  const ws = new WebSocket(wsUrl);
+
+  ws.addEventListener("open", () => {
+    reconnectDelay = 1000; // reset on success
+  });
+
+  ws.addEventListener("message", (msg) => {
+    for (const listener of wsListeners) {
+      listener(msg);
+    }
+  });
+
+  ws.addEventListener("close", () => {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      sharedWs = connectWebSocket();
+    }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+  });
+
+  return ws;
+}
 
 function getSharedWebSocket(): WebSocket {
   if (!sharedWs || sharedWs.readyState === WebSocket.CLOSED || sharedWs.readyState === WebSocket.CLOSING) {
-    const tokenParam = authToken ? `?token=${authToken}` : "";
-    const wsUrl = `ws://${window.location.hostname}:3001/ws${tokenParam}`;
-    sharedWs = new WebSocket(wsUrl);
+    sharedWs = connectWebSocket();
   }
   return sharedWs;
 }
@@ -51,11 +79,13 @@ export function listen<T>(event: string, handler: (payload: T) => void): () => v
     };
   }
 
-  const ws = getSharedWebSocket();
+  getSharedWebSocket(); // ensure connected
   const callback = (msg: MessageEvent) => {
     const data = JSON.parse(msg.data);
     if (data.event === event) handler(data.payload);
   };
-  ws.addEventListener("message", callback);
-  return () => ws.removeEventListener("message", callback);
+  wsListeners.push(callback);
+  return () => {
+    wsListeners = wsListeners.filter((l) => l !== callback);
+  };
 }
