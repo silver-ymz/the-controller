@@ -451,6 +451,10 @@
     return cmd?.key;
   }
 
+  // Case-insensitive matching is intentional: Shift+Meta combos (e.g.
+  // screenshot-picker's Shift+Cmd+S) send e.key as uppercase "S", but
+  // bindings are stored lowercase ("Meta+s"). Comparing case-insensitively
+  // ensures these combos match without requiring separate Shift variants.
   function matchMetaKey(cmdKey: string | undefined, e: KeyboardEvent): boolean {
     if (!cmdKey) return false;
     const modifierActive = currentMetaKey === "ctrl" ? e.ctrlKey : e.metaKey;
@@ -517,6 +521,8 @@
       // Regular commands overridden to use Meta+ prefix
       // Apply same guards as regular hotkeys
       if (!isTerminalFocused() && !isDialogOpen() && !isEditableElementFocused() && currentFocus?.type !== "notes-editor") {
+        // Lowercase intentionally: Meta+ bindings are case-insensitive so
+        // they fire regardless of Shift state (see matchMetaKey comment).
         const metaComposedKey = `Meta+${e.key.toLowerCase()}`;
         if (handleHotkey(metaComposedKey)) {
           e.stopPropagation();
