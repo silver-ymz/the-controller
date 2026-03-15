@@ -99,7 +99,12 @@ fi
 # ── Install user-level systemd unit ──────────────────────────────────
 echo "==> Installing user systemd service..."
 mkdir -p "$HOME/.config/systemd/user"
-cp "$REPO_ROOT/deploy/the-controller.service" "$HOME/.config/systemd/user/"
+# Resolve the user's login shell and substitute it into the unit template
+LOGIN_SHELL=$(getent passwd "$USER" | cut -d: -f7)
+LOGIN_SHELL="${LOGIN_SHELL:-/bin/sh}"
+sed "s|LOGIN_SHELL|$LOGIN_SHELL|g" \
+  "$REPO_ROOT/deploy/the-controller.service" \
+  > "$HOME/.config/systemd/user/the-controller.service"
 systemctl --user daemon-reload
 systemctl --user enable --now the-controller
 
