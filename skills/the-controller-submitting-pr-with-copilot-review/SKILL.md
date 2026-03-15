@@ -1,6 +1,6 @@
 ---
 name: the-controller-submitting-pr-with-copilot-review
-description: Use when you need to submit a PR and iterate on Copilot review feedback automatically
+description: Use when submitting a PR to a repo with Copilot reviewer enabled
 ---
 
 # Submitting PR with Copilot Review
@@ -132,11 +132,14 @@ for i in $(seq 1 15); do
     --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | length')
   if [ "$REVIEW_COUNT" -gt "$PREVIOUS_COUNT" ]; then
     echo "New Copilot review detected"
+    PREVIOUS_COUNT=$REVIEW_COUNT
     break
   fi
   sleep 60
 done
-echo "Timeout: no new Copilot review after 15 minutes"
+if [ "$REVIEW_COUNT" -le "$PREVIOUS_COUNT" ]; then
+  echo "Timeout: no new Copilot review after 15 minutes"
+fi
 ```
 
 **IMPORTANT:** Track `PREVIOUS_COUNT` across rounds so you detect NEW reviews, not old ones. Update `PREVIOUS_COUNT=$REVIEW_COUNT` after each round's review is detected.
