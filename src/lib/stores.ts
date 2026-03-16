@@ -163,6 +163,7 @@ export interface ArchitectureViewState {
   selectedComponentId: string | null;
   isGenerating: boolean;
   error: string | null;
+  logs: string[];
 }
 
 export function createArchitectureViewState(
@@ -173,6 +174,7 @@ export function createArchitectureViewState(
     selectedComponentId: result?.components[0]?.id ?? null,
     isGenerating: false,
     error: null,
+    logs: [],
   };
 }
 
