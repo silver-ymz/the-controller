@@ -46,6 +46,11 @@ pub fn archive_current_log(log_path: &Path, prefix: &str) -> io::Result<PathBuf>
     let timestamp = Local::now().format("%Y-%m-%dT%H-%M-%S");
     let mut n = 0u32;
     loop {
+        if n >= 1000 {
+            return Err(io::Error::other(
+                "too many archive files with same timestamp",
+            ));
+        }
         let name = format!("{}-{}.{}.log.gz", prefix, timestamp, n);
         let dest = history.join(&name);
         if !dest.exists() {
@@ -322,6 +327,10 @@ mod tests {
 
     #[test]
     fn test_build_env_filter_defaults_to_info() {
+        // Save and clear RUST_LOG to avoid interference
+        let saved_rust_log = std::env::var("RUST_LOG").ok();
+        std::env::remove_var("RUST_LOG");
+
         let tmp = TempDir::new().unwrap();
         // No config.json, no RUST_LOG — should get "info" default.
         let filter = build_env_filter(tmp.path());
@@ -330,10 +339,19 @@ mod tests {
             display.contains("info"),
             "expected 'info' in filter: {display}"
         );
+
+        // Restore
+        if let Some(val) = saved_rust_log {
+            std::env::set_var("RUST_LOG", val);
+        }
     }
 
     #[test]
     fn test_build_env_filter_reads_config() {
+        // Save and clear RUST_LOG to avoid interference
+        let saved_rust_log = std::env::var("RUST_LOG").ok();
+        std::env::remove_var("RUST_LOG");
+
         let tmp = TempDir::new().unwrap();
         let config = r#"{"log_level": "trace"}"#;
         fs::write(tmp.path().join("config.json"), config).unwrap();
@@ -343,6 +361,11 @@ mod tests {
             display.contains("trace"),
             "expected 'trace' in filter: {display}"
         );
+
+        // Restore
+        if let Some(val) = saved_rust_log {
+            std::env::set_var("RUST_LOG", val);
+        }
     }
 
     #[test]
