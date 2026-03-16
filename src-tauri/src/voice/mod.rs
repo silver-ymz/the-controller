@@ -143,12 +143,7 @@ impl VoicePipeline {
         });
 
         // Wait for pipeline initialization with timeout — propagate errors to caller
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            init_rx,
-        )
-        .await
-        {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), init_rx).await {
             Ok(Ok(Ok(()))) => Ok(Self {
                 stop_flag,
                 pause_flag,

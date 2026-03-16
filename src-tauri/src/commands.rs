@@ -992,9 +992,7 @@ pub(crate) async fn stage_session_core(
 
         if !is_clean {
             if !allow_pty_prompts {
-                return Err(
-                    "Worktree has uncommitted changes — commit before staging".to_string(),
-                );
+                return Err("Worktree has uncommitted changes — commit before staging".to_string());
             }
 
             let prompt = "\nYou have uncommitted changes. Please commit all your work now.\r";
@@ -1061,9 +1059,7 @@ pub(crate) async fn stage_session_core(
 
             if !rebase_clean {
                 if !allow_pty_prompts {
-                    return Err(
-                        "Rebase has conflicts — resolve before staging".to_string(),
-                    );
+                    return Err("Rebase has conflicts — resolve before staging".to_string());
                 }
 
                 // Rebase has conflicts — ask Claude to resolve
@@ -2300,7 +2296,9 @@ pub fn log_frontend_error(message: String, state: tauri::State<'_, AppState>) {
 pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
     tracing::info!("starting voice pipeline");
     // Snapshot generation before init — if stop is called during init, this will change.
-    let gen_before = state.voice_generation.load(std::sync::atomic::Ordering::SeqCst);
+    let gen_before = state
+        .voice_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
     // Brief lock to check if already running
     {
         let pipeline = state.voice_pipeline.lock().await;
@@ -2314,7 +2312,9 @@ pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(
     let new_pipeline = crate::voice::VoicePipeline::start(emitter).await?;
     // Re-acquire lock to store the pipeline
     let mut pipeline = state.voice_pipeline.lock().await;
-    let gen_after = state.voice_generation.load(std::sync::atomic::Ordering::SeqCst);
+    let gen_after = state
+        .voice_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
     if pipeline.is_some() || gen_before != gen_after {
         // Another start raced us, or stop was called during init — drop the pipeline
         return Ok(());
@@ -2327,7 +2327,9 @@ pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(
 pub async fn stop_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
     tracing::info!("stopping voice pipeline");
     // Bump generation so any in-flight start_voice_pipeline knows to discard its result.
-    state.voice_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    state
+        .voice_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut pipeline = state.voice_pipeline.lock().await;
     if let Some(p) = pipeline.take() {
         // p.stop() calls thread::join which blocks — run on blocking thread pool
