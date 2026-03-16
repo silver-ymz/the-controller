@@ -1,5 +1,6 @@
 use crate::broker_protocol::*;
 use std::io::{self, Read, Write};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -40,6 +41,10 @@ impl BrokerClient {
         self.socket_dir.join("pty-broker.pid")
     }
 
+    fn lock_file_path(&self) -> PathBuf {
+        self.socket_dir.join("pty-broker.lock")
+    }
+
     fn broker_binary_path() -> Option<PathBuf> {
         crate::cli_install::controller_bin_dir().map(|d| d.join("pty-broker"))
     }
@@ -64,11 +69,20 @@ impl BrokerClient {
         if let Ok(stream) = UnixStream::connect(&path) {
             // Check if the running broker is stale
             if self.is_broker_stale() {
+                let old_pid = self.read_pid();
                 // Shut down the stale broker (best-effort)
                 let _ = self.send_shutdown_to(&stream);
                 drop(stream);
-                // Wait briefly for it to exit
-                std::thread::sleep(std::time::Duration::from_millis(200));
+                // Wait for the old process to actually exit
+                if let Some(pid) = old_pid {
+                    if !self.wait_for_pid_exit(pid, std::time::Duration::from_secs(3)) {
+                        // Escalate to SIGKILL if graceful shutdown didn't work
+                        unsafe {
+                            libc::kill(pid, libc::SIGKILL);
+                        }
+                        self.wait_for_pid_exit(pid, std::time::Duration::from_millis(500));
+                    }
+                }
                 self.cleanup_stale_pid();
             } else {
                 return Ok(stream);
@@ -93,6 +107,26 @@ impl BrokerClient {
             io::ErrorKind::ConnectionRefused,
             "failed to connect to broker after spawning",
         ))
+    }
+
+    /// Read the PID from the PID file, if it exists and is valid.
+    fn read_pid(&self) -> Option<i32> {
+        let contents = std::fs::read_to_string(self.pid_file_path()).ok()?;
+        contents.trim().parse::<i32>().ok()
+    }
+
+    /// Poll until a process exits or the timeout expires. Returns true if the process exited.
+    fn wait_for_pid_exit(&self, pid: i32, timeout: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_millis(50);
+        while start.elapsed() < timeout {
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                return true;
+            }
+            std::thread::sleep(poll_interval);
+        }
+        false
     }
 
     /// Check if the PID file points to a dead process and clean up if so.
@@ -141,6 +175,7 @@ impl BrokerClient {
     }
 
     /// Spawn the broker binary as a daemon.
+    /// Uses a lock file to prevent multiple concurrent spawns.
     fn spawn_broker(&self) -> io::Result<()> {
         let binary = Self::broker_binary_path().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "pty-broker binary not found")
@@ -155,6 +190,24 @@ impl BrokerClient {
 
         let _ = std::fs::create_dir_all(&self.socket_dir);
 
+        // Try to acquire the lock file non-blocking. If another broker (or spawner)
+        // already holds it, skip spawning — the retry loop in connect_control()
+        // will wait for the existing broker to become ready.
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(self.lock_file_path())?;
+        let lock_ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if lock_ret != 0 {
+            // Lock is held — another broker is already starting or running.
+            // Drop the fd and let the connect retry loop handle it.
+            return Ok(());
+        }
+        // We hold the lock briefly to prevent concurrent spawns.
+        // The broker process itself will acquire the lock on startup,
+        // so we release ours immediately after spawning.
+
         std::process::Command::new(&binary)
             .arg("--socket-dir")
             .arg(&self.socket_dir)
@@ -162,6 +215,9 @@ impl BrokerClient {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?;
+
+        // Drop the lock file fd — the broker will acquire its own lock.
+        drop(lock_file);
 
         Ok(())
     }
