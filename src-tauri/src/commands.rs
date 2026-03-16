@@ -1308,6 +1308,7 @@ pub fn save_onboarding_config(state: State<AppState>, projects_root: String) -> 
     let cfg = config::Config {
         projects_root,
         default_provider: config::ConfigDefaultProvider::ClaudeCode,
+        log_level: "info".to_string(),
     };
     config::save_config(&base_dir, &cfg).map_err(|e| e.to_string())
 }
@@ -2188,6 +2189,7 @@ mod tests {
             &Config {
                 projects_root: projects_root.to_string_lossy().to_string(),
                 default_provider: crate::config::ConfigDefaultProvider::ClaudeCode,
+                log_level: "info".to_string(),
             },
         )
         .expect("save_config");
