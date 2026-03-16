@@ -47,6 +47,12 @@ pub fn run() {
     // spawning any threads so PTY sessions inherit them.
     shell_env::inherit_shell_env();
 
+    // Initialize structured logging — must happen before any tracing macros.
+    let base_dir = storage::Storage::with_default_path()
+        .map(|s| s.base_dir())
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let _log_guard = logging::init_backend_logging(&base_dir, true);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())

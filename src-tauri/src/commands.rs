@@ -2200,6 +2200,7 @@ mod tests {
             emitter: crate::emitter::NoopEmitter::new(),
             staging_lock: tokio::sync::Mutex::new(()),
             voice_pipeline: Arc::new(tokio::sync::Mutex::new(None)),
+            frontend_log: Mutex::new(None),
         }
     }
 
