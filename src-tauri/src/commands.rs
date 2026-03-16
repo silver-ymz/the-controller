@@ -356,7 +356,7 @@ pub fn restore_sessions(state: State<AppState>) -> Result<(), String> {
 /// Called by each Terminal component after it measures its dimensions.
 /// No-op if the session is already connected.
 ///
-/// This command is async because it shells out to tmux (create, resize, attach),
+/// This command is async because it may talk to the PTY broker daemon,
 /// which would block the main thread and prevent event delivery — including the
 /// alternate-screen escape sequence that xterm.js needs for correct scrolling.
 #[tauri::command]

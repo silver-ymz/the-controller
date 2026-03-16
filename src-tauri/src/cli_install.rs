@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Return the path to the controller CLI binary directory (`~/.the-controller/bin`).
 pub fn controller_bin_dir() -> Option<PathBuf> {
@@ -13,12 +13,31 @@ pub fn path_with_controller_bin() -> Option<String> {
     Some(format!("{}:{}", bin_dir.display(), current_path))
 }
 
-/// Copy the `controller-cli` binary from next to the running executable
-/// into `~/.the-controller/bin/controller-cli`.
+/// Query the build date of an installed binary via `--build-date`.
+/// Returns `None` if the binary doesn't exist, can't run, or doesn't support the flag.
+fn installed_build_date(binary_path: &Path) -> Option<String> {
+    let output = std::process::Command::new(binary_path)
+        .arg("--build-date")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let date = String::from_utf8(output.stdout).ok()?;
+    let trimmed = date.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Copy the `controller-cli` and `pty-broker` binaries from next to the
+/// running executable into `~/.the-controller/bin/`.
 ///
-/// Runs at app startup so the CLI is always available on a stable path.
-/// Silently skips if the source binary isn't found (e.g. production bundle
-/// that doesn't include it yet).
+/// Runs at app startup so both binaries are always available on a stable path.
+/// Skips copying if the installed binary already has the same build date.
+/// Silently skips any binary that isn't found in the source directory.
 pub fn install_controller_cli() {
     let Some(bin_dir) = controller_bin_dir() else {
         eprintln!("Warning: could not determine home directory for controller-cli install");
@@ -32,26 +51,40 @@ pub fn install_controller_cli() {
         return;
     };
 
-    let source = exe_dir.join("controller-cli");
-    if !source.exists() {
-        return;
-    }
-
     if let Err(e) = std::fs::create_dir_all(&bin_dir) {
         eprintln!("Warning: could not create {}: {}", bin_dir.display(), e);
         return;
     }
 
-    let dest = bin_dir.join("controller-cli");
-    if let Err(e) = std::fs::copy(&source, &dest) {
-        eprintln!("Warning: could not install controller-cli: {}", e);
-        return;
-    }
+    let our_build_date = env!("BUILD_DATE");
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+    for binary_name in &["controller-cli", "pty-broker"] {
+        let source = exe_dir.join(binary_name);
+        if !source.exists() {
+            continue;
+        }
+
+        let dest = bin_dir.join(binary_name);
+
+        // Skip copy if the installed binary has the same build date
+        if dest.exists() {
+            if let Some(installed_date) = installed_build_date(&dest) {
+                if installed_date == our_build_date {
+                    continue;
+                }
+            }
+        }
+
+        if let Err(e) = std::fs::copy(&source, &dest) {
+            eprintln!("Warning: could not install {}: {}", binary_name, e);
+            continue;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+        }
     }
 }
 
@@ -94,6 +127,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn installed_build_date_returns_none_for_missing_binary() {
+        let result = installed_build_date(Path::new("/nonexistent/binary"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn build_date_env_is_set() {
+        let date = env!("BUILD_DATE");
+        assert!(!date.is_empty(), "BUILD_DATE should not be empty");
+        // Should look like YYYY-MM-DD
+        assert_eq!(date.len(), 10, "BUILD_DATE should be 10 chars: {}", date);
+        assert_eq!(&date[4..5], "-", "BUILD_DATE should have dash at pos 4");
+        assert_eq!(&date[7..8], "-", "BUILD_DATE should have dash at pos 7");
     }
 
     #[test]

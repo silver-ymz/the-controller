@@ -9,6 +9,13 @@ impl<T: Read + Write> ReadWrite for T {}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Handle --build-date before anything else
+    if args.first().map(|s| s.as_str()) == Some("--build-date") {
+        println!("{}", env!("BUILD_DATE"));
+        std::process::exit(0);
+    }
+
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
     let request_id = Uuid::new_v4().to_string();

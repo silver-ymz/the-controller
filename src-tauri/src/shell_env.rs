@@ -19,7 +19,7 @@ const ENV_MARKER: &str = "___THE_CONTROLLER_ENV___";
 /// include variables set in `.zshrc`, `.zprofile`, etc. This function
 /// spawns the user's `$SHELL` as an interactive login shell (`-ilc`) and
 /// captures the resulting environment so child processes (PTY sessions,
-/// tmux) see the same variables the user would in a terminal.
+/// broker) see the same variables the user would in a terminal.
 ///
 /// Must be called early in startup, before spawning any threads, because
 /// `std::env::set_var` is not thread-safe.
