@@ -220,7 +220,11 @@ async fn main() {
         .ok()
         .filter(|t| !t.is_empty());
     match &token {
-        Some(t) => tracing::info!("server listening on http://{}?token={}", addr, t),
+        Some(t) => {
+            // Print token to stdout (ephemeral) — don't persist it in log files
+            println!("Server listening on http://{}?token={}", addr, t);
+            tracing::info!("server listening on http://{} (auth enabled)", addr);
+        }
         None => tracing::info!("server listening on http://{} (no auth)", addr),
     }
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
