@@ -1,6 +1,7 @@
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
 use std::io::{Read as _, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use the_controller_lib::broker_protocol::*;
@@ -87,6 +88,10 @@ impl Broker {
 
     fn pid_file_path(&self) -> PathBuf {
         self.socket_dir.join("pty-broker.pid")
+    }
+
+    fn lock_file_path(&self) -> PathBuf {
+        self.socket_dir.join("pty-broker.lock")
     }
 
     async fn handle_spawn(&self, req: SpawnRequest) -> Response {
@@ -334,6 +339,7 @@ impl Broker {
     fn cleanup(&self) {
         let _ = std::fs::remove_file(self.control_socket_path());
         let _ = std::fs::remove_file(self.pid_file_path());
+        let _ = std::fs::remove_file(self.lock_file_path());
     }
 }
 
@@ -478,6 +484,28 @@ fn main() {
 async fn async_main(socket_dir: PathBuf) {
     let broker = Arc::new(Broker::new(socket_dir));
 
+    // Acquire exclusive lock file — prevents multiple brokers from running.
+    // The fd is held for the broker's entire lifetime; the OS releases it on exit/crash.
+    let lock_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(broker.lock_file_path())
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("failed to open lock file: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let lock_ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if lock_ret != 0 {
+        // Another broker already holds the lock — exit silently.
+        std::process::exit(0);
+    }
+    // Keep _lock_file alive (held open) for the broker's entire lifetime.
+    let _lock_file = lock_file;
+
     // Write PID file
     let pid = std::process::id();
     if let Err(e) = std::fs::write(broker.pid_file_path(), pid.to_string()) {
@@ -551,11 +579,14 @@ async fn handle_control_client(mut stream: UnixStream, broker: Arc<Broker>, shut
         };
 
         if let Request::Shutdown = &req {
+            // Notify shutdown FIRST so the main accept loop stops before
+            // the client receives the response — prevents new connections
+            // from arriving between response and shutdown.
+            shutdown.notify_one();
             let resp = Response::Ok(OkResponse {
                 session_id: Uuid::nil(),
             });
             let _ = send_response(&mut stream, &resp).await;
-            shutdown.notify_one();
             break;
         }
 
