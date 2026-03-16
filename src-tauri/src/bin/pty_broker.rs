@@ -463,8 +463,14 @@ fn main() {
         i += 1;
     }
 
+    // Initialize logging BEFORE daemonize() — the daemon redirects stderr to /dev/null.
+    let base_dir = dirs::home_dir()
+        .map(|h| h.join(".the-controller"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let _log_guard = the_controller_lib::logging::init_broker_logging(&base_dir, foreground);
+
     if let Err(e) = std::fs::create_dir_all(&socket_dir) {
-        eprintln!("failed to create socket dir: {}", e);
+        tracing::error!("failed to create socket dir: {}", e);
         std::process::exit(1);
     }
 
@@ -472,7 +478,7 @@ fn main() {
     // the runtime's thread pool and kqueue/epoll file descriptors.
     if !foreground {
         if let Err(e) = daemonize() {
-            eprintln!("failed to daemonize: {}", e);
+            tracing::error!("failed to daemonize: {}", e);
             std::process::exit(1);
         }
     }
@@ -509,7 +515,7 @@ async fn async_main(socket_dir: PathBuf) {
     // Write PID file
     let pid = std::process::id();
     if let Err(e) = std::fs::write(broker.pid_file_path(), pid.to_string()) {
-        eprintln!("failed to write pid file: {}", e);
+        tracing::error!("failed to write pid file: {}", e);
         std::process::exit(1);
     }
 
@@ -520,7 +526,7 @@ async fn async_main(socket_dir: PathBuf) {
     let control_listener = match UnixListener::bind(&control_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("failed to bind control socket: {}", e);
+            tracing::error!("failed to bind control socket: {}", e);
             std::process::exit(1);
         }
     };
