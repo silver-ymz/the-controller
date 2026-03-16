@@ -13,6 +13,17 @@ use tracing_subscriber::EnvFilter;
 pub const MAX_LOG_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 pub const LOG_RETENTION_DAYS: u64 = 7;
 
+// Rotation strategy:
+//
+// - On startup, the previous session's log is archived to history/ and gzip'd.
+// - MAX_LOG_SIZE (100 MB) is a soft cap per session. If a single session
+//   exceeds it, the file grows until the next restart. True mid-session
+//   rotation would require reopening the tracing-appender file descriptor,
+//   which adds significant complexity for little practical benefit (most
+//   sessions won't generate 100 MB of logs).
+// - History files older than LOG_RETENTION_DAYS (7 days) are cleaned up on
+//   startup.
+
 /// Ensure the logs directory and history subdirectory exist, return logs dir path.
 pub fn logs_dir(base_dir: &Path) -> PathBuf {
     let dir = base_dir.join("logs");
