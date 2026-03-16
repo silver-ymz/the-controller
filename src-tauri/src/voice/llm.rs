@@ -247,7 +247,7 @@ impl CodexAppServer {
                         self.current_turn_id = None;
                         return Err(format!("Codex error (non-retriable): {error_msg}"));
                     }
-                    eprintln!("[voice] Codex error (will retry): {error_msg}");
+                    tracing::warn!("codex error (will retry): {error_msg}");
                 }
                 _ => {
                     // Skip: turn/started, item/started, item/completed, reasoning/*, etc.

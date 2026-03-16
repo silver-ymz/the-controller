@@ -84,7 +84,7 @@ impl AudioOutput {
                     }
                 },
                 |err| {
-                    eprintln!("[voice] Audio output error: {err}");
+                    tracing::error!("audio output error: {err}");
                 },
                 None,
             )
@@ -138,7 +138,7 @@ impl AudioOutput {
                         dp_cb.store(true, Ordering::Relaxed);
                     }
                 },
-                |err| eprintln!("[voice] Streaming audio error: {err}"),
+                |err| tracing::error!("streaming audio error: {err}"),
                 None,
             )
             .map_err(|e| format!("Failed to build streaming output: {e}"))?;

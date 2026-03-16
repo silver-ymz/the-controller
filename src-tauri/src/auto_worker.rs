@@ -174,10 +174,7 @@ impl AutoWorkerScheduler {
                     .map(|issues| issues.contains(&issue.number))
                     .unwrap_or(false);
                 if labels.contains(&LABEL_IN_PROGRESS) && !protected {
-                    eprintln!(
-                        "Auto-worker: removing stale in-progress label from #{}",
-                        issue.number
-                    );
+                    tracing::info!("removing stale in-progress label from #{}", issue.number);
                     let _ = remove_label_sync(
                         state.inner(),
                         &project.repo_path,
@@ -223,10 +220,7 @@ impl AutoWorkerScheduler {
 
                 for project_id in timed_out {
                     if let Some(session) = active_sessions.remove(&project_id) {
-                        eprintln!(
-                            "Auto-worker: session timed out for #{}",
-                            session.issue_number
-                        );
+                        tracing::info!("session timed out for #{}", session.issue_number);
                         let (issue_number, issue_title) = session_issue_context(&session);
                         kill_session(&state, &session);
                         emit_status(
@@ -256,9 +250,10 @@ impl AutoWorkerScheduler {
                     if let Some(session) = active_sessions.get_mut(&project_id) {
                         if session.nudge_count >= MAX_NUDGES {
                             let session = active_sessions.remove(&project_id).unwrap();
-                            eprintln!(
-                                "Auto-worker: killed after {} nudges for #{}",
-                                MAX_NUDGES, session.issue_number
+                            tracing::info!(
+                                "killed after {} nudges for #{}",
+                                MAX_NUDGES,
+                                session.issue_number
                             );
                             let (issue_number, issue_title) = session_issue_context(&session);
                             kill_session(&state, &session);
@@ -291,10 +286,7 @@ impl AutoWorkerScheduler {
 
                 for project_id in exited {
                     if let Some(session) = active_sessions.remove(&project_id) {
-                        eprintln!(
-                            "Auto-worker: session completed for #{}",
-                            session.issue_number
-                        );
+                        tracing::info!("session completed for #{}", session.issue_number);
                         let (issue_number, issue_title) = session_issue_context(&session);
                         mark_issue_finished(state.inner(), &session);
                         cleanup_session(&state, &session);
@@ -335,10 +327,7 @@ impl AutoWorkerScheduler {
                     let issues = match fetch_issues_sync(&project.repo_path) {
                         Ok(issues) => issues,
                         Err(e) => {
-                            eprintln!(
-                                "Auto-worker: failed to fetch issues for {}: {}",
-                                project.name, e
-                            );
+                            tracing::error!("failed to fetch issues for {}: {}", project.name, e);
                             continue;
                         }
                     };
@@ -380,9 +369,10 @@ impl AutoWorkerScheduler {
                             );
                         }
                         Err(e) => {
-                            eprintln!(
-                                "Auto-worker: failed to spawn session for #{}: {}",
-                                eligible.number, e
+                            tracing::error!(
+                                "failed to spawn session for #{}: {}",
+                                eligible.number,
+                                e
                             );
                         }
                     }
@@ -467,9 +457,11 @@ impl AutoWorkerScheduler {
             };
 
             if let Err(error) = attach_result {
-                eprintln!(
-                    "Auto-worker: failed to restore session {} for #{}: {}",
-                    candidate.session_id, candidate.issue_number, error
+                tracing::error!(
+                    "failed to restore session {} for #{}: {}",
+                    candidate.session_id,
+                    candidate.issue_number,
+                    error
                 );
                 continue;
             }
@@ -798,9 +790,10 @@ fn nudge_session(state: &AppState, session: &mut ActiveSession) {
     }
     session.nudge_count += 1;
     session.last_nudge_at = Some(Instant::now());
-    eprintln!(
-        "Auto-worker: nudged session for #{} (nudge {})",
-        session.issue_number, session.nudge_count
+    tracing::info!(
+        "nudged session for #{} (nudge {})",
+        session.issue_number,
+        session.nudge_count
     );
 }
 
@@ -839,18 +832,15 @@ fn has_merged_pr_sync(repo_path: &str, issue_number: u64) -> bool {
     match output {
         Ok(o) if o.status.success() => json_has_results(&String::from_utf8_lossy(&o.stdout)),
         Ok(o) => {
-            eprintln!(
-                "Auto-worker: gh pr list failed for #{}: {}",
+            tracing::error!(
+                "gh pr list failed for #{}: {}",
                 issue_number,
                 String::from_utf8_lossy(&o.stderr)
             );
             false
         }
         Err(e) => {
-            eprintln!(
-                "Auto-worker: failed to run gh pr list for #{}: {}",
-                issue_number, e
-            );
+            tracing::error!("failed to run gh pr list for #{}: {}", issue_number, e);
             false
         }
     }
@@ -894,10 +884,7 @@ fn mark_issue_finished(state: &AppState, session: &ActiveSession) {
             session.issue_number,
             LABEL_FINISHED_BY_WORKER,
         );
-        eprintln!(
-            "Auto-worker: finalized #{} as completed",
-            session.issue_number
-        );
+        tracing::info!("finalized #{} as completed", session.issue_number);
     } else if issue_closed == Some(false) {
         let _ = remove_label_sync(
             state,
@@ -905,13 +892,10 @@ fn mark_issue_finished(state: &AppState, session: &ActiveSession) {
             session.issue_number,
             LABEL_FINISHED_BY_WORKER,
         );
-        eprintln!(
-            "Auto-worker: #{} exited while still open",
-            session.issue_number
-        );
+        tracing::info!("#{} exited while still open", session.issue_number);
     } else {
-        eprintln!(
-            "Auto-worker: #{} cleanup could not confirm issue state",
+        tracing::warn!(
+            "#{} cleanup could not confirm issue state",
             session.issue_number
         );
     }
