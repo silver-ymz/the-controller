@@ -120,7 +120,7 @@ struct StartupWorkerCandidate {
     session_dir: String,
     kind: String,
     ordinal: usize,
-    live_tmux: bool,
+    live_session: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -437,7 +437,7 @@ impl AutoWorkerScheduler {
                     session_dir,
                     kind: session.kind.clone(),
                     ordinal,
-                    live_tmux: crate::tmux::TmuxManager::has_session(session.id),
+                    live_session: crate::broker_client::BrokerClient::new().has_session(session.id),
                 });
             }
         }
@@ -533,18 +533,34 @@ fn startup_candidate_to_active_session(candidate: &StartupWorkerCandidate) -> Ac
 }
 
 fn reconcile_startup_workers(candidates: Vec<StartupWorkerCandidate>) -> StartupReconciliation {
-    let mut keep_live_by_project: HashMap<Uuid, usize> = HashMap::new();
+    // Per project, pick the best candidate to restore:
+    // - Prefer a live broker session (reattach)
+    // - Otherwise pick the highest-ordinal candidate (resume with --continue)
+    // All other candidates go to cleanup.
+    let mut best_by_project: HashMap<Uuid, usize> = HashMap::new();
 
     for (idx, candidate) in candidates.iter().enumerate() {
-        if candidate.live_tmux {
-            keep_live_by_project.insert(candidate.project_id, idx);
+        match best_by_project.get(&candidate.project_id) {
+            Some(&prev_idx) => {
+                let prev = &candidates[prev_idx];
+                // Prefer live over non-live; among same liveness, prefer higher ordinal
+                if candidate.live_session && !prev.live_session
+                    || (candidate.live_session == prev.live_session
+                        && candidate.ordinal > prev.ordinal)
+                {
+                    best_by_project.insert(candidate.project_id, idx);
+                }
+            }
+            None => {
+                best_by_project.insert(candidate.project_id, idx);
+            }
         }
     }
 
     let mut reconciliation = StartupReconciliation::default();
 
     for (idx, candidate) in candidates.into_iter().enumerate() {
-        if candidate.live_tmux && keep_live_by_project.get(&candidate.project_id) == Some(&idx) {
+        if best_by_project.get(&candidate.project_id) == Some(&idx) {
             reconciliation.restore.push(candidate);
         } else {
             reconciliation.cleanup.push(candidate);
@@ -1192,7 +1208,7 @@ mod tests {
                 session_dir: "/tmp/the-controller/session-46".to_string(),
                 kind: "codex".to_string(),
                 ordinal: 0,
-                live_tmux: false,
+                live_session: false,
             },
             StartupWorkerCandidate {
                 session_id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
@@ -1203,10 +1219,48 @@ mod tests {
                 session_dir: "/tmp/the-controller/session-51".to_string(),
                 kind: "codex".to_string(),
                 ordinal: 1,
-                live_tmux: true,
+                live_session: true,
             },
         ]);
 
+        assert_eq!(reconciliation.restore.len(), 1);
+        assert_eq!(reconciliation.restore[0].issue_number, 327);
+
+        assert_eq!(reconciliation.cleanup.len(), 1);
+        assert_eq!(reconciliation.cleanup[0].issue_number, 328);
+    }
+
+    #[test]
+    fn startup_restoration_resumes_non_live_session_when_no_live_exists() {
+        let project_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let repo_path = "/tmp/the-controller".to_string();
+
+        let reconciliation = reconcile_startup_workers(vec![
+            StartupWorkerCandidate {
+                session_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+                project_id,
+                issue_number: 328,
+                issue_title: "Older session".to_string(),
+                repo_path: repo_path.clone(),
+                session_dir: "/tmp/the-controller/session-46".to_string(),
+                kind: "codex".to_string(),
+                ordinal: 0,
+                live_session: false,
+            },
+            StartupWorkerCandidate {
+                session_id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+                project_id,
+                issue_number: 327,
+                issue_title: "Most recent session".to_string(),
+                repo_path: repo_path.clone(),
+                session_dir: "/tmp/the-controller/session-51".to_string(),
+                kind: "codex".to_string(),
+                ordinal: 1,
+                live_session: false,
+            },
+        ]);
+
+        // Should restore the highest-ordinal candidate even though none are live
         assert_eq!(reconciliation.restore.len(), 1);
         assert_eq!(reconciliation.restore[0].issue_number, 327);
 
@@ -1226,7 +1280,7 @@ mod tests {
             session_dir: "/tmp/the-controller/session-51".to_string(),
             kind: "codex".to_string(),
             ordinal: 1,
-            live_tmux: true,
+            live_session: true,
         };
         let reconciliation = StartupReconciliation {
             restore: vec![candidate.clone()],

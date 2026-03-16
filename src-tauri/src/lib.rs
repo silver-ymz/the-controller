@@ -2,6 +2,8 @@ use tauri::Manager;
 
 pub mod architecture;
 pub mod auto_worker;
+pub mod broker_client;
+pub mod broker_protocol;
 pub mod cli_install;
 pub mod commands;
 pub mod config;
@@ -22,7 +24,6 @@ pub mod state;
 pub mod status_socket;
 pub mod storage;
 pub mod terminal_theme;
-pub mod tmux;
 pub mod token_usage;
 pub mod voice;
 pub mod worktree;
@@ -42,7 +43,7 @@ fn show_startup_error(error: &std::io::Error) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Resolve the user's shell environment (e.g. vars from .zshrc) before
-    // spawning any threads so PTY sessions and tmux inherit them.
+    // spawning any threads so PTY sessions inherit them.
     shell_env::inherit_shell_env();
 
     tauri::Builder::default()
@@ -181,18 +182,11 @@ pub fn run() {
                         }
                     }
                 }
-                // In release builds, kill tmux sessions on quit so they don't linger.
-                // In dev builds, let tmux sessions survive so they reattach after
-                // cargo-watch restarts the app (the whole point of the tmux layer).
+                // In release builds, shut down the broker so sessions don't linger.
+                // In dev builds, let the broker + sessions survive so they
+                // reattach after cargo-watch restarts the app.
                 if cfg!(not(debug_assertions)) {
-                    if let Some(state) = app_handle.try_state::<state::AppState>() {
-                        if let Ok(mut pty_manager) = state.pty_manager.lock() {
-                            let ids = pty_manager.session_ids();
-                            for id in ids {
-                                let _ = pty_manager.close_session(id);
-                            }
-                        }
-                    }
+                    let _ = broker_client::BrokerClient::new().shutdown();
                 }
             }
         });

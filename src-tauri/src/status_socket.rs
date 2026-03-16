@@ -354,7 +354,7 @@ fn handle_cleanup_with_state(state: &AppState, session_id: Uuid) {
         }
     }
 
-    // Close the PTY / kill tmux session (after releasing storage lock)
+    // Close the PTY / kill broker session (after releasing storage lock)
     if let Ok(mut pty_manager) = state.pty_manager.lock() {
         let _ = pty_manager.close_session(session_id);
     }
@@ -626,7 +626,7 @@ mod tests {
         );
         assert!(
             !json.contains("$THE_CONTROLLER_SESSION_ID"),
-            "hook commands must not rely on env var (not available in tmux sessions)"
+            "hook commands must not rely on env var (not available in broker sessions)"
         );
     }
 

@@ -536,7 +536,7 @@ async fn close_session(
     let session_uuid =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Close PTY / kill tmux
+    // Close PTY / kill broker session
     {
         let mut pty_manager = state
             .app
