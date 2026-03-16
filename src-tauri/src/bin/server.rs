@@ -1025,9 +1025,23 @@ async fn save_onboarding_config(
     Ok(Json(Value::Null))
 }
 
-async fn log_frontend_error(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+async fn log_frontend_error(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    use std::io::Write;
     let message = args["message"].as_str().unwrap_or_default();
     let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
+    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
+    let line = format!("{} ERROR [frontend] {}\n", timestamp, sanitized);
+
+    if let Ok(mut guard) = state.app.frontend_log.lock() {
+        if let Some(ref mut file) = *guard {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.flush();
+        }
+    }
+
     tracing::error!(target: "frontend", "{}", sanitized);
     Ok(Json(Value::Null))
 }
