@@ -28,8 +28,8 @@ impl AudioInput {
         let native_rate = default_config.sample_rate().0;
         let channels = default_config.channels() as usize;
 
-        eprintln!(
-            "[voice] Mic: {:?}, {}Hz, {}ch, {:?}",
+        tracing::info!(
+            "mic: {:?}, {}Hz, {}ch, {:?}",
             device.name().unwrap_or_default(),
             native_rate,
             channels,
@@ -79,7 +79,7 @@ impl AudioInput {
                     }
                 },
                 |err| {
-                    eprintln!("[voice] Audio input error: {err}");
+                    tracing::error!("audio input error: {err}");
                 },
                 None,
             )

@@ -59,7 +59,7 @@ async fn shutdown_signal(state: Arc<ServerState>) {
         _ = terminate => {},
     }
 
-    println!("\nShutting down...");
+    tracing::info!("shutting down");
     status_socket::cleanup();
 
     if let Ok(mut pty_manager) = state.app.pty_manager.lock() {
@@ -72,6 +72,11 @@ async fn shutdown_signal(state: Arc<ServerState>) {
 
 #[tokio::main]
 async fn main() {
+    let base_dir = dirs::home_dir()
+        .map(|h| h.join(".the-controller"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let _log_guard = the_controller_lib::logging::init_backend_logging(&base_dir, true);
+
     let (emitter, ws_tx) = WsBroadcastEmitter::new();
     let app_state = Arc::new(AppState::new(emitter).expect("Failed to initialize app state"));
 
@@ -215,8 +220,12 @@ async fn main() {
         .ok()
         .filter(|t| !t.is_empty());
     match &token {
-        Some(t) => println!("Server listening on http://{}?token={}", addr, t),
-        None => println!("Server listening on http://{} (no auth)", addr),
+        Some(t) => {
+            // Print token to stdout (ephemeral) — don't persist it in log files
+            println!("Server listening on http://{}?token={}", addr, t);
+            tracing::info!("server listening on http://{} (auth enabled)", addr);
+        }
+        None => tracing::info!("server listening on http://{} (no auth)", addr),
     }
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app)
@@ -303,9 +312,10 @@ async fn restore_sessions(
     inventory.warn_if_corrupt("restore_sessions");
     for project in &inventory.projects {
         if let Err(e) = storage.migrate_worktree_paths(project) {
-            eprintln!(
-                "Failed to migrate worktrees for project '{}': {}",
-                project.name, e
+            tracing::error!(
+                "failed to migrate worktrees for project '{}': {}",
+                project.name,
+                e
             );
         }
     }
@@ -1003,18 +1013,40 @@ async fn save_onboarding_config(
         .lock()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let base_dir = storage.base_dir();
+
+    // Preserve existing log_level to avoid clobbering it
+    let existing_log_level = config::load_config(&base_dir)
+        .map(|c| c.log_level)
+        .unwrap_or_else(|| "info".to_string());
+
     let cfg = config::Config {
         projects_root,
         default_provider,
+        log_level: existing_log_level,
     };
     config::save_config(&base_dir, &cfg)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(Value::Null))
 }
 
-async fn log_frontend_error(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+async fn log_frontend_error(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    use std::io::Write;
     let message = args["message"].as_str().unwrap_or_default();
-    eprintln!("[FRONTEND] {}", message);
+    let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
+    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
+    let line = format!("{} ERROR [frontend] {}\n", timestamp, sanitized);
+
+    if let Ok(mut guard) = state.app.frontend_log.lock() {
+        if let Some(ref mut file) = *guard {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.flush();
+        }
+    }
+
+    tracing::error!(target: "frontend", "{}", sanitized);
     Ok(Json(Value::Null))
 }
 
@@ -1252,7 +1284,7 @@ fn server_try_commit(state: &Arc<ServerState>, message: &str) {
     if let Ok(storage) = state.app.storage.lock() {
         let base_dir = storage.base_dir();
         if let Err(e) = notes::commit_notes(&base_dir, message) {
-            eprintln!("notes git commit failed: {}", e);
+            tracing::error!("notes git commit failed: {}", e);
         }
     }
 }

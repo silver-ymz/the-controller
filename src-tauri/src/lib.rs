@@ -11,6 +11,7 @@ pub mod deploy;
 pub mod emitter;
 pub mod keybindings;
 pub mod labels;
+pub mod logging;
 pub mod maintainer;
 pub mod models;
 pub mod note_ai_chat;
@@ -29,7 +30,7 @@ pub mod voice;
 pub mod worktree;
 
 fn show_startup_error(error: &std::io::Error) {
-    eprintln!("Failed to initialize app storage: {error}");
+    tracing::error!("failed to initialize app storage: {error}");
     let _ = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
         .set_title("The Controller failed to start")
@@ -45,6 +46,12 @@ pub fn run() {
     // Resolve the user's shell environment (e.g. vars from .zshrc) before
     // spawning any threads so PTY sessions inherit them.
     shell_env::inherit_shell_env();
+
+    // Initialize structured logging — must happen before any tracing macros.
+    let base_dir = storage::Storage::with_default_path()
+        .map(|s| s.base_dir())
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let _log_guard = logging::init_backend_logging(&base_dir, true);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -65,7 +72,7 @@ pub fn run() {
                 let app_state = app.state::<state::AppState>();
                 let emitter = app_state.emitter.clone();
                 let base_dir = app_state.storage.lock().map(|s| s.base_dir()).map_err(|e| {
-                    eprintln!("Failed to lock storage for keybindings setup: {e}");
+                    tracing::error!("failed to lock storage for keybindings setup: {e}");
                 });
                 if let Ok(base_dir) = base_dir {
                     keybindings::ensure_keybindings_file(&base_dir);

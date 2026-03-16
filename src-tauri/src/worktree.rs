@@ -75,11 +75,11 @@ impl WorktreeManager {
         let env_dst = worktree_dir.join(".env");
         #[cfg(unix)]
         if let Err(e) = std::os::unix::fs::symlink(&env_src, &env_dst) {
-            eprintln!("Warning: failed to symlink .env to worktree: {}", e);
+            tracing::warn!("Failed to symlink .env to worktree: {}", e);
         }
         #[cfg(windows)]
         if let Err(e) = std::os::windows::fs::symlink_file(&env_src, &env_dst) {
-            eprintln!("Warning: failed to symlink .env to worktree: {}", e);
+            tracing::warn!("Failed to symlink .env to worktree: {}", e);
         }
 
         Ok(worktree_dir.to_path_buf())

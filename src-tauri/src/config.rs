@@ -17,6 +17,12 @@ pub struct Config {
     pub projects_root: String,
     #[serde(default)]
     pub default_provider: ConfigDefaultProvider,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +189,7 @@ mod tests {
         let config = Config {
             projects_root: "/home/user/projects".to_string(),
             default_provider: ConfigDefaultProvider::ClaudeCode,
+            log_level: default_log_level(),
         };
 
         save_config(tmp.path(), &config).expect("save_config should succeed");
@@ -198,6 +205,7 @@ mod tests {
         let config = Config {
             projects_root: "/home/user/projects".to_string(),
             default_provider: ConfigDefaultProvider::ClaudeCode,
+            log_level: default_log_level(),
         };
 
         save_config(tmp.path(), &config).expect("save_config should succeed");
@@ -212,6 +220,7 @@ mod tests {
         let config = Config {
             projects_root: "/home/user/projects".to_string(),
             default_provider: ConfigDefaultProvider::Codex,
+            log_level: default_log_level(),
         };
 
         save_config(tmp.path(), &config).expect("save_config should succeed");

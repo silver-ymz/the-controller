@@ -37,8 +37,8 @@ impl ProjectInventory {
 
     pub fn warn_if_corrupt(&self, context: &str) {
         for entry in &self.corrupt_entries {
-            eprintln!(
-                "Warning: {}: failed to parse {}: {}",
+            tracing::warn!(
+                "{}: failed to parse {}: {}",
                 context,
                 entry.project_file.display(),
                 entry.error
@@ -184,8 +184,8 @@ impl Storage {
         let uuid_dir = self.base_dir.join("worktrees").join(project.id.to_string());
         let name_dir = self.base_dir.join("worktrees").join(&project.name);
         if uuid_dir.exists() && name_dir.exists() {
-            eprintln!(
-                "Warning: cannot migrate worktrees for project '{}': target dir already exists",
+            tracing::warn!(
+                "cannot migrate worktrees for project '{}': target dir already exists",
                 project.name
             );
             return Ok(());

@@ -477,6 +477,13 @@ fn main() {
         }
     }
 
+    // Initialize logging AFTER daemonize() — the non-blocking writer spawns a
+    // background consumer thread that would be killed by fork().
+    let base_dir = dirs::home_dir()
+        .map(|h| h.join(".the-controller"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let _log_guard = the_controller_lib::logging::init_broker_logging(&base_dir, foreground);
+
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async_main(socket_dir));
 }
@@ -509,7 +516,7 @@ async fn async_main(socket_dir: PathBuf) {
     // Write PID file
     let pid = std::process::id();
     if let Err(e) = std::fs::write(broker.pid_file_path(), pid.to_string()) {
-        eprintln!("failed to write pid file: {}", e);
+        tracing::error!("failed to write pid file: {}", e);
         std::process::exit(1);
     }
 
@@ -520,7 +527,7 @@ async fn async_main(socket_dir: PathBuf) {
     let control_listener = match UnixListener::bind(&control_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("failed to bind control socket: {}", e);
+            tracing::error!("failed to bind control socket: {}", e);
             std::process::exit(1);
         }
     };

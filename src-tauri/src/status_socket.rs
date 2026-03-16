@@ -61,7 +61,7 @@ fn write_socket_response(stream: &mut UnixStream, response: &crate::secure_env::
         crate::secure_env::format_secure_env_response(response)
     );
     if let Err(err) = stream.write_all(line.as_bytes()) {
-        eprintln!("Failed to write socket response: {}", err);
+        tracing::error!("failed to write socket response: {}", err);
     }
 }
 
@@ -125,8 +125,8 @@ pub fn start_listener(app_handle: AppHandle) {
     if std::path::Path::new(&path).exists() {
         match UnixStream::connect(&path) {
             Ok(_) => {
-                eprintln!(
-                    "Warning: another instance appears to be running (socket {} is active)",
+                tracing::warn!(
+                    "another instance appears to be running (socket {} is active)",
                     path
                 );
                 return;
@@ -141,7 +141,7 @@ pub fn start_listener(app_handle: AppHandle) {
     let listener = match UnixListener::bind(&path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to bind Unix socket at {}: {}", path, e);
+            tracing::error!("failed to bind Unix socket at {}: {}", path, e);
             return;
         }
     };
@@ -149,7 +149,7 @@ pub fn start_listener(app_handle: AppHandle) {
     let emitter: Arc<dyn EventEmitter> = match app_handle.try_state::<AppState>() {
         Some(s) => s.emitter.clone(),
         None => {
-            eprintln!("status_socket: AppState not available");
+            tracing::error!("status_socket: AppState not available");
             return;
         }
     };
@@ -165,7 +165,7 @@ pub fn start_listener(app_handle: AppHandle) {
                     });
                 }
                 Err(e) => {
-                    eprintln!("Error accepting connection on status socket: {}", e);
+                    tracing::error!("error accepting connection on status socket: {}", e);
                 }
             }
         }
@@ -181,8 +181,8 @@ pub fn start_listener_with_state(state: Arc<AppState>) {
     if std::path::Path::new(&path).exists() {
         match UnixStream::connect(&path) {
             Ok(_) => {
-                eprintln!(
-                    "Warning: another instance appears to be running (socket {} is active)",
+                tracing::warn!(
+                    "another instance appears to be running (socket {} is active)",
                     path
                 );
                 return;
@@ -197,7 +197,7 @@ pub fn start_listener_with_state(state: Arc<AppState>) {
     let listener = match UnixListener::bind(&path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to bind Unix socket at {}: {}", path, e);
+            tracing::error!("failed to bind Unix socket at {}: {}", path, e);
             return;
         }
     };
@@ -215,7 +215,7 @@ pub fn start_listener_with_state(state: Arc<AppState>) {
                     });
                 }
                 Err(e) => {
-                    eprintln!("Error accepting connection on status socket: {}", e);
+                    tracing::error!("error accepting connection on status socket: {}", e);
                 }
             }
         }
@@ -226,7 +226,7 @@ fn handle_connection(stream: UnixStream, app_handle: &AppHandle, emitter: &Arc<d
     let state = match app_handle.try_state::<AppState>() {
         Some(s) => s,
         None => {
-            eprintln!("handle_connection: AppState not available");
+            tracing::error!("handle_connection: AppState not available");
             return;
         }
     };
@@ -241,7 +241,7 @@ fn handle_connection_with_state(
     let mut writer = match stream.try_clone() {
         Ok(stream) => stream,
         Err(err) => {
-            eprintln!("Failed to clone status socket stream: {}", err);
+            tracing::error!("failed to clone status socket stream: {}", err);
             return;
         }
     };
@@ -258,7 +258,7 @@ fn handle_connection_with_state(
                         }
                         let event_name = format!("session-status-hook:{}", session_id);
                         if let Err(e) = emitter.emit(&event_name, &status) {
-                            eprintln!("Failed to emit {}: {}", event_name, e);
+                            tracing::error!("failed to emit {}: {}", event_name, e);
                         }
                         if status == "idle" {
                             crate::auto_worker::notify_session_idle(session_id);
@@ -270,7 +270,10 @@ fn handle_connection_with_state(
                             Ok(()) => match response_rx.recv() {
                                 Ok(response) => write_socket_response(&mut writer, &response),
                                 Err(err) => {
-                                    eprintln!("Failed to receive secure env response: {}", err);
+                                    tracing::error!(
+                                        "failed to receive secure env response: {}",
+                                        err
+                                    );
                                     write_socket_response(
                                         &mut writer,
                                         &crate::secure_env::SecureEnvResponse {
@@ -286,7 +289,7 @@ fn handle_connection_with_state(
                         return;
                     }
                     Err(err) if msg.starts_with("secure-env:") => {
-                        eprintln!("Invalid secure env socket message: {}", err);
+                        tracing::error!("invalid secure env socket message: {}", err);
                         write_socket_response(
                             &mut writer,
                             &crate::secure_env::SecureEnvResponse {
@@ -301,7 +304,7 @@ fn handle_connection_with_state(
                 }
             }
             Err(e) => {
-                eprintln!("Error reading from status socket connection: {}", e);
+                tracing::error!("error reading from status socket connection: {}", e);
                 break;
             }
         }
@@ -315,7 +318,7 @@ pub fn handle_cleanup(app_handle: &AppHandle, session_id: Uuid) {
     let state = match app_handle.try_state::<AppState>() {
         Some(s) => s,
         None => {
-            eprintln!("cleanup: AppState not available");
+            tracing::error!("cleanup: AppState not available");
             return;
         }
     };
@@ -336,7 +339,7 @@ fn handle_cleanup_with_state(state: &AppState, session_id: Uuid) {
                 if let Some(pos) = project.sessions.iter().position(|s| s.id == session_id) {
                     let session = project.sessions.remove(pos);
                     if let Err(e) = storage.save_project(project) {
-                        eprintln!("cleanup: failed to save project: {}", e);
+                        tracing::error!("cleanup: failed to save project: {}", e);
                     }
                     // Delete the worktree
                     if let (Some(wt_path), Some(branch)) =
@@ -345,7 +348,7 @@ fn handle_cleanup_with_state(state: &AppState, session_id: Uuid) {
                         if let Err(e) =
                             WorktreeManager::remove_worktree(wt_path, &project.repo_path, branch)
                         {
-                            eprintln!("cleanup: failed to remove worktree: {}", e);
+                            tracing::error!("cleanup: failed to remove worktree: {}", e);
                         }
                     }
                     break;
@@ -362,7 +365,7 @@ fn handle_cleanup_with_state(state: &AppState, session_id: Uuid) {
     // Tell the frontend to refresh its project list
     let event_name = format!("session-cleanup:{}", session_id);
     if let Err(e) = state.emitter.emit(&event_name, "cleanup") {
-        eprintln!("Failed to emit {}: {}", event_name, e);
+        tracing::error!("failed to emit {}: {}", event_name, e);
     }
 }
 

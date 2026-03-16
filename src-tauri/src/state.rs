@@ -89,11 +89,16 @@ pub struct AppState {
     pub emitter: Arc<dyn EventEmitter>,
     pub staging_lock: TokioMutex<()>,
     pub voice_pipeline: Arc<TokioMutex<Option<VoicePipeline>>>,
+    pub frontend_log: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 impl AppState {
     pub fn from_storage(storage: Storage, emitter: Arc<dyn EventEmitter>) -> std::io::Result<Self> {
         storage.ensure_dirs()?;
+        let frontend_log = match crate::logging::init_frontend_log_writer(&storage.base_dir()) {
+            Ok((file, _path)) => Mutex::new(Some(file)),
+            Err(_) => Mutex::new(None),
+        };
         Ok(Self {
             storage: Mutex::new(storage),
             pty_manager: Arc::new(Mutex::new(PtyManager::new())),
@@ -102,6 +107,7 @@ impl AppState {
             emitter,
             staging_lock: TokioMutex::new(()),
             voice_pipeline: Arc::new(TokioMutex::new(None)),
+            frontend_log,
         })
     }
 

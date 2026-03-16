@@ -213,8 +213,8 @@ pub fn ensure_keybindings_file(base_dir: &Path) {
     let path = keybindings_path(base_dir);
     if !path.exists() {
         if let Err(e) = fs::write(&path, generate_template()) {
-            eprintln!(
-                "Failed to write keybindings template to {}: {e}",
+            tracing::error!(
+                "failed to write keybindings template to {}: {e}",
                 path.display()
             );
         }
@@ -234,7 +234,7 @@ pub fn start_watcher(base_dir: PathBuf, emitter: Arc<dyn crate::emitter::EventEm
         let mut debouncer = match new_debouncer(Duration::from_millis(200), tx) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("Failed to create keybindings file watcher: {e}");
+                tracing::error!("failed to create keybindings file watcher: {e}");
                 return;
             }
         };
@@ -243,7 +243,7 @@ pub fn start_watcher(base_dir: PathBuf, emitter: Arc<dyn crate::emitter::EventEm
             .watcher()
             .watch(&base_dir, notify::RecursiveMode::NonRecursive)
         {
-            eprintln!("Failed to watch keybindings directory: {e}");
+            tracing::error!("failed to watch keybindings directory: {e}");
             return;
         }
 
@@ -261,7 +261,7 @@ pub fn start_watcher(base_dir: PathBuf, emitter: Arc<dyn crate::emitter::EventEm
                     }
                 }
                 Ok(Err(e)) => {
-                    eprintln!("Keybindings watcher error: {e:?}");
+                    tracing::error!("keybindings watcher error: {e:?}");
                 }
                 Err(_) => break,
             }
