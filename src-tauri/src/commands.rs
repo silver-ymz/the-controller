@@ -2113,8 +2113,19 @@ pub async fn get_maintainer_issue_detail(
 }
 
 #[tauri::command]
-pub fn log_frontend_error(message: String) {
-    eprintln!("[FRONTEND] {}", message);
+pub fn log_frontend_error(message: String, state: tauri::State<'_, AppState>) {
+    use std::io::Write;
+    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
+    let line = format!("{} ERROR [frontend] {}\n", timestamp, message);
+
+    if let Ok(mut guard) = state.frontend_log.lock() {
+        if let Some(ref mut file) = *guard {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.flush();
+        }
+    }
+
+    tracing::error!(target: "frontend", "{}", message);
 }
 
 #[tauri::command]
