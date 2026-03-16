@@ -11,6 +11,7 @@ pub mod deploy;
 pub mod emitter;
 pub mod keybindings;
 pub mod labels;
+pub mod logging;
 pub mod maintainer;
 pub mod models;
 pub mod note_ai_chat;
