@@ -16,6 +16,7 @@
     listening: "listening...",
     thinking: "thinking...",
     speaking: "speaking...",
+    paused: "paused",
   };
 
   export function toggleDebug() {
@@ -102,9 +103,8 @@
     return () => {
       unmounted = true;
       cleanups.forEach((fn) => fn());
-      command("stop_voice_pipeline").catch((e: unknown) => {
-        console.error("[voice] Failed to stop pipeline:", e);
-      });
+      // Pipeline keeps running in the background — don't stop it on unmount.
+      // It will be cleaned up when the app exits (VoicePipeline::Drop).
     };
   });
 </script>

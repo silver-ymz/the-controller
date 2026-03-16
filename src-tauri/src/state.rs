@@ -4,6 +4,7 @@ use crate::pty_manager::PtyManager;
 use crate::storage::Storage;
 use crate::voice::VoicePipeline;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as TokioMutex;
@@ -99,6 +100,10 @@ pub struct AppState {
     pub staging_lock: TokioMutex<()>,
     pub voice_pipeline: Arc<TokioMutex<Option<VoicePipeline>>>,
     pub frontend_log: std::sync::Mutex<Option<std::fs::File>>,
+    /// Incremented each time stop_voice_pipeline is called. start_voice_pipeline
+    /// reads this before init and checks again after — if it changed, a stop was
+    /// requested during init so the new pipeline is dropped instead of stored.
+    pub voice_generation: AtomicU64,
 }
 
 impl AppState {
@@ -125,6 +130,7 @@ impl AppState {
             staging_lock: TokioMutex::new(()),
             voice_pipeline: Arc::new(TokioMutex::new(None)),
             frontend_log,
+            voice_generation: AtomicU64::new(0),
         })
     }
 
