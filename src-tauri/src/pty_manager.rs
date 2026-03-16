@@ -87,7 +87,7 @@ impl PtyManager {
             ) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    eprintln!("broker session failed, falling back to direct PTY: {}", e);
+                    tracing::warn!("broker session failed, falling back to direct PTY: {}", e);
                 }
             }
         }

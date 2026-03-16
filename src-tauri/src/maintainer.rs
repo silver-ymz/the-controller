@@ -198,7 +198,7 @@ impl MaintainerScheduler {
                                 .emit(&format!("maintainer-status:{}", project.id), "idle");
                         }
                         Err(e) => {
-                            eprintln!("Maintainer check failed for {}: {}", project.name, e);
+                            tracing::error!("maintainer check failed for {}: {}", project.name, e);
                             let _ = state
                                 .emitter
                                 .emit(&format!("maintainer-status:{}", project.id), "error");

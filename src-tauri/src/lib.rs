@@ -30,7 +30,7 @@ pub mod voice;
 pub mod worktree;
 
 fn show_startup_error(error: &std::io::Error) {
-    eprintln!("Failed to initialize app storage: {error}");
+    tracing::error!("failed to initialize app storage: {error}");
     let _ = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
         .set_title("The Controller failed to start")
@@ -72,7 +72,7 @@ pub fn run() {
                 let app_state = app.state::<state::AppState>();
                 let emitter = app_state.emitter.clone();
                 let base_dir = app_state.storage.lock().map(|s| s.base_dir()).map_err(|e| {
-                    eprintln!("Failed to lock storage for keybindings setup: {e}");
+                    tracing::error!("failed to lock storage for keybindings setup: {e}");
                 });
                 if let Ok(base_dir) = base_dir {
                     keybindings::ensure_keybindings_file(&base_dir);

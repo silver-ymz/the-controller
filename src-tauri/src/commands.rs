@@ -343,9 +343,10 @@ pub fn restore_sessions(state: State<AppState>) -> Result<(), String> {
     // Migrate worktree paths from UUID-based to name-based directories
     for project in &inventory.projects {
         if let Err(e) = storage.migrate_worktree_paths(project) {
-            eprintln!(
-                "Failed to migrate worktrees for project '{}': {}",
-                project.name, e
+            tracing::error!(
+                "failed to migrate worktrees for project '{}': {}",
+                project.name,
+                e
             );
         }
     }

@@ -40,7 +40,7 @@ fn installed_build_date(binary_path: &Path) -> Option<String> {
 /// Silently skips any binary that isn't found in the source directory.
 pub fn install_controller_cli() {
     let Some(bin_dir) = controller_bin_dir() else {
-        eprintln!("Warning: could not determine home directory for controller-cli install");
+        tracing::warn!("could not determine home directory for controller-cli install");
         return;
     };
 
@@ -52,7 +52,7 @@ pub fn install_controller_cli() {
     };
 
     if let Err(e) = std::fs::create_dir_all(&bin_dir) {
-        eprintln!("Warning: could not create {}: {}", bin_dir.display(), e);
+        tracing::warn!("could not create {}: {}", bin_dir.display(), e);
         return;
     }
 
@@ -76,7 +76,7 @@ pub fn install_controller_cli() {
         }
 
         if let Err(e) = std::fs::copy(&source, &dest) {
-            eprintln!("Warning: could not install {}: {}", binary_name, e);
+            tracing::warn!("could not install {}: {}", binary_name, e);
             continue;
         }
 
