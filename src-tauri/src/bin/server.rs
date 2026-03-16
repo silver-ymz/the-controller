@@ -1027,7 +1027,8 @@ async fn save_onboarding_config(
 
 async fn log_frontend_error(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
     let message = args["message"].as_str().unwrap_or_default();
-    tracing::error!(target: "frontend", "{}", message);
+    let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
+    tracing::error!(target: "frontend", "{}", sanitized);
     Ok(Json(Value::Null))
 }
 
