@@ -1306,10 +1306,16 @@ pub fn save_onboarding_config(state: State<AppState>, projects_root: String) -> 
 
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     let base_dir = storage.base_dir();
+
+    // Preserve existing log_level to avoid clobbering it
+    let existing_log_level = config::load_config(&base_dir)
+        .map(|c| c.log_level)
+        .unwrap_or_else(|| "info".to_string());
+
     let cfg = config::Config {
         projects_root,
         default_provider: config::ConfigDefaultProvider::ClaudeCode,
-        log_level: "info".to_string(),
+        log_level: existing_log_level,
     };
     config::save_config(&base_dir, &cfg).map_err(|e| e.to_string())
 }

@@ -6,7 +6,7 @@ use crate::state::AppState;
 /// Best-effort git commit. Logs errors but doesn't fail the operation.
 fn try_commit(base_dir: &std::path::Path, message: &str) {
     if let Err(e) = notes::commit_notes(base_dir, message) {
-        eprintln!("notes git commit failed: {}", e);
+        tracing::error!("Notes git commit failed: {}", e);
     }
 }
 

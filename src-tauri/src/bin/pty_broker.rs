@@ -463,14 +463,8 @@ fn main() {
         i += 1;
     }
 
-    // Initialize logging BEFORE daemonize() — the daemon redirects stderr to /dev/null.
-    let base_dir = dirs::home_dir()
-        .map(|h| h.join(".the-controller"))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let _log_guard = the_controller_lib::logging::init_broker_logging(&base_dir, foreground);
-
     if let Err(e) = std::fs::create_dir_all(&socket_dir) {
-        tracing::error!("failed to create socket dir: {}", e);
+        eprintln!("failed to create socket dir: {}", e);
         std::process::exit(1);
     }
 
@@ -478,10 +472,17 @@ fn main() {
     // the runtime's thread pool and kqueue/epoll file descriptors.
     if !foreground {
         if let Err(e) = daemonize() {
-            tracing::error!("failed to daemonize: {}", e);
+            eprintln!("failed to daemonize: {}", e);
             std::process::exit(1);
         }
     }
+
+    // Initialize logging AFTER daemonize() — the non-blocking writer spawns a
+    // background consumer thread that would be killed by fork().
+    let base_dir = dirs::home_dir()
+        .map(|h| h.join(".the-controller"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let _log_guard = the_controller_lib::logging::init_broker_logging(&base_dir, foreground);
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async_main(socket_dir));
