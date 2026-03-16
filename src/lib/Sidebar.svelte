@@ -613,7 +613,7 @@
 
 <aside class="sidebar" bind:this={sidebarEl}>
   <div class="sidebar-header">
-    <h2>{currentMode === "agents" ? "Agents" : currentMode === "notes" ? "Notes" : "Development"}</h2>
+    <h2>{{ development: "Development", agents: "Agents", architecture: "Architecture", notes: "Notes", infrastructure: "Infrastructure", voice: "Voice" }[currentMode]}</h2>
   </div>
 
   <div class="project-list">
@@ -671,7 +671,6 @@
 
   <div class="sidebar-footer">
     <div class="footer-left">
-      <div class="footer-spacer"></div>
       <div class="provider-indicator">Provider: {currentSessionProviderLabel}</div>
     </div>
     <button
@@ -883,10 +882,6 @@
     min-width: 0;
   }
 
-  .footer-spacer {
-    min-height: 31px;
-  }
-
   .provider-indicator {
     border-top: 1px solid var(--border-default);
     color: var(--text-secondary);
@@ -908,7 +903,13 @@
     font-weight: 600;
     text-align: center;
     box-shadow: none;
+    outline: none;
     flex-shrink: 0;
+  }
+
+  .btn-help:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
   }
 
   .btn-help:hover {
