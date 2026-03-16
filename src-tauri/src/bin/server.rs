@@ -59,7 +59,7 @@ async fn shutdown_signal(state: Arc<ServerState>) {
         _ = terminate => {},
     }
 
-    println!("\nShutting down...");
+    tracing::info!("shutting down");
     status_socket::cleanup();
 
     if let Ok(mut pty_manager) = state.app.pty_manager.lock() {
@@ -72,6 +72,11 @@ async fn shutdown_signal(state: Arc<ServerState>) {
 
 #[tokio::main]
 async fn main() {
+    let base_dir = dirs::home_dir()
+        .map(|h| h.join(".the-controller"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let _log_guard = the_controller_lib::logging::init_backend_logging(&base_dir, true);
+
     let (emitter, ws_tx) = WsBroadcastEmitter::new();
     let app_state = Arc::new(AppState::new(emitter).expect("Failed to initialize app state"));
 
@@ -215,8 +220,8 @@ async fn main() {
         .ok()
         .filter(|t| !t.is_empty());
     match &token {
-        Some(t) => println!("Server listening on http://{}?token={}", addr, t),
-        None => println!("Server listening on http://{} (no auth)", addr),
+        Some(t) => tracing::info!("server listening on http://{}?token={}", addr, t),
+        None => tracing::info!("server listening on http://{} (no auth)", addr),
     }
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app)
@@ -303,9 +308,10 @@ async fn restore_sessions(
     inventory.warn_if_corrupt("restore_sessions");
     for project in &inventory.projects {
         if let Err(e) = storage.migrate_worktree_paths(project) {
-            eprintln!(
-                "Failed to migrate worktrees for project '{}': {}",
-                project.name, e
+            tracing::error!(
+                "failed to migrate worktrees for project '{}': {}",
+                project.name,
+                e
             );
         }
     }
@@ -1006,6 +1012,7 @@ async fn save_onboarding_config(
     let cfg = config::Config {
         projects_root,
         default_provider,
+        log_level: "info".to_string(),
     };
     config::save_config(&base_dir, &cfg)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1014,7 +1021,7 @@ async fn save_onboarding_config(
 
 async fn log_frontend_error(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
     let message = args["message"].as_str().unwrap_or_default();
-    eprintln!("[FRONTEND] {}", message);
+    tracing::error!(target: "frontend", "{}", message);
     Ok(Json(Value::Null))
 }
 
@@ -1252,7 +1259,7 @@ fn server_try_commit(state: &Arc<ServerState>, message: &str) {
     if let Ok(storage) = state.app.storage.lock() {
         let base_dir = storage.base_dir();
         if let Err(e) = notes::commit_notes(&base_dir, message) {
-            eprintln!("notes git commit failed: {}", e);
+            tracing::error!("notes git commit failed: {}", e);
         }
     }
 }
