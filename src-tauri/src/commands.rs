@@ -2319,9 +2319,14 @@ pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(
     // Brief lock to check if already running
     {
         let pipeline = state.voice_pipeline.lock().await;
-        if pipeline.is_some() {
-            tracing::debug!("voice pipeline already running, skipping");
-            return Ok(()); // Already running
+        if let Some(p) = pipeline.as_ref() {
+            // Pipeline already running — emit current state so a remounted
+            // frontend component picks up the correct label immediately.
+            tracing::debug!("voice pipeline already running, re-emitting state");
+            let voice_state = if p.is_paused() { "paused" } else { "listening" };
+            let payload = serde_json::json!({ "state": voice_state }).to_string();
+            let _ = state.emitter.emit("voice-state-changed", &payload);
+            return Ok(());
         }
     }
     // Release lock during init to avoid blocking stop_voice_pipeline
