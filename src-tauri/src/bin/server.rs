@@ -303,8 +303,8 @@ async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCod
         || req
             .uri()
             .query()
-            .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token=")))
-            .map(|t| t == token)
+            .and_then(|query| decoded_query_param(query, "token"))
+            .map(|candidate| candidate == token)
             .unwrap_or(false);
 
     if authorized {
@@ -316,6 +316,46 @@ async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCod
 
 fn is_api_or_ws_path(path: &str) -> bool {
     path.starts_with("/api/") || path == "/ws"
+}
+
+fn decoded_query_param(query: &str, key: &str) -> Option<String> {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
+        .and_then(percent_decode)
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hi = decode_hex(bytes[index + 1])?;
+                let lo = decode_hex(bytes[index + 2])?;
+                decoded.push((hi << 4) | lo);
+                index += 3;
+            }
+            b'%' => return None,
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn decode_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn request_origin_allowed(req: &Request) -> bool {
@@ -3216,11 +3256,12 @@ mod tests {
         Router,
     };
     use futures_util::StreamExt;
+    use once_cell::sync::Lazy;
     use reqwest::StatusCode;
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
     use tokio::sync::broadcast;
     use tokio::time::{timeout, Duration};
@@ -3228,6 +3269,8 @@ mod tests {
 
     use tempfile::TempDir;
     use the_controller_lib::{emitter::NoopEmitter, state::AppState, storage::Storage};
+
+    static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     struct EnvGuard {
         key: &'static str,
@@ -3238,6 +3281,12 @@ mod tests {
         fn remove(key: &'static str) -> Self {
             let original = std::env::var(key).ok();
             std::env::remove_var(key);
+            Self { key, original }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
             Self { key, original }
         }
     }
@@ -3253,6 +3302,18 @@ mod tests {
 
     fn source_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    fn percent_encode_component(value: &str) -> String {
+        let mut encoded = String::new();
+        for byte in value.bytes() {
+            if matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~') {
+                encoded.push(byte as char);
+            } else {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        encoded
     }
 
     async fn spawn_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -3363,6 +3424,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_cross_origin_api_requests_are_forbidden() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock should not be poisoned");
         let _auth_guard = EnvGuard::remove("CONTROLLER_AUTH_TOKEN");
         let app = Router::new()
             .route("/api/ping", post(|| async { StatusCode::OK }))
@@ -3383,6 +3445,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_same_origin_api_requests_are_allowed() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock should not be poisoned");
         let _auth_guard = EnvGuard::remove("CONTROLLER_AUTH_TOKEN");
         let app = Router::new()
             .route("/api/ping", post(|| async { StatusCode::OK }))
@@ -3398,6 +3461,75 @@ mod tests {
             .expect("same-origin request should complete");
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_auth_accepts_percent_encoded_token_query() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock should not be poisoned");
+
+        async fn test_ws_upgrade(
+            ws: WebSocketUpgrade,
+            AxumState(state): AxumState<Arc<ServerState>>,
+        ) -> impl IntoResponse {
+            ws.write_buffer_size(0)
+                .on_upgrade(move |socket| handle_ws(socket, state.ws_tx.subscribe()))
+        }
+
+        let token = "abc/+%=&token";
+        let _auth_guard = EnvGuard::set("CONTROLLER_AUTH_TOKEN", token);
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let app_state = Arc::new(
+            AppState::from_storage(
+                Storage::new(temp_dir.path().to_path_buf()),
+                NoopEmitter::new(),
+            )
+            .expect("test app state should initialize"),
+        );
+        let (ws_tx, _) = broadcast::channel(8);
+        let state = Arc::new(ServerState {
+            app: app_state,
+            ws_tx: ws_tx.clone(),
+        });
+        let app = Router::new()
+            .route("/api/ping", post(|| async { StatusCode::OK }))
+            .route("/ws", get(test_ws_upgrade))
+            .layer(middleware::from_fn(auth_middleware))
+            .with_state(state);
+        let (base_url, server_handle) = spawn_test_server(app).await;
+
+        let client = reqwest::Client::new();
+        let api_response = client
+            .post(format!("{base_url}/api/ping"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("authenticated API request should complete");
+        assert_eq!(api_response.status(), reqwest::StatusCode::OK);
+
+        let ws_url = format!(
+            "{}/ws?token={}",
+            base_url.replacen("http", "ws", 1),
+            percent_encode_component(token)
+        );
+        let (mut socket, _) = connect_async(&ws_url)
+            .await
+            .expect("websocket client should connect with percent-encoded token");
+
+        let expected = "authenticated".to_string();
+        ws_tx
+            .send(expected.clone())
+            .expect("event should be broadcast");
+        let received = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("authenticated websocket should receive an event before timeout")
+            .expect("socket should remain open after auth")
+            .expect("frame should decode");
+        assert_eq!(
+            received.into_text().expect("frame should be text"),
+            expected
+        );
+
         server_handle.abort();
     }
 
