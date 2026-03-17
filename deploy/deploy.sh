@@ -152,11 +152,10 @@ echo ""
 echo "==> Deployment complete!"
 if [[ -n "$HOST" ]] && command -v caddy &>/dev/null; then
   echo "    URL: https://$HOST"
-  echo "    Token: $TOKEN"
 else
   echo "    URL: http://localhost:$PORT"
-  echo "    Token: $TOKEN"
 fi
+echo "    Auth token: read CONTROLLER_AUTH_TOKEN in $ENV_FILE"
 echo ""
 echo "    Manage:  systemctl --user {start|stop|restart|status} the-controller"
 echo "    Logs:    journalctl --user -u the-controller -f"
