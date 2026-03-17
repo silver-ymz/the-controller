@@ -90,7 +90,7 @@ Then open `http://<host>:3001?token=mysecret` in a browser.
 |----------|---------|-------------|
 | `CONTROLLER_PORT` | `3001` | HTTP listen port |
 | `CONTROLLER_BIND` | `0.0.0.0` | Bind address |
-| `CONTROLLER_AUTH_TOKEN` | *(none)* | Bearer token for API/WS auth. If unset, no auth is enforced. |
+| `CONTROLLER_AUTH_TOKEN` | *(none)* | Bearer token for API/WS auth. If unset, API/WS requests are limited to same-origin browser access or non-browser clients without an `Origin` header. |
 | `CONTROLLER_DIST_DIR` | `./dist` (relative to binary) | Path to the Vite-built `dist/` directory |
 | `CONTROLLER_SOCKET` | `/tmp/the-controller.sock` | Unix socket for session status hooks |
 
