@@ -94,7 +94,7 @@ jobs:
       - name: Install Playwright chromium
         run: npx playwright install --with-deps chromium
       - name: Run e2e smoke test
-        run: pnpm test:e2e -- --grep "app loads and renders sidebar"
+        run: npx playwright test --project=e2e e2e/specs/smoke.spec.ts
       - name: Upload test artifacts
         if: failure()
         uses: actions/upload-artifact@v4
