@@ -15,9 +15,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use the_controller_lib::{
-    architecture, auto_worker, commands, config, emitter::WsBroadcastEmitter, maintainer, models,
-    note_ai_chat, notes, secure_env, session_args, state::AppState, status_socket, token_usage,
-    worktree::WorktreeManager,
+    architecture, auto_worker, commands, config, deploy, emitter::WsBroadcastEmitter, maintainer,
+    models, note_ai_chat, notes, secure_env, session_args, state::AppState, status_socket,
+    token_usage, worktree::WorktreeManager,
 };
 
 use tokio::sync::broadcast;
@@ -120,6 +120,16 @@ async fn main() {
         .route("/api/home_dir", post(home_dir))
         .route("/api/save_onboarding_config", post(save_onboarding_config))
         .route("/api/log_frontend_error", post(log_frontend_error))
+        .route("/api/detect_project_type", post(detect_project_type))
+        .route("/api/get_deploy_credentials", post(get_deploy_credentials))
+        .route(
+            "/api/save_deploy_credentials",
+            post(save_deploy_credentials),
+        )
+        .route("/api/is_deploy_provisioned", post(is_deploy_provisioned))
+        .route("/api/deploy_project", post(deploy_project))
+        .route("/api/list_deployed_services", post(list_deployed_services))
+        .route("/api/load_keybindings", post(load_keybindings))
         .route(
             "/api/copy_image_file_to_clipboard",
             post(copy_image_file_to_clipboard),
@@ -1048,6 +1058,72 @@ async fn log_frontend_error(
 
     tracing::error!(target: "frontend", "{}", sanitized);
     Ok(Json(Value::Null))
+}
+
+async fn detect_project_type(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+    let repo_path = args["repoPath"]
+        .as_str()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
+        .to_string();
+    let result = deploy::commands::detect_project_type(repo_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::to_value(result).unwrap()))
+}
+
+async fn get_deploy_credentials() -> Result<Json<Value>, (StatusCode, String)> {
+    let result = deploy::commands::get_deploy_credentials()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::to_value(result).unwrap()))
+}
+
+async fn save_deploy_credentials(
+    Json(args): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let credentials: deploy::credentials::DeployCredentials =
+        serde_json::from_value(args["credentials"].clone())
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    deploy::commands::save_deploy_credentials(credentials)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(Value::Null))
+}
+
+async fn is_deploy_provisioned() -> Result<Json<Value>, (StatusCode, String)> {
+    let provisioned = deploy::commands::is_deploy_provisioned()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(Value::Bool(provisioned)))
+}
+
+async fn deploy_project(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+    let request: deploy::commands::DeployRequest = serde_json::from_value(args["request"].clone())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let result = deploy::commands::deploy_project(request)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::to_value(result).unwrap()))
+}
+
+async fn list_deployed_services() -> Result<Json<Value>, (StatusCode, String)> {
+    let services = deploy::commands::list_deployed_services()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(Value::Array(services)))
+}
+
+async fn load_keybindings(
+    AxumState(state): AxumState<Arc<ServerState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let base_dir = state
+        .app
+        .storage
+        .lock()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .base_dir();
+    let result = the_controller_lib::keybindings::load_keybindings(&base_dir);
+    Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
 // --- Desktop-only stubs (return NOT_IMPLEMENTED gracefully) ---
@@ -3005,5 +3081,82 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
         if socket.send(Message::Text(msg.into())).await.is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn source_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    fn extract_desktop_commands(source: &str) -> BTreeSet<String> {
+        let invoke_list = source
+            .split("tauri::generate_handler![")
+            .nth(1)
+            .and_then(|section| section.split("])").next())
+            .expect("desktop invoke handler list should exist");
+
+        invoke_list
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim().trim_end_matches(',');
+                trimmed
+                    .strip_prefix("commands::")
+                    .or_else(|| trimmed.strip_prefix("deploy::commands::"))
+                    .map(ToOwned::to_owned)
+            })
+            .collect()
+    }
+
+    fn extract_server_routes(source: &str) -> BTreeSet<String> {
+        source
+            .split(".route(")
+            .skip(1)
+            .filter_map(|segment| {
+                let start = segment.find('"')?;
+                let after_quote = &segment[start + 1..];
+                let end = after_quote.find('"')?;
+                let path = &after_quote[..end];
+                path.strip_prefix("/api/").map(ToOwned::to_owned)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn server_routes_cover_desktop_command_surface() {
+        let root = source_root();
+        let lib_rs = fs::read_to_string(root.join("lib.rs")).expect("should read lib.rs");
+        let server_rs =
+            fs::read_to_string(root.join("bin/server.rs")).expect("should read server.rs");
+
+        let desktop_commands = extract_desktop_commands(&lib_rs);
+        let server_routes = extract_server_routes(&server_rs);
+        let allowed_server_only = BTreeSet::from([String::from("list_archived_projects")]);
+
+        let missing: Vec<_> = desktop_commands
+            .difference(&server_routes)
+            .cloned()
+            .collect();
+        let unexpected_server_only: Vec<_> = server_routes
+            .difference(&desktop_commands)
+            .filter(|name| !allowed_server_only.contains(*name))
+            .cloned()
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "server router is missing desktop commands: {:?}",
+            missing
+        );
+        assert!(
+            unexpected_server_only.is_empty(),
+            "server router has unexpected command routes: {:?}",
+            unexpected_server_only
+        );
     }
 }
