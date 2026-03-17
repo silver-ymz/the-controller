@@ -45,7 +45,7 @@ Key behaviors:
 - Dev restart (process killed): no cleanup runs → broker + sessions survive → app reconnects on restart
 - `CLAUDECODE` env var is removed in the env map sent to the broker's Spawn command
 
-Broker binary: installed to `~/.the-controller/bin/pty-broker` at app startup. Auto-spawned by `BrokerClient` if not running. Auto-exits after 60s idle.
+Broker binary: installed to `~/.the-controller/bin/pty-broker` at app startup. Auto-spawned by `BrokerClient` if not running. Shuts down on explicit Shutdown command or signal (SIGTERM/SIGINT).
 
 Affected files:
 - `src-tauri/src/broker_protocol.rs` — shared message types, frame encode/decode

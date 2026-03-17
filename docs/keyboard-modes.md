@@ -155,7 +155,7 @@ Press `v` again to unstage (kills the staged instance).
 - Full Vite HMR for frontend changes
 - Full cargo rebuild for backend changes
 - Independent process — doesn't affect your main Controller
-- Same tmux sessions accessible from both instances
+- PTY broker sessions persist across both instances
 
 See `docs/plans/2026-03-11-staging-separate-instance-design.md` for architecture details.
 
