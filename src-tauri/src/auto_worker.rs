@@ -31,6 +31,7 @@ const SESSION_TIMEOUT_SECS: u64 = 30 * 60; // 30 minutes
 const MAX_NUDGES: u32 = 3;
 const NUDGE_COOLDOWN_SECS: u64 = 60;
 const LABEL_PRIORITY_HIGH: &str = labels::PRIORITY_HIGH;
+const LABEL_PRIORITY_LOW: &str = labels::PRIORITY_LOW;
 const LABEL_COMPLEXITY_LOW: &str = labels::COMPLEXITY_LOW;
 const LABEL_IN_PROGRESS: &str = labels::IN_PROGRESS;
 const LABEL_ASSIGNED_TO_AUTO_WORKER: &str = labels::ASSIGNED_TO_AUTO_WORKER;
@@ -758,7 +759,7 @@ fn spawn_auto_worker_session(
             worktree_path: wt_path,
             worktree_branch: wt_branch,
             archived: false,
-            kind: "codex".to_string(),
+            kind: "claude".to_string(),
             github_issue: Some(issue.clone()),
             initial_prompt: Some(initial_prompt.clone()),
             done_commits: vec![],
@@ -771,7 +772,7 @@ fn spawn_auto_worker_session(
     pty_manager.spawn_session(
         session_id,
         &session_dir,
-        "codex",
+        "claude",
         state.emitter.clone(),
         false,
         Some(&initial_prompt),
@@ -947,16 +948,24 @@ fn cleanup_session(state: &AppState, session: &ActiveSession) {
 /// Check if an issue is eligible for auto-worker processing.
 pub fn is_eligible(issue: &GithubIssue) -> bool {
     let labels: Vec<&str> = issue.labels.iter().map(|l| l.name.as_str()).collect();
-    labels.contains(&LABEL_PRIORITY_HIGH)
+    (labels.contains(&LABEL_PRIORITY_HIGH) || labels.contains(&LABEL_PRIORITY_LOW))
         && labels.contains(&LABEL_COMPLEXITY_LOW)
         && !labels.contains(&LABEL_IN_PROGRESS)
         && !labels.contains(&LABEL_FINISHED_BY_WORKER)
         && !labels.contains(&LABEL_ASSIGNED_TO_AUTO_WORKER)
 }
 
-/// Pick the first eligible issue from a list.
+/// Pick the best eligible issue from a list.
+/// Prefers `priority:high` over `priority:low`.
 pub fn pick_eligible_issue(issues: &[GithubIssue]) -> Option<&GithubIssue> {
-    issues.iter().find(|i| is_eligible(i))
+    let eligible: Vec<&GithubIssue> = issues.iter().filter(|i| is_eligible(i)).collect();
+    let high = eligible
+        .iter()
+        .find(|i| i.labels.iter().any(|l| l.name == LABEL_PRIORITY_HIGH));
+    if let Some(issue) = high {
+        return Some(issue);
+    }
+    eligible.into_iter().next()
 }
 
 #[cfg(test)]
@@ -994,7 +1003,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_priority_high_not_eligible() {
+    fn priority_low_with_complexity_low_is_eligible() {
+        let issue = make_issue(&["priority:low", "complexity:low", "triaged"]);
+        assert!(is_eligible(&issue));
+    }
+
+    #[test]
+    fn missing_both_priorities_not_eligible() {
         let issue = make_issue(&["complexity:low", "triaged"]);
         assert!(!is_eligible(&issue));
     }
@@ -1042,6 +1057,34 @@ mod tests {
         ];
         let picked = pick_eligible_issue(&issues);
         assert!(picked.is_some());
+        // Should pick the priority:high issue even though it's second in the list
+        assert!(picked
+            .unwrap()
+            .labels
+            .iter()
+            .any(|l| l.name == "priority:high"));
+    }
+
+    #[test]
+    fn pick_eligible_prefers_high_over_low() {
+        let issues = vec![
+            make_issue(&["priority:low", "complexity:low"]),
+            make_issue(&["priority:high", "complexity:low"]),
+        ];
+        let picked = pick_eligible_issue(&issues).unwrap();
+        assert!(picked.labels.iter().any(|l| l.name == "priority:high"));
+    }
+
+    #[test]
+    fn pick_eligible_falls_back_to_low_priority() {
+        let issues = vec![make_issue(&["priority:low", "complexity:low"])];
+        let picked = pick_eligible_issue(&issues);
+        assert!(picked.is_some());
+        assert!(picked
+            .unwrap()
+            .labels
+            .iter()
+            .any(|l| l.name == "priority:low"));
     }
 
     #[test]
@@ -1189,7 +1232,7 @@ mod tests {
                 issue_title: "Already finished duplicate".to_string(),
                 repo_path: repo_path.clone(),
                 session_dir: "/tmp/the-controller/session-46".to_string(),
-                kind: "codex".to_string(),
+                kind: "claude".to_string(),
                 ordinal: 0,
                 live_session: false,
             },
@@ -1200,7 +1243,7 @@ mod tests {
                 issue_title: "Current live task".to_string(),
                 repo_path: repo_path.clone(),
                 session_dir: "/tmp/the-controller/session-51".to_string(),
-                kind: "codex".to_string(),
+                kind: "claude".to_string(),
                 ordinal: 1,
                 live_session: true,
             },
@@ -1226,7 +1269,7 @@ mod tests {
                 issue_title: "Older session".to_string(),
                 repo_path: repo_path.clone(),
                 session_dir: "/tmp/the-controller/session-46".to_string(),
-                kind: "codex".to_string(),
+                kind: "claude".to_string(),
                 ordinal: 0,
                 live_session: false,
             },
@@ -1237,7 +1280,7 @@ mod tests {
                 issue_title: "Most recent session".to_string(),
                 repo_path: repo_path.clone(),
                 session_dir: "/tmp/the-controller/session-51".to_string(),
-                kind: "codex".to_string(),
+                kind: "claude".to_string(),
                 ordinal: 1,
                 live_session: false,
             },
