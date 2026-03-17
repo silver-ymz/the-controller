@@ -31,9 +31,6 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Build sidecar binaries
-        run: ./scripts/build-sidecars.sh release
-
       - name: Build Tauri app
         run: pnpm tauri build
 

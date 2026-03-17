@@ -53,9 +53,13 @@ flate2 = "1"
 default = []
 server = ["axum", "tower-http"]
 
+# NOTE: `server` source lives outside src/bin/ to avoid Cargo auto-discovery.
+# Tauri bundles all auto-discovered bin targets and ignores `required-features`,
+# causing build failures. Build separately: cargo build --bin server --features server
+
 [[bin]]
 name = "server"
-path = "src/bin/server.rs"
+path = "src/server/main.rs"
 required-features = ["server"]
 
 [[bin]]
