@@ -1,7 +1,8 @@
 import { test, expect } from "@playwright/test";
 
-test("app loads and renders sidebar", async ({ page }) => {
+test("app loads and renders onboarding", async ({ page }) => {
   await page.goto("/");
   await expect(page).toHaveTitle("The Controller");
-  await expect(page.locator(".sidebar")).toBeVisible({ timeout: 10_000 });
+  // Fresh environment has no config, so onboarding screen renders
+  await expect(page.locator(".onboarding")).toBeVisible({ timeout: 10_000 });
 });
