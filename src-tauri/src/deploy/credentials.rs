@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -44,7 +47,8 @@ impl DeployCredentials {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let data = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, data).map_err(|e| e.to_string())?;
+        let mut file = open_credentials_file(&path).map_err(|e| e.to_string())?;
+        file.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -55,9 +59,31 @@ impl DeployCredentials {
     }
 }
 
+fn open_credentials_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    options.open(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
+    use std::env;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
     fn test_default_credentials_are_not_provisioned() {
@@ -97,5 +123,64 @@ mod tests {
         let json = serde_json::to_string(&creds).unwrap();
         let deserialized: DeployCredentials = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.hetzner_api_key, Some("test-key".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_open_credentials_file_creates_owner_only_file_on_unix() {
+        let tmp = TempDir::new().expect("temp dir");
+        let path = tmp.path().join("deploy-credentials.json");
+        let original_umask = unsafe { libc::umask(0) };
+
+        let file = open_credentials_file(&path).expect("open credentials file");
+
+        unsafe {
+            libc::umask(original_umask);
+        }
+
+        drop(file);
+
+        let mode = fs::metadata(&path)
+            .expect("stat credentials file")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_restores_owner_only_permissions_on_unix() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp = TempDir::new().expect("temp dir");
+        let original_home = env::var_os("HOME");
+        env::set_var("HOME", tmp.path());
+
+        let creds = DeployCredentials {
+            hetzner_api_key: Some("test-key".into()),
+            ..Default::default()
+        };
+
+        creds.save().expect("initial save");
+
+        let path = DeployCredentials::config_path();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("broaden permissions");
+
+        creds.save().expect("second save");
+
+        let mode = fs::metadata(&path)
+            .expect("stat credentials file")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        match original_home {
+            Some(home) => env::set_var("HOME", home),
+            None => env::remove_var("HOME"),
+        }
+
+        assert_eq!(mode, 0o600);
     }
 }
