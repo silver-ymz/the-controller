@@ -40,6 +40,21 @@ fn get_bind_address() -> String {
     std::env::var("CONTROLLER_BIND").unwrap_or_else(|_| "0.0.0.0".to_string())
 }
 
+fn startup_messages(addr: &str, token: Option<&str>) -> (Option<String>, String) {
+    match token.filter(|t| !t.is_empty()) {
+        Some(_) => {
+            (
+                Some(format!(
+                    "Server listening on http://{} (auth enabled; read CONTROLLER_AUTH_TOKEN from ~/.the-controller/server.env)",
+                    addr
+                )),
+                format!("server listening on http://{} (auth enabled)", addr),
+            )
+        }
+        None => (None, format!("server listening on http://{} (no auth)", addr)),
+    }
+}
+
 async fn shutdown_signal(state: Arc<ServerState>) {
     let ctrl_c = async { tokio::signal::ctrl_c().await.unwrap() };
 
@@ -229,15 +244,11 @@ async fn main() {
     let token = std::env::var("CONTROLLER_AUTH_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
-    match &token {
-        Some(t) => {
-            // Print token to stdout (ephemeral) — don't persist it in log files
-            let masked = format!("{}***", &t[..4.min(t.len())]);
-            println!("Server listening on http://{}?token={}", addr, t);
-            tracing::info!("server listening on http://{} (token: {})", addr, masked);
-        }
-        None => tracing::info!("server listening on http://{} (no auth)", addr),
+    let (stdout_message, log_message) = startup_messages(&addr, token.as_deref());
+    if let Some(message) = stdout_message {
+        println!("{}", message);
     }
+    tracing::info!("{}", log_message);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state))
@@ -3136,6 +3147,7 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
 
 #[cfg(test)]
 mod tests {
+    use crate::startup_messages;
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
@@ -3208,5 +3220,27 @@ mod tests {
             "server router has unexpected command routes: {:?}",
             unexpected_server_only
         );
+    }
+
+    #[test]
+    fn authenticated_startup_message_does_not_print_raw_token() {
+        let addr = "127.0.0.1:3001";
+        let token = "super-secret-token";
+
+        let (stdout_message, log_message) = startup_messages(addr, Some(token));
+
+        let stdout_message = stdout_message.expect("authenticated startup should print guidance");
+        assert!(stdout_message.contains(addr));
+        assert!(
+            !stdout_message.contains(token),
+            "stdout should not contain raw auth token"
+        );
+        assert!(
+            stdout_message.contains("server.env"),
+            "stdout should direct operators to the config file"
+        );
+
+        assert!(log_message.contains(addr));
+        assert!(!log_message.contains(token));
     }
 }
