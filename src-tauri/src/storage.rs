@@ -38,7 +38,7 @@ impl ProjectInventory {
     pub fn warn_if_corrupt(&self, context: &str) {
         for entry in &self.corrupt_entries {
             tracing::warn!(
-                "{}: failed to parse {}: {}",
+                "{}: failed to load {}: {}",
                 context,
                 entry.project_file.display(),
                 entry.error
@@ -164,7 +164,11 @@ impl Storage {
                 let json = match fs::read_to_string(&project_file) {
                     Ok(json) => json,
                     Err(e) => {
-                        eprintln!("Warning: failed to read {}: {}", project_file.display(), e);
+                        inventory.corrupt_entries.push(CorruptProjectEntry {
+                            project_dir: project_dir.clone(),
+                            project_file: project_file.clone(),
+                            error: e.to_string(),
+                        });
                         continue;
                     }
                 };
@@ -327,7 +331,17 @@ impl Storage {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json") {
-                let json = fs::read_to_string(&path)?;
+                let json = match fs::read_to_string(&path) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        tracing::warn!(
+                            "failed to read maintainer run log {}: {}",
+                            path.display(),
+                            error
+                        );
+                        continue;
+                    }
+                };
                 // Skip old-format files that fail to deserialize
                 if let Ok(log) = serde_json::from_str::<MaintainerRunLog>(&json) {
                     logs.push(log);
@@ -342,6 +356,7 @@ impl Storage {
 mod tests {
     use super::*;
     use crate::models::{IssueAction, IssueSummary, MaintainerRunLog, SessionConfig};
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     fn make_storage(tmp: &TempDir) -> Storage {
@@ -424,6 +439,41 @@ mod tests {
         assert_eq!(inventory.projects[0].name, "valid-project");
         assert_eq!(inventory.corrupt_entries.len(), 1);
         assert_eq!(inventory.corrupt_entries[0].project_file, corrupt_file);
+    }
+
+    #[test]
+    fn test_list_projects_reports_unreadable_project_json_as_corrupt() {
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+
+        let valid = make_project("valid-project", "/tmp/repo-valid");
+        storage.save_project(&valid).expect("save valid");
+
+        let unreadable_dir = storage.project_dir(Uuid::new_v4());
+        fs::create_dir_all(&unreadable_dir).expect("create unreadable dir");
+        let unreadable_file = unreadable_dir.join("project.json");
+        fs::write(&unreadable_file, "{}").expect("write unreadable project.json");
+
+        let original_permissions = fs::metadata(&unreadable_file)
+            .expect("stat unreadable project.json")
+            .permissions();
+        let mut unreadable_permissions = original_permissions.clone();
+        unreadable_permissions.set_mode(0o000);
+        fs::set_permissions(&unreadable_file, unreadable_permissions)
+            .expect("chmod unreadable project.json");
+
+        let inventory = storage.list_projects().expect("list");
+
+        fs::set_permissions(&unreadable_file, original_permissions)
+            .expect("restore unreadable project.json permissions");
+
+        assert_eq!(inventory.projects.len(), 1);
+        assert_eq!(inventory.projects[0].name, "valid-project");
+        assert_eq!(inventory.corrupt_entries.len(), 1);
+        assert_eq!(inventory.corrupt_entries[0].project_file, unreadable_file);
+        assert!(inventory.corrupt_entries[0]
+            .error
+            .contains("Permission denied"));
     }
 
     #[test]
@@ -700,5 +750,40 @@ mod tests {
         let history = storage.maintainer_run_log_history(project_id, 10).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].summary, "Filed 1 issue");
+    }
+
+    #[test]
+    fn test_run_log_history_skips_unreadable_log_files() {
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let project_id = Uuid::new_v4();
+
+        let readable_log = make_run_log(project_id, "2026-03-09T00:00:00Z");
+        storage
+            .save_maintainer_run_log(&readable_log)
+            .expect("save readable log");
+
+        let dir = storage.maintainer_run_logs_dir(project_id);
+        fs::create_dir_all(&dir).expect("create run log dir");
+        let unreadable_file = dir.join("unreadable.json");
+        fs::write(&unreadable_file, "{}").expect("write unreadable log");
+
+        let original_permissions = fs::metadata(&unreadable_file)
+            .expect("stat unreadable log")
+            .permissions();
+        let mut unreadable_permissions = original_permissions.clone();
+        unreadable_permissions.set_mode(0o000);
+        fs::set_permissions(&unreadable_file, unreadable_permissions)
+            .expect("chmod unreadable log");
+
+        let history = storage
+            .maintainer_run_log_history(project_id, 10)
+            .expect("history");
+
+        fs::set_permissions(&unreadable_file, original_permissions)
+            .expect("restore unreadable log permissions");
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, readable_log.id);
     }
 }
