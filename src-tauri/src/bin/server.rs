@@ -3,7 +3,10 @@ use axum::{
         ws::{Message, WebSocket},
         Request, State as AxumState, WebSocketUpgrade,
     },
-    http::StatusCode,
+    http::{
+        header::{HOST, ORIGIN},
+        HeaderMap, StatusCode,
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -126,6 +129,9 @@ async fn run_server() -> std::io::Result<()> {
 
     let serve_dir =
         ServeDir::new(&dist_dir).fallback(ServeFile::new(format!("{}/index.html", dist_dir)));
+    let auth_enabled = std::env::var("CONTROLLER_AUTH_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
 
     let app = Router::new()
         .route("/api/list_projects", post(list_projects))
@@ -247,16 +253,17 @@ async fn run_server() -> std::io::Result<()> {
         .route("/ws", get(ws_upgrade))
         .fallback_service(serve_dir)
         .layer(middleware::from_fn(auth_middleware))
-        .layer(CorsLayer::permissive())
         .with_state(state.clone());
+    let app = if auth_enabled.is_some() {
+        app.layer(CorsLayer::permissive())
+    } else {
+        app
+    };
 
     let port = get_port();
     let bind = get_bind_address();
     let addr = format!("{}:{}", bind, port);
-    let token = std::env::var("CONTROLLER_AUTH_TOKEN")
-        .ok()
-        .filter(|t| !t.is_empty());
-    let (stdout_message, log_message) = startup_messages(&addr, token.as_deref());
+    let (stdout_message, log_message) = startup_messages(&addr, auth_enabled.as_deref());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     if let Some(message) = stdout_message {
         println!("{}", message);
@@ -271,16 +278,20 @@ async fn run_server() -> std::io::Result<()> {
 // --- Auth middleware ---
 
 async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
-    let token = match std::env::var("CONTROLLER_AUTH_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => return Ok(next.run(req).await), // No token configured = no auth
-    };
-
-    // Skip auth for static files (non-API, non-WS)
     let path = req.uri().path();
-    if !path.starts_with("/api/") && path != "/ws" {
+    if !is_api_or_ws_path(path) {
         return Ok(next.run(req).await);
     }
+
+    let token = match std::env::var("CONTROLLER_AUTH_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => {
+            if request_origin_allowed(&req) {
+                return Ok(next.run(req).await);
+            }
+            return Err(StatusCode::FORBIDDEN);
+        }
+    };
 
     // Check Authorization header or query param
     let authorized = req
@@ -301,6 +312,37 @@ async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCod
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+fn is_api_or_ws_path(path: &str) -> bool {
+    path.starts_with("/api/") || path == "/ws"
+}
+
+fn request_origin_allowed(req: &Request) -> bool {
+    match request_origin(req.headers()) {
+        None => true,
+        Some("null") => false,
+        Some(origin) => expected_request_origin(req.headers()).as_deref() == Some(origin),
+    }
+}
+
+fn request_origin(headers: &HeaderMap) -> Option<&str> {
+    headers.get(ORIGIN).and_then(|value| value.to_str().ok())
+}
+
+fn expected_request_origin(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get(HOST)?.to_str().ok()?;
+    let proto = forwarded_proto(headers).unwrap_or("http");
+    Some(format!("{proto}://{host}"))
+}
+
+fn forwarded_proto(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 // --- Route handlers ---
@@ -3159,13 +3201,53 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::startup_messages;
+    use crate::{auth_middleware, startup_messages};
+    use axum::{middleware, routing::post, Router};
+    use reqwest::StatusCode;
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
+    use tokio::net::TcpListener;
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn source_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    async fn spawn_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test listener should expose local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+        (format!("http://{}", addr), handle)
     }
 
     fn extract_desktop_commands(source: &str) -> BTreeSet<String> {
@@ -3189,6 +3271,9 @@ mod tests {
 
     fn extract_server_routes(source: &str) -> BTreeSet<String> {
         source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("server source should have a non-test section")
             .split(".route(")
             .skip(1)
             .filter_map(|segment| {
@@ -3254,5 +3339,45 @@ mod tests {
 
         assert!(log_message.contains(addr));
         assert!(!log_message.contains(token));
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_cross_origin_api_requests_are_forbidden() {
+        let _auth_guard = EnvGuard::remove("CONTROLLER_AUTH_TOKEN");
+        let app = Router::new()
+            .route("/api/ping", post(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn(auth_middleware));
+        let (base_url, server_handle) = spawn_test_server(app).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{base_url}/api/ping"))
+            .header("Origin", "https://evil.example")
+            .send()
+            .await
+            .expect("cross-origin request should complete");
+
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_same_origin_api_requests_are_allowed() {
+        let _auth_guard = EnvGuard::remove("CONTROLLER_AUTH_TOKEN");
+        let app = Router::new()
+            .route("/api/ping", post(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn(auth_middleware));
+        let (base_url, server_handle) = spawn_test_server(app).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("{base_url}/api/ping"))
+            .header("Origin", &base_url)
+            .send()
+            .await
+            .expect("same-origin request should complete");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        server_handle.abort();
     }
 }
