@@ -15,7 +15,6 @@ Install prerequisites:
 
 - [Rust](https://rustup.rs/) + Tauri v2
 - [Node.js](https://nodejs.org/) + pnpm
-- tmux (`brew install tmux`)
 - espeak-ng (`brew install espeak-ng`) — required for voice mode TTS
 
 Then:
@@ -34,18 +33,6 @@ cd src-tauri && cargo clippy -- -D warnings
 ```
 
 `pnpm check` is a real gate in this repo. Do not ignore warnings and do not assume Rust formatting is already clean.
-
-### tmux Configuration
-
-If you use Claude Code inside tmux to develop this project, add the following to `~/.tmux.conf` for a cleaner UI:
-
-```
-set -g status off
-```
-
-Reload with `tmux source-file ~/.tmux.conf`.
-
-`status off` hides the tmux status bar for a cleaner UI.
 
 ## Secure Env CLI
 
@@ -105,7 +92,7 @@ Desktop-only features (clipboard image copy, app screenshot, voice pipeline) ret
 
 ### Deploy to a Linux Server
 
-The server runs directly on the host (not in a container) because sessions need access to host projects and tools like `claude`, `git`, `tmux`.
+The server runs directly on the host (not in a container) because sessions need access to host projects and tools like `claude` and `git`.
 
 ```bash
 # Build, install to ~/.the-controller, set up user systemd + optional Caddy HTTPS
@@ -177,7 +164,7 @@ Not sure what a feature does or how something works? Just ask Claude. The defaul
 Or browse the docs directly:
 
 - [Keyboard Shortcuts & Modes](docs/keyboard-modes.md) — all hotkeys, workspace modes, and how to stage/preview changes
-- [Domain Knowledge](docs/domain-knowledge.md) — hard-won lessons about Tauri, tmux, session architecture, and server mode
+- [Domain Knowledge](docs/domain-knowledge.md) — hard-won lessons about Tauri, PTY broker, session architecture, and server mode
 - [Demo Recording](docs/demo.md) — how to record demos of The Controller
 
 ## Caveats
