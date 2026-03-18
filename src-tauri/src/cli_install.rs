@@ -78,11 +78,16 @@ pub fn install_controller_cli() {
         // Check if the bundle binary matches this app build
         if let Some(source_date) = installed_build_date(&source) {
             if source_date != our_build_date {
-                tracing::warn!(
-                    "{} in bundle is stale (bundle: {}, app: {}), skipping install",
+                tracing::error!(
+                    binary = binary_name,
+                    bundle_date = source_date,
+                    app_date = our_build_date,
+                    "STALE BINARY: {} in bundle was built on {} but app was built on {}. \
+                     Run `cargo build --release --bin {}` and rebuild the app.",
                     binary_name,
                     source_date,
-                    our_build_date
+                    our_build_date,
+                    binary_name,
                 );
                 continue;
             }

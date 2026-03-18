@@ -515,6 +515,11 @@ fn main() {
     // lock we exit immediately without forking, preventing zombie daemons.
     // The flock is per open-file-description and survives fork(), so the
     // grandchild (daemon) inherits the lock after the double-fork.
+    //
+    // The spawning client (broker_client) briefly holds its own LOCK_EX on
+    // this file while it spawns us. Since flock is per open-file-description,
+    // our fd is independent — we retry a few times to let the client release
+    // its lock before concluding that another long-lived broker is running.
     let lock_path = socket_dir.join("pty-broker.lock");
     let lock_file = match std::fs::OpenOptions::new()
         .create(true)
@@ -528,17 +533,27 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let lock_ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if lock_ret != 0 {
+    let mut locked = false;
+    for attempt in 0..30 {
+        let lock_ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if lock_ret == 0 {
+            locked = true;
+            break;
+        }
         let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            // Another broker already holds the lock — exit immediately.
-            // No daemon forked, no runtime created, no resources to leak.
-            std::process::exit(0);
-        } else {
+        if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
             eprintln!("flock failed: {}", err);
             std::process::exit(1);
         }
+        // If a control socket already exists, a running broker holds the lock.
+        if attempt > 0 && socket_dir.join("pty-broker.sock").exists() {
+            std::process::exit(0);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !locked {
+        // After 3s the lock is still held — another broker is running or stuck.
+        std::process::exit(0);
     }
 
     // Daemonize BEFORE creating the tokio runtime — fork invalidates

@@ -248,18 +248,9 @@ impl BrokerClient {
     }
 
     /// Spawn the broker binary as a daemon.
-    /// Uses a lock file to prevent multiple concurrent spawns.
-    ///
-    /// The lock is acquired non-blocking: if another broker (or spawner) already
-    /// holds it, we skip spawning and let `connect_control()`'s retry loop wait
-    /// for the existing broker to become ready.
-    ///
-    /// Crucially, we hold the lock **until the control socket appears**, not just
-    /// until the child is spawned. The broker daemon (a double-forked grandchild)
-    /// acquires its own `LOCK_EX` on the same file before binding the control
-    /// socket. By holding our lock until the socket exists, we close the race
-    /// window where a second spawner could slip in between our `drop(lock)` and
-    /// the daemon's `flock()`.
+    /// Uses a lock file to prevent multiple concurrent spawns. The lock is
+    /// released immediately after spawning so the broker can acquire it
+    /// (the broker retries lock acquisition for up to 3s).
     fn spawn_broker(&self) -> io::Result<()> {
         let binary = Self::broker_binary_path().ok_or_else(|| {
             tracing::error!("pty-broker binary path could not be determined");
@@ -303,24 +294,11 @@ impl BrokerClient {
             .stderr(std::process::Stdio::null())
             .spawn()?;
 
-        // Hold the lock until the control socket appears (proof the daemon is
-        // ready and has acquired its own lock) or we time out. This prevents a
-        // second spawner from entering spawn_broker() before the daemon's
-        // flock() succeeds.
-        let control_path = self.control_socket_path();
-        let mut socket_appeared = false;
-        for _ in 0..40 {
-            if control_path.exists() {
-                socket_appeared = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        if !socket_appeared {
-            tracing::warn!("broker control socket did not appear within 2s after spawn");
-        }
-
+        // Release the lock immediately so the broker daemon can acquire it.
+        // The broker retries lock acquisition for up to 3s. The retry loop
+        // in connect_control() handles waiting for the socket to appear.
         drop(lock_file);
+
         Ok(())
     }
 
