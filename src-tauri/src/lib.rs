@@ -198,12 +198,8 @@ pub fn run() {
                         }
                     }
                 }
-                // In release builds, shut down the broker so sessions don't linger.
-                // In dev builds, let the broker + sessions survive so they
-                // reattach after cargo-watch restarts the app.
-                if cfg!(not(debug_assertions)) {
-                    let _ = broker_client::BrokerClient::new().shutdown();
-                }
+                // The broker is a persistent daemon — never shut it down on app exit.
+                // Sessions survive and reattach when the app restarts.
             }
         });
 }

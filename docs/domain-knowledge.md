@@ -41,8 +41,8 @@ Sessions use a PTY broker daemon for process persistence. Single-layer PTY:
 Key behaviors:
 - `spawn_session`: sends Spawn to broker (if not exists) + connects data socket
 - `close_session`: sends Kill to broker
-- Intentional quit (`RunEvent::ExitRequested`): sends Shutdown to broker (release builds only)
-- Dev restart (process killed): no cleanup runs → broker + sessions survive → app reconnects on restart
+- App exit (`RunEvent::ExitRequested`): broker is **never** shut down — it is a persistent daemon that outlives the app
+- App restart: broker + sessions survive → app reconnects on restart
 - `CLAUDECODE` env var is removed in the env map sent to the broker's Spawn command
 
 Broker binary: installed to `~/.the-controller/bin/pty-broker` at app startup. Auto-spawned by `BrokerClient` if not running. Shuts down on explicit Shutdown command or signal (SIGTERM/SIGINT).
@@ -52,7 +52,7 @@ Affected files:
 - `src-tauri/src/broker_client.rs` — client-side broker communication
 - `src-tauri/src/bin/pty_broker.rs` — the daemon binary
 - `src-tauri/src/pty_manager.rs` — `spawn_session`, `close_session`, `resize_session`
-- `src-tauri/src/lib.rs` — exit handler that shuts down broker
+- `src-tauri/src/lib.rs` — exit handler (cleans up staged sessions; broker is never shut down)
 
 ## Shell Environment Inheritance (macOS GUI)
 

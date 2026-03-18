@@ -249,6 +249,17 @@ impl BrokerClient {
 
     /// Spawn the broker binary as a daemon.
     /// Uses a lock file to prevent multiple concurrent spawns.
+    ///
+    /// The lock is acquired non-blocking: if another broker (or spawner) already
+    /// holds it, we skip spawning and let `connect_control()`'s retry loop wait
+    /// for the existing broker to become ready.
+    ///
+    /// Crucially, we hold the lock **until the control socket appears**, not just
+    /// until the child is spawned. The broker daemon (a double-forked grandchild)
+    /// acquires its own `LOCK_EX` on the same file before binding the control
+    /// socket. By holding our lock until the socket exists, we close the race
+    /// window where a second spawner could slip in between our `drop(lock)` and
+    /// the daemon's `flock()`.
     fn spawn_broker(&self) -> io::Result<()> {
         let binary = Self::broker_binary_path().ok_or_else(|| {
             tracing::error!("pty-broker binary path could not be determined");
@@ -265,9 +276,6 @@ impl BrokerClient {
 
         let _ = std::fs::create_dir_all(&self.socket_dir);
 
-        // Try to acquire the lock file non-blocking. If another broker (or spawner)
-        // already holds it, skip spawning — the retry loop in connect_control()
-        // will wait for the existing broker to become ready.
         let lock_file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -278,7 +286,6 @@ impl BrokerClient {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
                 // Lock is held — another broker is already starting or running.
-                // Drop the fd and let the connect retry loop handle it.
                 tracing::warn!("spawn lock already held, another broker spawn is in progress");
                 return Ok(());
             } else {
@@ -286,9 +293,6 @@ impl BrokerClient {
                 return Err(err);
             }
         }
-        // We hold the lock briefly to prevent concurrent spawns.
-        // The broker process itself will acquire the lock on startup,
-        // so we release ours immediately after spawning.
 
         tracing::info!(path = %binary.display(), "spawning broker binary");
         std::process::Command::new(&binary)
@@ -299,9 +303,24 @@ impl BrokerClient {
             .stderr(std::process::Stdio::null())
             .spawn()?;
 
-        // Drop the lock file fd — the broker will acquire its own lock.
-        drop(lock_file);
+        // Hold the lock until the control socket appears (proof the daemon is
+        // ready and has acquired its own lock) or we time out. This prevents a
+        // second spawner from entering spawn_broker() before the daemon's
+        // flock() succeeds.
+        let control_path = self.control_socket_path();
+        let mut socket_appeared = false;
+        for _ in 0..40 {
+            if control_path.exists() {
+                socket_appeared = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !socket_appeared {
+            tracing::warn!("broker control socket did not appear within 2s after spawn");
+        }
 
+        drop(lock_file);
         Ok(())
     }
 
