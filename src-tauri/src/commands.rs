@@ -945,7 +945,9 @@ pub(crate) async fn stage_session_core(
             .find(|s| s.session_id == session_id)
         {
             #[cfg(unix)]
-            let alive = unsafe { libc::kill(existing.pid as i32, 0) } == 0;
+            let alive = i32::try_from(existing.pid)
+                .map(|pid| unsafe { libc::kill(pid, 0) } == 0)
+                .unwrap_or(false);
             #[cfg(not(unix))]
             let alive = false;
             if alive {
