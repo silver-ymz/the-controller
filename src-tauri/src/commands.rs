@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::architecture::{generate_architecture_blocking_with_emitter, ArchitectureResult};
 use crate::config;
 use crate::models::{AutoWorkerQueueIssue, CommitInfo, GithubIssue, Project};
+use crate::service;
 use crate::state::AppState;
 use crate::storage::ProjectInventory;
 use crate::terminal_theme;
@@ -1025,9 +1026,7 @@ pub async fn save_note_image(
 ) -> Result<String, String> {
     let storage = state.storage.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let base_dir = storage.lock().map_err(|e| e.to_string())?.base_dir();
-        crate::notes::save_note_image(&base_dir, &folder, &image_bytes, &extension)
-            .map_err(|e| e.to_string())
+        service::save_note_image(&storage, &folder, &image_bytes, &extension).map_err(Into::into)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1041,10 +1040,7 @@ pub async fn resolve_note_asset_path(
 ) -> Result<String, String> {
     let storage = state.storage.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let base_dir = storage.lock().map_err(|e| e.to_string())?.base_dir();
-        crate::notes::resolve_note_asset_path(&base_dir, &folder, &relative_path)
-            .map(|p| p.to_string_lossy().to_string())
-            .map_err(|e| e.to_string())
+        service::resolve_note_asset_path(&storage, &folder, &relative_path).map_err(Into::into)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1057,14 +1053,9 @@ pub async fn send_note_ai_chat(
     conversation_history: Vec<crate::note_ai_chat::NoteAiChatMessage>,
     prompt: String,
 ) -> Result<crate::note_ai_chat::NoteAiResponse, String> {
-    crate::note_ai_chat::send_note_ai_message(
-        std::env::temp_dir().to_string_lossy().to_string(),
-        note_content,
-        selected_text,
-        conversation_history,
-        prompt,
-    )
-    .await
+    service::send_note_ai_chat(note_content, selected_text, conversation_history, prompt)
+        .await
+        .map_err(Into::into)
 }
 const MAX_MERGE_RETRIES: u32 = 5;
 const REBASE_POLL_INTERVAL_SECS: u64 = 3;

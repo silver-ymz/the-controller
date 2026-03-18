@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use the_controller_lib::{
     architecture, auto_worker, commands, config, deploy, emitter::WsBroadcastEmitter, maintainer,
-    models, note_ai_chat, notes, secure_env, service, session_args, state::AppState, status_socket,
+    models, note_ai_chat, secure_env, service, session_args, state::AppState, status_socket,
     token_usage, voice,
 };
 
@@ -1132,28 +1132,14 @@ async fn send_note_ai_chat(Json(args): Json<Value>) -> Result<Json<Value>, (Stat
     let conversation_history: Vec<note_ai_chat::NoteAiChatMessage> =
         serde_json::from_value(args["conversationHistory"].clone()).unwrap_or_default();
 
-    let response = note_ai_chat::send_note_ai_message(
-        std::env::temp_dir().to_string_lossy().to_string(),
-        note_content,
-        selected_text,
-        conversation_history,
-        prompt,
-    )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let response =
+        service::send_note_ai_chat(note_content, selected_text, conversation_history, prompt)
+            .await
+            .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(serde_json::to_value(response).unwrap()))
 }
 // --- Notes ---
-
-fn server_try_commit(state: &Arc<ServerState>, message: &str) {
-    if let Ok(storage) = state.app.storage.lock() {
-        let base_dir = storage.base_dir();
-        if let Err(e) = notes::commit_notes(&base_dir, message) {
-            tracing::error!("notes git commit failed: {}", e);
-        }
-    }
-}
 
 async fn api_list_notes(
     AxumState(state): AxumState<Arc<ServerState>>,
@@ -1163,14 +1149,8 @@ async fn api_list_notes(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let entries = notes::list_notes(&base_dir, &folder)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let entries =
+        service::list_notes(&state.app.storage, &folder).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(entries).unwrap()))
 }
 
@@ -1186,14 +1166,8 @@ async fn api_read_note(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing filename".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let content = notes::read_note(&base_dir, &folder, &filename)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let content = service::read_note(&state.app.storage, &folder, &filename)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(content).unwrap()))
 }
 
@@ -1213,14 +1187,8 @@ async fn api_write_note(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing content".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::write_note(&base_dir, &folder, &filename, &content)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    service::write_note(&state.app.storage, &folder, &filename, &content)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1236,15 +1204,8 @@ async fn api_create_note(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing title".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let filename = notes::create_note(&base_dir, &folder, &title)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(&state, &format!("create {}/{}", folder, filename));
+    let filename = service::create_note(&state.app.storage, &folder, &title)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(filename).unwrap()))
 }
 
@@ -1260,15 +1221,8 @@ async fn api_delete_note(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing filename".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::delete_note(&base_dir, &folder, &filename)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(&state, &format!("delete {}/{}", folder, filename));
+    service::delete_note(&state.app.storage, &folder, &filename)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1288,18 +1242,8 @@ async fn api_rename_note(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing newName".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let filename = notes::rename_note(&base_dir, &folder, &old_name, &new_name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(
-        &state,
-        &format!("rename {}/{} → {}", folder, old_name, filename),
-    );
+    let filename = service::rename_note(&state.app.storage, &folder, &old_name, &new_name)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(filename).unwrap()))
 }
 
@@ -1307,14 +1251,8 @@ async fn api_list_folders(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(_args): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let folders = notes::list_folders(&base_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let folders =
+        service::list_note_folders(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(folders).unwrap()))
 }
 
@@ -1326,15 +1264,7 @@ async fn api_create_folder(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::create_folder(&base_dir, &name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(&state, &format!("create folder {}", name));
+    service::create_note_folder(&state.app.storage, &name).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1350,18 +1280,8 @@ async fn api_rename_folder(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing newName".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::rename_folder(&base_dir, &old_name, &new_name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(
-        &state,
-        &format!("rename folder {} → {}", old_name, new_name),
-    );
+    service::rename_note_folder(&state.app.storage, &old_name, &new_name)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1374,29 +1294,16 @@ async fn api_delete_folder(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
         .to_string();
     let force = args["force"].as_bool().unwrap_or(false);
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::delete_folder(&base_dir, &name, force)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(&state, &format!("delete folder {}", name));
+    service::delete_note_folder(&state.app.storage, &name, force)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn api_commit_notes(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let committed = notes::commit_notes(&base_dir, "update notes")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let committed =
+        service::commit_pending_notes(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(committed).unwrap()))
 }
 
@@ -2863,14 +2770,8 @@ async fn api_save_note_image(
             format!("invalid imageBytes: {}", e),
         )
     })?;
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let filename = notes::save_note_image(&base_dir, &folder, &image_bytes, &extension)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let filename = service::save_note_image(&state.app.storage, &folder, &image_bytes, &extension)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(filename)))
 }
 
@@ -2886,15 +2787,8 @@ async fn api_resolve_note_asset_path(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing relativePath".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let resolved = notes::resolve_note_asset_path(&base_dir, &folder, &relative_path)
-        .map(|p| p.to_string_lossy().to_string())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let resolved = service::resolve_note_asset_path(&state.app.storage, &folder, &relative_path)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(resolved)))
 }
 
@@ -2910,18 +2804,8 @@ async fn api_duplicate_note(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing filename".to_string()))?
         .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let copy = notes::duplicate_note(&base_dir, &folder, &filename)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(
-        &state,
-        &format!("duplicate {}/{} → {}", folder, filename, copy),
-    );
+    let copy = service::duplicate_note(&state.app.storage, &folder, &filename)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(copy).unwrap()))
 }
 
