@@ -17,7 +17,7 @@ const PRIORITY_LOW_LABEL: &str = labels::PRIORITY_LOW;
 const PRIORITY_HIGH_LABEL: &str = labels::PRIORITY_HIGH;
 const COMPLEXITY_LOW_LABEL: &str = labels::COMPLEXITY_LOW;
 const COMPLEXITY_HIGH_LABEL: &str = labels::COMPLEXITY_HIGH;
-const CODEX_EXEC_TIMEOUT: Duration = Duration::from_secs(120);
+const MAINTAINER_EXEC_TIMEOUT: Duration = Duration::from_secs(120);
 
 const STOPWORDS: &[&str] = &[
     "a",
@@ -330,7 +330,7 @@ fn parse_findings_output(output: &str) -> Result<FindingsOutput, String> {
 
     tracing::debug!(
         raw_findings = raw.findings.len(),
-        "parsed raw findings from codex output"
+        "parsed raw findings from model output"
     );
 
     let mut findings = Vec::with_capacity(raw.findings.len());
@@ -1009,11 +1009,9 @@ pub fn run_maintainer_check(
         "building issue-filing prompt"
     );
     let prompt = build_issue_filing_prompt(repo_path, github_repo);
-    let mut command = Command::new("codex");
+    let mut command = Command::new("claude");
     command
-        .arg("exec")
-        .arg("--sandbox")
-        .arg("danger-full-access")
+        .arg("--print")
         .arg(&prompt)
         .current_dir(repo_path)
         .env_remove("CLAUDECODE")
@@ -1024,32 +1022,32 @@ pub fn run_maintainer_check(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    tracing::debug!(project_id = %project_id, "spawning codex exec subprocess");
+    tracing::debug!(project_id = %project_id, "spawning claude --print subprocess");
     let mut child = command.spawn().map_err(|e| {
-        tracing::error!(project_id = %project_id, error = %e, "failed to spawn codex exec");
-        format!("Failed to run codex exec: {}", e)
+        tracing::error!(project_id = %project_id, error = %e, "failed to spawn claude --print");
+        format!("Failed to run claude --print: {}", e)
     })?;
 
     let started_at = Instant::now();
     let status = loop {
         if let Some(status) = child
             .try_wait()
-            .map_err(|e| format!("Failed to wait for codex exec: {}", e))?
+            .map_err(|e| format!("Failed to wait for claude --print: {}", e))?
         {
             break status;
         }
 
-        if started_at.elapsed() >= CODEX_EXEC_TIMEOUT {
+        if started_at.elapsed() >= MAINTAINER_EXEC_TIMEOUT {
             tracing::error!(
                 project_id = %project_id,
-                timeout_secs = CODEX_EXEC_TIMEOUT.as_secs(),
-                "codex exec timed out, terminating process"
+                timeout_secs = MAINTAINER_EXEC_TIMEOUT.as_secs(),
+                "claude --print timed out, terminating process"
             );
             terminate_maintainer_process(&mut child);
             let _ = child.wait();
             return Err(format!(
-                "codex exec timed out after {} seconds",
-                CODEX_EXEC_TIMEOUT.as_secs()
+                "claude --print timed out after {} seconds",
+                MAINTAINER_EXEC_TIMEOUT.as_secs()
             ));
         }
 
@@ -1078,11 +1076,11 @@ pub fn run_maintainer_check(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!(project_id = %project_id, "codex exec returned non-zero exit status");
-        return Err(format!("codex exec failed: {}", stderr));
+        tracing::error!(project_id = %project_id, "claude --print returned non-zero exit status");
+        return Err(format!("claude --print failed: {}", stderr));
     }
 
-    tracing::debug!(project_id = %project_id, "codex exec completed, parsing findings");
+    tracing::debug!(project_id = %project_id, "claude --print completed, parsing findings");
     let findings_output = parse_findings_output(&String::from_utf8_lossy(&output.stdout))?;
     let filtered_findings = filter_semantic_findings(findings_output.findings);
     tracing::debug!(
