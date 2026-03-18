@@ -29,6 +29,12 @@ impl AudioOutput {
             return Ok(());
         }
 
+        tracing::debug!(
+            sample_count = samples.len(),
+            sample_rate,
+            "starting blocking audio playback"
+        );
+
         let device = self.device()?;
         let default_config = device
             .default_output_config()
@@ -105,6 +111,7 @@ impl AudioOutput {
     /// Start a streaming audio output. Audio can be pushed incrementally via the returned handle.
     /// The cpal stream outputs silence when the buffer is empty (between chunks).
     pub fn start_streaming(&self, source_sample_rate: u32) -> Result<StreamingPlayback, String> {
+        tracing::debug!(source_sample_rate, "starting streaming audio playback");
         let device = self.device()?;
         let default_config = device
             .default_output_config()
@@ -202,6 +209,7 @@ impl StreamingPlayback {
 
     /// Signal that no more audio will be pushed and wait for playback to drain.
     pub fn finish(self) {
+        tracing::debug!("streaming playback finishing, waiting for drain");
         self.done_writing.store(true, Ordering::Relaxed);
         while !self.done_playing.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -216,6 +224,7 @@ impl StreamingPlayback {
 
     /// Cancel playback immediately — clear the buffer and signal done.
     pub fn cancel(self) {
+        tracing::debug!("streaming playback cancelled");
         {
             let mut buf = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
             buf.clear();

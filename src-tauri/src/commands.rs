@@ -231,6 +231,7 @@ fn rollback_scaffold_state(repo_path: &Path, error: String) -> String {
 }
 
 pub fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Project, String> {
+    tracing::info!(project_name = %name, repo_path = %repo_path.display(), "scaffolding project on disk");
     let parent_dir = repo_path
         .parent()
         .ok_or_else(|| format!("Invalid repo path: {}", repo_path.display()))?;
@@ -338,6 +339,7 @@ pub fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Pro
 /// can attach at the correct size.
 #[tauri::command]
 pub async fn restore_sessions(state: State<'_, AppState>) -> Result<(), String> {
+    tracing::info!("restoring sessions from storage");
     let storage = state.storage.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let storage = storage.lock().map_err(|e| e.to_string())?;
@@ -380,9 +382,11 @@ pub async fn connect_session(
     {
         let pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
         if pty_manager.sessions.contains_key(&id) {
+            tracing::debug!(session_id = %id, "session already connected, skipping");
             return Ok(());
         }
     }
+    tracing::info!(session_id = %id, rows, cols, "connecting session to PTY");
 
     // Find session config from storage
     let (session_dir, kind) = {
@@ -415,7 +419,10 @@ pub async fn connect_session(
         mgr.spawn_session(id, &session_dir, &kind, emitter, true, None, rows, cols)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| {
+        tracing::error!(session_id = %id, error = %e, "failed to connect session");
+        format!("Task failed: {}", e)
+    })?
 }
 
 #[tauri::command]
@@ -424,10 +431,12 @@ pub fn create_project(
     name: String,
     repo_path: String,
 ) -> Result<Project, String> {
+    tracing::info!(project_name = %name, repo_path = %repo_path, "creating project");
     validate_project_name(&name)?;
 
     let path = Path::new(&repo_path);
     if !path.is_dir() {
+        tracing::error!(repo_path = %repo_path, "create_project: repo_path is not a directory");
         return Err(format!("repo_path is not a directory: {}", repo_path));
     }
 
@@ -437,6 +446,7 @@ pub fn create_project(
     if let Ok(inventory) = storage.list_projects() {
         let existing = inventory.projects;
         if existing.iter().any(|p| p.name == name) {
+            tracing::warn!(project_name = %name, "create_project: duplicate project name");
             return Err(format!("A project named '{}' already exists", name));
         }
     }
@@ -476,16 +486,19 @@ pub fn load_project(
     name: String,
     repo_path: String,
 ) -> Result<Project, String> {
+    tracing::info!(project_name = %name, repo_path = %repo_path, "loading project");
     validate_project_name(&name)?;
 
     let path = Path::new(&repo_path);
     if !path.is_dir() {
+        tracing::error!(repo_path = %repo_path, "load_project: repo_path is not a directory");
         return Err(format!("repo_path is not a directory: {}", repo_path));
     }
 
     // Validate it's a git repo
     let git_dir = path.join(".git");
     if !git_dir.exists() {
+        tracing::error!(repo_path = %repo_path, "load_project: not a git repository");
         return Err(format!("not a git repository: {}", repo_path));
     }
 
@@ -534,6 +547,7 @@ pub fn load_project(
 
 #[tauri::command]
 pub fn list_projects(state: State<AppState>) -> Result<ProjectInventory, String> {
+    tracing::debug!("listing projects");
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     let inventory = storage.list_projects().map_err(|e| e.to_string())?;
     Ok(inventory)
@@ -545,6 +559,7 @@ pub async fn delete_project(
     project_id: String,
     delete_repo: bool,
 ) -> Result<(), String> {
+    tracing::info!(project_id = %project_id, delete_repo, "deleting project");
     let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
 
     let storage = state.storage.clone();
@@ -617,6 +632,15 @@ pub async fn create_session(
     let background = background.unwrap_or(false);
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_id = Uuid::new_v4();
+    tracing::info!(
+        session_id = %session_id,
+        project_id = %project_uuid,
+        kind = %kind,
+        background,
+        has_github_issue = github_issue.is_some(),
+        has_initial_prompt = initial_prompt.is_some(),
+        "creating session"
+    );
 
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
@@ -709,6 +733,7 @@ pub async fn create_session(
         };
 
         if let Err(ref spawn_err) = spawn_result {
+            tracing::error!(session_id = %session_id, error = %spawn_err, "session PTY spawn failed, rolling back");
             // Rollback: remove session from storage
             if let Ok(storage) = storage.lock() {
                 if let Ok(mut project) = storage.load_project(project_uuid) {
@@ -768,6 +793,7 @@ pub fn resize_pty(
     cols: u16,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    tracing::debug!(session_id = %id, rows, cols, "resizing PTY");
     let pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
     pty_manager.resize_session(id, rows, cols)
 }
@@ -803,6 +829,7 @@ pub async fn submit_secure_env_value(
     request_id: String,
     value: String,
 ) -> Result<String, String> {
+    tracing::debug!(request_id = %request_id, "submitting secure env value");
     let (pending, response_tx) =
         crate::secure_env::take_secure_env_submission(&state, &request_id)?;
     let request_id_for_blocking = request_id.clone();
@@ -857,6 +884,7 @@ fn find_staging_port(base_port: u16) -> Result<u16, String> {
 /// Kill a process group by PID. Sends SIGTERM to the group, then SIGKILL after 2s
 /// if the group is still alive.
 pub fn kill_process_group(pid: u32) {
+    tracing::debug!(pid, "killing process group");
     #[cfg(unix)]
     {
         use libc::{kill, SIGKILL, SIGTERM};
@@ -891,6 +919,7 @@ pub async fn stage_session(
 
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    tracing::info!(session_id = %session_uuid, project_id = %project_uuid, "staging session");
 
     let _staging_guard = state.staging_lock.lock().await;
 
@@ -902,6 +931,7 @@ pub async fn stage_session(
             .map_err(|e| e.to_string())?;
 
         if project.name != "the-controller" {
+            tracing::warn!(project_name = %project.name, "staging rejected: only supported for the-controller");
             return Err("Staging is only supported for the-controller".to_string());
         }
 
@@ -914,6 +944,10 @@ pub async fn stage_session(
             #[cfg(not(unix))]
             let alive = false;
             if alive {
+                tracing::warn!(
+                    pid = staged.pid,
+                    "stage_session: another session already staged and alive"
+                );
                 return Err("A session is already staged — unstage it first".to_string());
             }
             // Stale record — kill orphaned children (e.g. Vite, esbuild that outlived
@@ -980,6 +1014,7 @@ pub async fn stage_session(
                 }
             }
             if !committed {
+                tracing::error!(session_id = %session_uuid, "stage_session: timed out waiting for commit");
                 return Err(
                     "Timed out waiting for commit. Please commit manually and retry.".to_string(),
                 );
@@ -1045,6 +1080,7 @@ pub async fn stage_session(
                     }
                 }
                 if !resolved {
+                    tracing::error!(session_id = %session_uuid, "stage_session: timed out waiting for rebase conflict resolution");
                     return Err("Timed out waiting for rebase conflict resolution.".to_string());
                 }
             }
@@ -1107,6 +1143,7 @@ pub async fn stage_session(
         .map_err(|e| format!("Failed to spawn staged instance: {}", e))?;
 
     let pid = child.id();
+    tracing::info!(session_id = %session_uuid, pid, port, "staged instance spawned");
     // Reap the child in a background thread to prevent zombie entries.
     // We manage the process lifetime via PID/process group (kill_process_group),
     // not via this Child handle.
@@ -1131,6 +1168,7 @@ pub async fn stage_session(
     })();
 
     if let Err(e) = save_result {
+        tracing::error!(pid, error = %e, "stage_session: failed to save staged session, killing orphan process");
         kill_process_group(pid);
         return Err(e);
     }
@@ -1141,6 +1179,7 @@ pub async fn stage_session(
 #[tauri::command]
 pub fn unstage_session(state: State<AppState>, project_id: String) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    tracing::info!(project_id = %project_uuid, "unstaging session");
 
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     let mut project = storage
@@ -1266,6 +1305,7 @@ pub fn close_session(
 ) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    tracing::info!(session_id = %session_uuid, project_id = %project_uuid, delete_worktree, "closing session");
 
     // Try to close the PTY session even if the terminal is already gone.
     {
@@ -1305,6 +1345,7 @@ pub async fn start_claude_login(
     state: State<'_, AppState>,
     _app_handle: AppHandle,
 ) -> Result<String, String> {
+    tracing::info!("starting Claude login session");
     let session_id = Uuid::new_v4();
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
@@ -1341,8 +1382,10 @@ pub fn check_onboarding(state: State<AppState>) -> Result<Option<config::Config>
 
 #[tauri::command]
 pub fn save_onboarding_config(state: State<AppState>, projects_root: String) -> Result<(), String> {
+    tracing::debug!(projects_root = %projects_root, "saving onboarding config");
     let path = Path::new(&projects_root);
     if !path.is_dir() {
+        tracing::error!(projects_root = %projects_root, "save_onboarding_config: not an existing directory");
         return Err(format!(
             "projects_root is not an existing directory: {}",
             projects_root
@@ -1424,6 +1467,7 @@ pub async fn generate_architecture(repo_path: String) -> Result<ArchitectureResu
 
 #[tauri::command]
 pub async fn scaffold_project(state: State<'_, AppState>, name: String) -> Result<Project, String> {
+    tracing::info!(project_name = %name, "scaffolding new project");
     validate_project_name(&name)?;
 
     let repo_path = {
@@ -1697,6 +1741,7 @@ pub async fn merge_session_branch(
 ) -> Result<crate::models::MergeResponse, String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    tracing::info!(session_id = %session_uuid, project_id = %project_uuid, "merging session branch");
 
     let (repo_path, worktree_path, branch_name) = {
         let storage = state.storage.lock().map_err(|e| e.to_string())?;
@@ -1737,9 +1782,11 @@ pub async fn merge_session_branch(
 
         match result {
             crate::worktree::MergeResult::PrCreated(url) => {
+                tracing::info!(session_id = %session_uuid, url = %url, "PR created");
                 return Ok(crate::models::MergeResponse::PrCreated { url });
             }
             crate::worktree::MergeResult::RebaseConflicts => {
+                tracing::warn!(session_id = %session_uuid, attempt = attempt + 1, max = MAX_MERGE_RETRIES, "rebase conflicts during merge, asking Claude to resolve");
                 // Send a prompt to Claude to resolve conflicts
                 let prompt = "merge\r";
                 {
@@ -1782,6 +1829,7 @@ pub async fn merge_session_branch(
         }
     }
 
+    tracing::error!(session_id = %session_uuid, attempts = MAX_MERGE_RETRIES, "merge failed after max retries due to recurring conflicts");
     Err(format!(
         "Merge failed after {} attempts due to recurring conflicts",
         MAX_MERGE_RETRIES
@@ -1934,6 +1982,7 @@ pub async fn configure_maintainer(
     interval_minutes: u64,
     github_repo: Option<String>,
 ) -> Result<(), String> {
+    tracing::debug!(project_id = %project_id, enabled, interval_minutes, "configuring maintainer");
     validate_maintainer_interval(interval_minutes)?;
     let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
@@ -1953,6 +2002,7 @@ pub async fn configure_auto_worker(
     project_id: String,
     enabled: bool,
 ) -> Result<(), String> {
+    tracing::debug!(project_id = %project_id, enabled, "configuring auto worker");
     let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     let mut project = storage
@@ -2089,6 +2139,7 @@ pub async fn trigger_maintainer_check(
     _app_handle: AppHandle,
     project_id: String,
 ) -> Result<crate::models::MaintainerRunLog, String> {
+    tracing::info!(project_id = %project_id, "triggering maintainer check");
     let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
 
     let (repo_path, github_repo) = {
@@ -2109,6 +2160,7 @@ pub async fn trigger_maintainer_check(
     let log = match run_maintainer_check_spawn_blocking(repo_path, project_id, github_repo).await {
         Ok(log) => log,
         Err(e) => {
+            tracing::error!(project_id = %project_id, error = %e, "maintainer check failed");
             let _ = state
                 .emitter
                 .emit(&format!("maintainer-status:{}", project_id), "error");
@@ -2139,6 +2191,7 @@ pub async fn clear_maintainer_reports(
     _app_handle: AppHandle,
     project_id: String,
 ) -> Result<(), String> {
+    tracing::debug!(project_id = %project_id, "clearing maintainer reports");
     let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     storage
@@ -2208,8 +2261,10 @@ pub fn log_frontend_error(message: String, state: tauri::State<'_, AppState>) {
 
 #[tauri::command]
 pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    tracing::info!("starting voice pipeline");
     let mut pipeline = state.voice_pipeline.lock().await;
     if pipeline.is_some() {
+        tracing::debug!("voice pipeline already running, skipping");
         return Ok(()); // Already running
     }
     let emitter = state.emitter.clone();
@@ -2220,6 +2275,7 @@ pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(
 
 #[tauri::command]
 pub async fn stop_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    tracing::info!("stopping voice pipeline");
     let mut pipeline = state.voice_pipeline.lock().await;
     if let Some(mut p) = pipeline.take() {
         p.stop();

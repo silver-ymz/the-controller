@@ -133,6 +133,7 @@ impl Storage {
 
     /// Save a project's configuration to disk as `project.json`.
     pub fn save_project(&self, project: &Project) -> std::io::Result<()> {
+        tracing::debug!(project_id = %project.id, name = %project.name, "saving project");
         let dir = self.project_dir(project.id);
         fs::create_dir_all(&dir)?;
         let json = serde_json::to_string_pretty(project)
@@ -142,6 +143,7 @@ impl Storage {
 
     /// Load a project's configuration from disk.
     pub fn load_project(&self, project_id: Uuid) -> std::io::Result<Project> {
+        tracing::debug!(project_id = %project_id, "loading project");
         let path = self.project_dir(project_id).join("project.json");
         let json = fs::read_to_string(path)?;
         serde_json::from_str(&json)
@@ -150,6 +152,7 @@ impl Storage {
 
     /// List all projects by reading every `project.json` in the projects directory.
     pub fn list_projects(&self) -> std::io::Result<ProjectInventory> {
+        tracing::debug!("listing all projects");
         let projects_dir = self.base_dir.join("projects");
         if !projects_dir.exists() {
             return Ok(ProjectInventory::default());
@@ -164,6 +167,7 @@ impl Storage {
                 let json = match fs::read_to_string(&project_file) {
                     Ok(json) => json,
                     Err(e) => {
+                        tracing::error!(path = %project_file.display(), error = %e, "failed to read project file");
                         inventory.corrupt_entries.push(CorruptProjectEntry {
                             project_dir: project_dir.clone(),
                             project_file: project_file.clone(),
@@ -174,11 +178,14 @@ impl Storage {
                 };
                 match serde_json::from_str::<Project>(&json) {
                     Ok(project) => inventory.projects.push(project),
-                    Err(error) => inventory.corrupt_entries.push(CorruptProjectEntry {
-                        project_dir,
-                        project_file,
-                        error: error.to_string(),
-                    }),
+                    Err(error) => {
+                        tracing::error!(path = %project_file.display(), error = %error, "failed to parse project file");
+                        inventory.corrupt_entries.push(CorruptProjectEntry {
+                            project_dir,
+                            project_file,
+                            error: error.to_string(),
+                        })
+                    }
                 }
             }
         }
@@ -191,6 +198,7 @@ impl Storage {
     /// and updates all `worktree_path` entries in the project's sessions.
     /// No-op if the UUID directory doesn't exist (already migrated or no worktrees).
     pub fn migrate_worktree_paths(&self, project: &Project) -> std::io::Result<()> {
+        tracing::info!(project_id = %project.id, name = %project.name, "migrating worktree paths");
         let uuid_dir = self.base_dir.join("worktrees").join(project.id.to_string());
         let name_dir = self.base_dir.join("worktrees").join(&project.name);
         if uuid_dir.exists() && name_dir.exists() {
@@ -202,6 +210,7 @@ impl Storage {
         }
 
         if uuid_dir.exists() {
+            tracing::debug!(project_id = %project.id, "renaming UUID worktree dir to name-based dir");
             fs::rename(&uuid_dir, &name_dir)?;
         } else if !name_dir.exists() {
             return Ok(());
@@ -222,6 +231,7 @@ impl Storage {
         }
 
         if changed {
+            tracing::debug!(project_id = %project.id, "updated worktree paths in project sessions");
             self.save_project(&updated)?;
         }
 
@@ -230,6 +240,7 @@ impl Storage {
 
     /// Delete a project's config directory.
     pub fn delete_project_dir(&self, project_id: Uuid) -> std::io::Result<()> {
+        tracing::info!(project_id = %project_id, "deleting project directory");
         let dir = self.project_dir(project_id);
         if dir.exists() {
             fs::remove_dir_all(dir)
@@ -245,6 +256,7 @@ impl Storage {
     /// Returns an empty string if neither exists, or an error if a file exists
     /// but cannot be read.
     pub fn get_agents_md(&self, project: &Project) -> std::io::Result<String> {
+        tracing::debug!(project_id = %project.id, "reading agents.md");
         // Check repo root first
         let repo_agents = PathBuf::from(&project.repo_path).join("agents.md");
         if repo_agents.exists() {
@@ -274,6 +286,7 @@ impl Storage {
 
     /// Save a maintainer run log to disk.
     pub fn save_maintainer_run_log(&self, log: &MaintainerRunLog) -> std::io::Result<()> {
+        tracing::debug!(project_id = %log.project_id, log_id = %log.id, "saving maintainer run log");
         let dir = self.maintainer_run_logs_dir(log.project_id);
         fs::create_dir_all(&dir)?;
         let filename = format!("{}.json", log.id);
@@ -287,6 +300,7 @@ impl Storage {
         &self,
         project_id: Uuid,
     ) -> std::io::Result<Option<MaintainerRunLog>> {
+        tracing::debug!(project_id = %project_id, "loading latest maintainer run log");
         let dir = self.maintainer_run_logs_dir(project_id);
         if !dir.exists() {
             return Ok(None);
@@ -302,6 +316,7 @@ impl Storage {
         project_id: Uuid,
         limit: usize,
     ) -> std::io::Result<Vec<MaintainerRunLog>> {
+        tracing::debug!(project_id = %project_id, limit = limit, "loading maintainer run log history");
         let dir = self.maintainer_run_logs_dir(project_id);
         if !dir.exists() {
             return Ok(vec![]);
@@ -315,6 +330,7 @@ impl Storage {
     /// Delete all maintainer run logs for a project.
     /// Also deletes any old-format MaintainerReport files in the same directory.
     pub fn clear_maintainer_run_logs(&self, project_id: Uuid) -> std::io::Result<()> {
+        tracing::info!(project_id = %project_id, "clearing maintainer run logs");
         let dir = self.maintainer_run_logs_dir(project_id);
         if dir.exists() {
             fs::remove_dir_all(&dir)?;

@@ -66,6 +66,7 @@ pub fn notes_root_with_base(base: &std::path::Path) -> PathBuf {
 pub fn list_notes(base: &std::path::Path, folder: &str) -> std::io::Result<Vec<NoteEntry>> {
     let dir = validated_notes_dir(base, folder)?;
     if !dir.exists() {
+        tracing::debug!("notes directory does not exist, returning empty list");
         return Ok(Vec::new());
     }
 
@@ -89,6 +90,7 @@ pub fn list_notes(base: &std::path::Path, folder: &str) -> std::io::Result<Vec<N
     }
 
     entries.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    tracing::debug!(count = entries.len(), "listed notes");
     Ok(entries)
 }
 
@@ -96,6 +98,7 @@ pub fn list_notes(base: &std::path::Path, folder: &str) -> std::io::Result<Vec<N
 pub fn read_note(base: &std::path::Path, folder: &str, filename: &str) -> std::io::Result<String> {
     validate_filename(filename)?;
     let path = validated_notes_dir(base, folder)?.join(filename);
+    tracing::debug!("reading note");
     fs::read_to_string(path)
 }
 
@@ -116,6 +119,7 @@ pub fn write_note(
     validate_filename(filename)?;
     let dir = validated_notes_dir(base, folder)?;
     fs::create_dir_all(&dir)?;
+    tracing::debug!("writing note");
     fs::write(dir.join(filename), content)
 }
 
@@ -135,6 +139,7 @@ pub fn create_note(base: &std::path::Path, folder: &str, title: &str) -> std::io
 
     let path = dir.join(&filename);
     if path.exists() {
+        tracing::warn!("note already exists");
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("note '{}' already exists", filename),
@@ -143,6 +148,7 @@ pub fn create_note(base: &std::path::Path, folder: &str, title: &str) -> std::io
 
     let display_title = title.strip_suffix(".md").unwrap_or(title);
     fs::write(&path, format!("# {}\n", display_title))?;
+    tracing::debug!("created note");
     Ok(filename)
 }
 
@@ -167,6 +173,7 @@ pub fn rename_note(
     let new_path = dir.join(&new_filename);
 
     if !old_path.exists() {
+        tracing::warn!("note not found for rename");
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("note '{}' not found", old_name),
@@ -174,6 +181,7 @@ pub fn rename_note(
     }
 
     if new_path.exists() {
+        tracing::warn!("rename target already exists");
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("note '{}' already exists", new_filename),
@@ -181,6 +189,7 @@ pub fn rename_note(
     }
 
     fs::rename(old_path, new_path)?;
+    tracing::debug!("renamed note");
     Ok(new_filename)
 }
 
@@ -218,6 +227,7 @@ pub fn duplicate_note(
     let src_path = dir.join(filename);
 
     if !src_path.exists() {
+        tracing::warn!("note not found for duplicate");
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("note '{}' not found", filename),
@@ -231,6 +241,7 @@ pub fn duplicate_note(
     let copy_filename = format!("{}-{}.md", base_stem, short_id);
 
     fs::write(dir.join(&copy_filename), content)?;
+    tracing::debug!("duplicated note");
     Ok(copy_filename)
 }
 
@@ -239,9 +250,15 @@ pub fn delete_note(base: &std::path::Path, folder: &str, filename: &str) -> std:
     validate_filename(filename)?;
     let path = validated_notes_dir(base, folder)?.join(filename);
     match fs::remove_file(path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            tracing::debug!("deleted note");
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to delete note");
+            Err(e)
+        }
     }
 }
 
@@ -268,12 +285,15 @@ pub fn list_folders(base: &std::path::Path) -> std::io::Result<Vec<String>> {
 pub fn create_folder(base: &std::path::Path, name: &str) -> std::io::Result<()> {
     let dir = validated_notes_dir(base, name)?;
     if dir.exists() {
+        tracing::warn!("folder already exists");
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("folder '{}' already exists", name),
         ));
     }
-    fs::create_dir_all(&dir)
+    fs::create_dir_all(&dir)?;
+    tracing::debug!("created folder");
+    Ok(())
 }
 
 /// Rename a folder. Returns error if target already exists.
@@ -287,18 +307,22 @@ pub fn rename_folder(
     let old_dir = validated_notes_dir(base, old_name)?;
     let new_dir = validated_notes_dir(base, new_name)?;
     if !old_dir.exists() {
+        tracing::warn!("folder not found for rename");
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("folder '{}' not found", old_name),
         ));
     }
     if new_dir.exists() {
+        tracing::warn!("rename target folder already exists");
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!("folder '{}' already exists", new_name),
         ));
     }
-    fs::rename(old_dir, new_dir)
+    fs::rename(old_dir, new_dir)?;
+    tracing::debug!("renamed folder");
+    Ok(())
 }
 
 /// Delete a folder. If `force` is false, fails when the folder is non-empty.
@@ -308,11 +332,16 @@ pub fn delete_folder(base: &std::path::Path, name: &str, force: bool) -> std::io
     if !dir.exists() {
         return Ok(());
     }
-    if force {
+    let result = if force {
         fs::remove_dir_all(&dir)
     } else {
         fs::remove_dir(&dir)
+    };
+    match &result {
+        Ok(()) => tracing::debug!(force, "deleted folder"),
+        Err(e) => tracing::error!(force, error = %e, "failed to delete folder"),
     }
+    result
 }
 
 // ── Image assets ────────────────────────────────────────────────────
@@ -357,7 +386,9 @@ pub fn save_note_image(
     let filename = format!("{}.{}", short_id, ext_lower);
     fs::write(assets_dir.join(&filename), image_bytes)?;
 
-    Ok(format!("assets/{}", filename))
+    let relative = format!("assets/{}", filename);
+    tracing::debug!(size = image_bytes.len(), "saved note image");
+    Ok(relative)
 }
 
 /// Resolve a relative asset path to an absolute filesystem path.
@@ -385,8 +416,12 @@ fn open_or_init_repo(base: &Path) -> Result<Repository, git2::Error> {
     fs::create_dir_all(&root)
         .map_err(|e| git2::Error::from_str(&format!("failed to create notes dir: {}", e)))?;
     match Repository::open(&root) {
-        Ok(repo) => Ok(repo),
+        Ok(repo) => {
+            tracing::debug!("opened existing notes git repo");
+            Ok(repo)
+        }
         Err(_) => {
+            tracing::debug!("initializing new notes git repo");
             let repo = Repository::init(&root)?;
             let sig = Signature::now("the-controller", "noreply@the-controller")?;
             let tree_id = repo.index()?.write_tree()?;
@@ -394,6 +429,7 @@ fn open_or_init_repo(base: &Path) -> Result<Repository, git2::Error> {
                 let tree = repo.find_tree(tree_id)?;
                 repo.commit(Some("HEAD"), &sig, &sig, "init notes", &tree, &[])?;
             }
+            tracing::debug!("notes git repo initialized with initial commit");
             Ok(repo)
         }
     }
@@ -402,6 +438,7 @@ fn open_or_init_repo(base: &Path) -> Result<Repository, git2::Error> {
 /// Stage all changes and commit with the given message.
 /// Returns Ok(true) if a commit was created, Ok(false) if there was nothing to commit.
 pub fn commit_notes(base: &Path, message: &str) -> Result<bool, git2::Error> {
+    tracing::debug!("staging and committing notes");
     let repo = open_or_init_repo(base)?;
     let mut index = repo.index()?;
 
@@ -416,6 +453,7 @@ pub fn commit_notes(base: &Path, message: &str) -> Result<bool, git2::Error> {
 
     let diff = repo.diff_tree_to_tree(Some(&head_tree), Some(&new_tree), None)?;
     if diff.deltas().count() == 0 {
+        tracing::debug!("no changes to commit");
         return Ok(false);
     }
 
@@ -428,6 +466,7 @@ pub fn commit_notes(base: &Path, message: &str) -> Result<bool, git2::Error> {
         &new_tree,
         &[&head_commit],
     )?;
+    tracing::debug!("committed notes");
     Ok(true)
 }
 

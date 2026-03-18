@@ -89,6 +89,8 @@ impl AudioInput {
             .play()
             .map_err(|e| format!("Failed to start input stream: {e}"))?;
 
+        tracing::debug!("audio input stream started");
+
         Ok(Self {
             stream: Some(stream),
             muted,
@@ -104,6 +106,7 @@ impl AudioInput {
     }
 
     pub fn stop(&mut self) {
+        tracing::debug!("audio input stream stopped");
         self.stream.take();
     }
 }

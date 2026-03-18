@@ -45,9 +45,11 @@ pub fn install_controller_cli() {
     };
 
     let Ok(current_exe) = std::env::current_exe() else {
+        tracing::error!("could not determine current executable path");
         return;
     };
     let Some(exe_dir) = current_exe.parent() else {
+        tracing::error!("current executable has no parent directory");
         return;
     };
 
@@ -57,6 +59,10 @@ pub fn install_controller_cli() {
     }
 
     let our_build_date = env!("BUILD_DATE");
+    tracing::debug!(
+        build_date = our_build_date,
+        "checking CLI binaries for updates"
+    );
 
     for binary_name in &["controller-cli", "pty-broker"] {
         let source = exe_dir.join(binary_name);
@@ -88,13 +94,21 @@ pub fn install_controller_cli() {
         if dest.exists() {
             if let Some(installed_date) = installed_build_date(&dest) {
                 if installed_date == our_build_date {
+                    tracing::debug!(binary = binary_name, installed_date, "already up-to-date");
                     continue;
                 }
+                tracing::debug!(
+                    binary = binary_name,
+                    installed_date,
+                    current_date = our_build_date,
+                    "build date mismatch"
+                );
             }
         }
 
+        tracing::info!(binary = binary_name, dest = %dest.display(), "installing CLI binary");
         if let Err(e) = std::fs::copy(&source, &dest) {
-            tracing::warn!("could not install {}: {}", binary_name, e);
+            tracing::warn!(binary = binary_name, error = %e, "could not install CLI binary");
             continue;
         }
 

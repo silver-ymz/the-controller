@@ -59,15 +59,26 @@ pub fn default_terminal_theme() -> TerminalTheme {
 
 pub fn load_terminal_theme(base_dir: &Path) -> io::Result<TerminalTheme> {
     let path = base_dir.join("current-theme.conf");
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+    tracing::debug!(?path, "loading terminal theme");
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => {
+            tracing::debug!(bytes = contents.len(), "read theme file");
+            contents
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            tracing::debug!("theme file not found, using default theme");
             return Ok(default_terminal_theme());
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            tracing::error!(?path, %error, "failed to read theme file");
+            return Err(error);
+        }
     };
 
-    parse_terminal_theme(&contents).or_else(|_| Ok(default_terminal_theme()))
+    parse_terminal_theme(&contents).or_else(|e| {
+        tracing::warn!(%e, "invalid theme data, falling back to default theme");
+        Ok(default_terminal_theme())
+    })
 }
 
 fn parse_terminal_theme(contents: &str) -> io::Result<TerminalTheme> {
@@ -84,6 +95,7 @@ fn parse_terminal_theme(contents: &str) -> io::Result<TerminalTheme> {
             continue;
         };
         let Some(value) = parts.next() else {
+            tracing::warn!(key, "theme line missing color value");
             continue;
         };
         let color = parse_color(value)?;
@@ -111,10 +123,13 @@ fn parse_terminal_theme(contents: &str) -> io::Result<TerminalTheme> {
             "color13" => theme.bright_magenta = Some(color),
             "color14" => theme.bright_cyan = Some(color),
             "color15" => theme.bright_white = Some(color),
-            _ => {}
+            _ => {
+                tracing::warn!(key, "unrecognized theme key");
+            }
         }
     }
 
+    tracing::debug!("terminal theme parsed");
     Ok(theme)
 }
 
@@ -124,6 +139,7 @@ fn parse_color(value: &str) -> io::Result<String> {
     if valid_len && valid_hex {
         Ok(value.to_ascii_lowercase())
     } else {
+        tracing::error!(value, "invalid color value in theme");
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("invalid color value: {value}"),

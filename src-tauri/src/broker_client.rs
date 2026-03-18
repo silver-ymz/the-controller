@@ -77,6 +77,10 @@ impl BrokerClient {
             // Check if the running broker is stale
             if self.is_broker_stale() {
                 let old_pid = self.read_pid();
+                tracing::warn!(
+                    old_pid = ?old_pid,
+                    "broker is stale (build date mismatch), shutting it down"
+                );
                 // Shut down the stale broker (best-effort)
                 let _ = self.send_shutdown_to(&stream);
                 drop(stream);
@@ -84,6 +88,10 @@ impl BrokerClient {
                 if let Some(pid) = old_pid {
                     if !self.wait_for_pid_exit(pid, std::time::Duration::from_secs(3)) {
                         // Escalate to SIGKILL if graceful shutdown didn't work
+                        tracing::warn!(
+                            pid,
+                            "broker did not exit gracefully, escalating to SIGKILL"
+                        );
                         unsafe {
                             libc::kill(pid, libc::SIGKILL);
                         }
@@ -92,6 +100,7 @@ impl BrokerClient {
                 }
                 self.cleanup_stale_pid();
             } else {
+                tracing::debug!("connected to broker control socket directly");
                 return Ok(stream);
             }
         }
@@ -106,10 +115,13 @@ impl BrokerClient {
         for i in 0..20 {
             std::thread::sleep(std::time::Duration::from_millis(50 * (i + 1)));
             if let Ok(stream) = UnixStream::connect(&path) {
+                tracing::debug!(attempt = i + 1, "connected to broker after spawn");
                 return Ok(stream);
             }
+            tracing::debug!(attempt = i + 1, "broker not ready yet, retrying");
         }
 
+        tracing::error!("failed to connect to broker after 20 retries");
         Err(io::Error::new(
             io::ErrorKind::ConnectionRefused,
             "failed to connect to broker after spawning",
@@ -124,15 +136,30 @@ impl BrokerClient {
 
     /// Poll until a process exits or the timeout expires. Returns true if the process exited.
     fn wait_for_pid_exit(&self, pid: i32, timeout: std::time::Duration) -> bool {
+        tracing::debug!(
+            pid,
+            timeout_ms = timeout.as_millis() as u64,
+            "waiting for broker process to exit"
+        );
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_millis(50);
         while start.elapsed() < timeout {
             let alive = unsafe { libc::kill(pid, 0) } == 0;
             if !alive {
+                tracing::debug!(
+                    pid,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "broker process exited"
+                );
                 return true;
             }
             std::thread::sleep(poll_interval);
         }
+        tracing::warn!(
+            pid,
+            timeout_ms = timeout.as_millis() as u64,
+            "broker process did not exit within timeout"
+        );
         false
     }
 
@@ -143,6 +170,7 @@ impl BrokerClient {
             if let Ok(pid) = contents.trim().parse::<i32>() {
                 let alive = unsafe { libc::kill(pid, 0) } == 0;
                 if !alive {
+                    tracing::debug!(pid, "cleaning up stale PID file and control socket");
                     let _ = std::fs::remove_file(&pid_path);
                     let _ = std::fs::remove_file(self.control_socket_path());
                 }
@@ -160,6 +188,7 @@ impl BrokerClient {
             if let Ok(cache) = STALE_CHECK_CACHE.lock() {
                 if let Some((cached_pid, cached_stale)) = *cache {
                     if cached_pid == pid {
+                        tracing::debug!(pid, cached_stale, "staleness cache hit");
                         return cached_stale;
                     }
                 }
@@ -194,11 +223,20 @@ impl BrokerClient {
         };
         if !output.status.success() {
             // Old binary without --build-date support — treat as stale
+            tracing::info!("broker binary does not support --build-date, treating as stale");
             return true;
         }
         let broker_date = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let our_date = env!("BUILD_DATE");
-        broker_date != our_date
+        let stale = broker_date != our_date;
+        if stale {
+            tracing::info!(
+                broker_date = %broker_date,
+                app_date = %our_date,
+                "broker is stale (build date mismatch)"
+            );
+        }
+        stale
     }
 
     /// Send a Shutdown request on an existing stream (best-effort).
@@ -213,10 +251,12 @@ impl BrokerClient {
     /// Uses a lock file to prevent multiple concurrent spawns.
     fn spawn_broker(&self) -> io::Result<()> {
         let binary = Self::broker_binary_path().ok_or_else(|| {
+            tracing::error!("pty-broker binary path could not be determined");
             io::Error::new(io::ErrorKind::NotFound, "pty-broker binary not found")
         })?;
 
         if !binary.exists() {
+            tracing::error!(path = %binary.display(), "pty-broker binary not found on disk");
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("pty-broker binary not found at {}", binary.display()),
@@ -237,12 +277,14 @@ impl BrokerClient {
         if lock_ret != 0 {
             // Lock is held — another broker is already starting or running.
             // Drop the fd and let the connect retry loop handle it.
+            tracing::warn!("spawn lock already held, another broker spawn is in progress");
             return Ok(());
         }
         // We hold the lock briefly to prevent concurrent spawns.
         // The broker process itself will acquire the lock on startup,
         // so we release ours immediately after spawning.
 
+        tracing::info!(path = %binary.display(), "spawning broker binary");
         std::process::Command::new(&binary)
             .arg("--socket-dir")
             .arg(&self.socket_dir)
@@ -259,22 +301,44 @@ impl BrokerClient {
 
     /// Send a framed request and read a framed response (blocking).
     fn request(&self, req: &Request) -> Result<Response, String> {
-        let mut stream = self
-            .connect_control()
-            .map_err(|e| format!("broker connection failed: {}", e))?;
+        let req_type = match req {
+            Request::Spawn(_) => "Spawn",
+            Request::Kill(_) => "Kill",
+            Request::Resize(_) => "Resize",
+            Request::List => "List",
+            Request::HasSession(_) => "HasSession",
+            Request::Shutdown => "Shutdown",
+        };
+        tracing::debug!(request_type = req_type, "sending broker request");
 
-        let frame = encode_request(req).map_err(|e| format!("failed to encode request: {}", e))?;
-        stream
-            .write_all(&frame)
-            .map_err(|e| format!("failed to send request: {}", e))?;
+        let mut stream = self.connect_control().map_err(|e| {
+            tracing::error!(request_type = req_type, error = %e, "broker connection failed");
+            format!("broker connection failed: {}", e)
+        })?;
+
+        let frame = encode_request(req).map_err(|e| {
+            tracing::error!(request_type = req_type, error = %e, "failed to encode request");
+            format!("failed to encode request: {}", e)
+        })?;
+        stream.write_all(&frame).map_err(|e| {
+            tracing::error!(request_type = req_type, error = %e, "failed to send request");
+            format!("failed to send request: {}", e)
+        })?;
 
         // Read response header
         let mut header = [0u8; 5];
-        stream
-            .read_exact(&mut header)
-            .map_err(|e| format!("failed to read response header: {}", e))?;
+        stream.read_exact(&mut header).map_err(|e| {
+            tracing::error!(request_type = req_type, error = %e, "failed to read response header");
+            format!("failed to read response header: {}", e)
+        })?;
         let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
         if len > MAX_MESSAGE_SIZE {
+            tracing::error!(
+                request_type = req_type,
+                len,
+                max = MAX_MESSAGE_SIZE,
+                "response exceeds max message size"
+            );
             return Err(format!(
                 "message size {} exceeds maximum {}",
                 len, MAX_MESSAGE_SIZE
@@ -282,25 +346,42 @@ impl BrokerClient {
         }
         let mut payload = vec![0u8; len];
         if len > 0 {
-            stream
-                .read_exact(&mut payload)
-                .map_err(|e| format!("failed to read response payload: {}", e))?;
+            stream.read_exact(&mut payload).map_err(|e| {
+                tracing::error!(
+                    request_type = req_type,
+                    error = %e,
+                    "failed to read response payload"
+                );
+                format!("failed to read response payload: {}", e)
+            })?;
         }
         let mut full = Vec::with_capacity(5 + len);
         full.extend_from_slice(&header);
         full.extend_from_slice(&payload);
         match decode_response(&full) {
             Ok(Some((resp, _))) => Ok(resp),
-            Ok(None) => Err("incomplete response".to_string()),
-            Err(e) => Err(format!("failed to decode response: {}", e)),
+            Ok(None) => {
+                tracing::error!(request_type = req_type, "incomplete response from broker");
+                Err("incomplete response".to_string())
+            }
+            Err(e) => {
+                tracing::error!(request_type = req_type, error = %e, "failed to decode response");
+                Err(format!("failed to decode response: {}", e))
+            }
         }
     }
 
     /// Spawn a new session in the broker.
     pub fn spawn(&self, req: SpawnRequest) -> Result<Uuid, String> {
         match self.request(&Request::Spawn(req))? {
-            Response::Ok(r) => Ok(r.session_id),
-            Response::Error(e) => Err(e.message),
+            Response::Ok(r) => {
+                tracing::info!(session_id = %r.session_id, "session spawned");
+                Ok(r.session_id)
+            }
+            Response::Error(e) => {
+                tracing::error!(error = %e.message, "failed to spawn session");
+                Err(e.message)
+            }
             other => Err(format!("unexpected response: {:?}", other)),
         }
     }
@@ -308,8 +389,14 @@ impl BrokerClient {
     /// Kill a session.
     pub fn kill(&self, session_id: Uuid) -> Result<(), String> {
         match self.request(&Request::Kill(KillRequest { session_id }))? {
-            Response::Ok(_) => Ok(()),
-            Response::Error(e) => Err(e.message),
+            Response::Ok(_) => {
+                tracing::info!(%session_id, "session killed");
+                Ok(())
+            }
+            Response::Error(e) => {
+                tracing::error!(%session_id, error = %e.message, "failed to kill session");
+                Err(e.message)
+            }
             other => Err(format!("unexpected response: {:?}", other)),
         }
     }
@@ -321,7 +408,10 @@ impl BrokerClient {
             rows,
             cols,
         }))? {
-            Response::Ok(_) => Ok(()),
+            Response::Ok(_) => {
+                tracing::debug!(%session_id, rows, cols, "session resized");
+                Ok(())
+            }
             Response::Error(e) => Err(e.message),
             other => Err(format!("unexpected response: {:?}", other)),
         }
@@ -337,6 +427,7 @@ impl BrokerClient {
 
     /// Send shutdown to the broker.
     pub fn shutdown(&self) -> Result<(), String> {
+        tracing::info!("sending shutdown request to broker");
         match self.request(&Request::Shutdown)? {
             Response::Ok(_) => Ok(()),
             Response::Error(e) => Err(e.message),
@@ -347,6 +438,7 @@ impl BrokerClient {
     /// Connect to a session's data socket for raw I/O (blocking).
     pub fn connect_data(&self, session_id: Uuid) -> io::Result<UnixStream> {
         let path = self.data_socket_path(session_id);
+        tracing::debug!(%session_id, "connecting to data socket");
         UnixStream::connect(path)
     }
 }

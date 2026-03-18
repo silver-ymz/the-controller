@@ -101,9 +101,12 @@ impl Broker {
         {
             let sessions = self.sessions.lock().await;
             if sessions.contains_key(&session_id) {
+                tracing::debug!(%session_id, "session already exists, returning ok");
                 return Response::Ok(OkResponse { session_id });
             }
         }
+
+        tracing::info!(%session_id, cmd = %req.cmd, cwd = %req.cwd, "spawning session");
 
         let pty_system = native_pty_system();
         let pair = match pty_system.openpty(PtySize {
@@ -114,9 +117,10 @@ impl Broker {
         }) {
             Ok(pair) => pair,
             Err(e) => {
+                tracing::error!(%session_id, error = %e, "failed to open pty");
                 return Response::Error(ErrorResponse {
                     message: format!("failed to open pty: {}", e),
-                })
+                });
             }
         };
 
@@ -134,9 +138,10 @@ impl Broker {
         let child = match pair.slave.spawn_command(cmd) {
             Ok(child) => child,
             Err(e) => {
+                tracing::error!(%session_id, cmd = %req.cmd, error = %e, "failed to spawn command");
                 return Response::Error(ErrorResponse {
                     message: format!("failed to spawn {}: {}", req.cmd, e),
-                })
+                });
             }
         };
 
@@ -145,18 +150,20 @@ impl Broker {
         let writer = match pair.master.take_writer() {
             Ok(w) => w,
             Err(e) => {
+                tracing::error!(%session_id, error = %e, "failed to get pty writer");
                 return Response::Error(ErrorResponse {
                     message: format!("failed to get pty writer: {}", e),
-                })
+                });
             }
         };
 
         let mut reader = match pair.master.try_clone_reader() {
             Ok(r) => r,
             Err(e) => {
+                tracing::error!(%session_id, error = %e, "failed to get pty reader");
                 return Response::Error(ErrorResponse {
                     message: format!("failed to get pty reader: {}", e),
-                })
+                });
             }
         };
 
@@ -216,11 +223,15 @@ impl Broker {
         let data_path = self.data_socket_path(session_id);
         let _ = std::fs::remove_file(&data_path);
         let data_listener = match UnixListener::bind(&data_path) {
-            Ok(l) => l,
+            Ok(l) => {
+                tracing::debug!(%session_id, path = %data_path.display(), "data socket bound");
+                l
+            }
             Err(e) => {
+                tracing::error!(%session_id, error = %e, "failed to bind data socket");
                 return Response::Error(ErrorResponse {
                     message: format!("failed to bind data socket: {}", e),
-                })
+                });
             }
         };
 
@@ -244,6 +255,7 @@ impl Broker {
                 let ring = Arc::clone(&ring_for_data);
                 let clients = Arc::clone(&clients_for_data);
                 let pty_writer = Arc::clone(&pty_writer_for_data);
+                tracing::debug!(%session_id, "data client connected");
                 tokio::spawn(async move {
                     handle_data_client(stream, ring, clients, pty_writer).await;
                 });
@@ -262,6 +274,8 @@ impl Broker {
         self.sessions.lock().await.insert(session_id, session);
         self.activity.notify_one();
 
+        tracing::info!(%session_id, "session spawned");
+
         Response::Ok(OkResponse { session_id })
     }
     // PLACEHOLDER_BROKER_METHODS
@@ -269,6 +283,7 @@ impl Broker {
     async fn handle_kill(&self, req: KillRequest) -> Response {
         let mut sessions = self.sessions.lock().await;
         if let Some(session) = sessions.remove(&req.session_id) {
+            tracing::info!(session_id = %req.session_id, "killing session");
             // Drop the master PTY to send SIGHUP to the child
             drop(session._master);
             // Clean up data socket
@@ -279,6 +294,7 @@ impl Broker {
                 session_id: req.session_id,
             })
         } else {
+            tracing::warn!(session_id = %req.session_id, "kill requested for unknown session");
             Response::Error(ErrorResponse {
                 message: format!("session not found: {}", req.session_id),
             })
@@ -302,6 +318,7 @@ impl Broker {
                 }),
             }
         } else {
+            tracing::warn!(session_id = %req.session_id, "resize requested for unknown session");
             Response::Error(ErrorResponse {
                 message: format!("session not found: {}", req.session_id),
             })
@@ -505,6 +522,13 @@ fn main() {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let _log_guard = the_controller_lib::logging::init_broker_logging(&base_dir, foreground);
 
+    tracing::info!(
+        socket_dir = %socket_dir.display(),
+        pid = std::process::id(),
+        foreground,
+        "pty_broker starting"
+    );
+
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     rt.block_on(async_main(socket_dir));
 }
@@ -546,7 +570,10 @@ async fn async_main(socket_dir: PathBuf) {
     let _ = std::fs::remove_file(&control_path);
 
     let control_listener = match UnixListener::bind(&control_path) {
-        Ok(l) => l,
+        Ok(l) => {
+            tracing::debug!(path = %control_path.display(), "control socket bound");
+            l
+        }
         Err(e) => {
             tracing::error!("failed to bind control socket: {}", e);
             std::process::exit(1);
@@ -562,8 +589,12 @@ async fn async_main(socket_dir: PathBuf) {
         let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM");
         let mut sigint = signal(SignalKind::interrupt()).expect("failed to register SIGINT");
         tokio::select! {
-            _ = sigterm.recv() => {},
-            _ = sigint.recv() => {},
+            _ = sigterm.recv() => {
+                tracing::info!("received SIGTERM");
+            },
+            _ = sigint.recv() => {
+                tracing::info!("received SIGINT");
+            },
         }
         shutdown_signal.notify_one();
     });
@@ -574,6 +605,7 @@ async fn async_main(socket_dir: PathBuf) {
     tokio::select! {
         _ = async {
             while let Ok((stream, _)) = control_listener.accept().await {
+                tracing::debug!("control client connected");
                 broker_main.activity.notify_one();
                 let broker = Arc::clone(&broker_main);
                 let shutdown = Arc::clone(&shutdown);
@@ -586,6 +618,7 @@ async fn async_main(socket_dir: PathBuf) {
     }
 
     // Graceful shutdown: kill all sessions, clean up sockets
+    tracing::info!("shutting down, cleaning up sessions");
     let mut sessions = broker.sessions.lock().await;
     let ids: Vec<Uuid> = sessions.keys().copied().collect();
     for id in ids {
@@ -607,6 +640,7 @@ async fn handle_control_client(mut stream: UnixStream, broker: Arc<Broker>, shut
         };
 
         if let Request::Shutdown = &req {
+            tracing::info!("shutdown request received from control client");
             // Notify shutdown FIRST so the main accept loop stops before
             // the client receives the response — prevents new connections
             // from arriving between response and shutdown.

@@ -47,6 +47,7 @@ fn list_skill_dirs(skills_dir: &Path) -> std::io::Result<Vec<(String, PathBuf)>>
         let name = entry.file_name().to_string_lossy().to_string();
         skills.push((name, entry.path()));
     }
+    tracing::debug!(count = skills.len(), "discovered skill directories");
     Ok(skills)
 }
 
@@ -90,12 +91,14 @@ fn ensure_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
                     return Ok(()); // Already correct
                 }
             }
+            tracing::debug!(link = %link.display(), "replacing stale symlink");
             fs::remove_file(link)?;
         } else {
             tracing::warn!("{} exists as regular file/dir, skipping", link.display());
             return Ok(());
         }
     }
+    tracing::debug!(target = %target.display(), link = %link.display(), "created symlink");
     symlink(target, link)
 }
 
@@ -137,6 +140,7 @@ fn sync_codex_skills(skills_dir: &Path) -> std::io::Result<()> {
 ///
 /// Called on app startup. Idempotent — safe to call multiple times.
 pub fn sync_skills() {
+    tracing::info!("starting skill sync");
     let skills_dir = match resolve_skills_source() {
         Some(dir) => dir,
         None => {

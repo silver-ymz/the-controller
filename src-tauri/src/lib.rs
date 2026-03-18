@@ -53,10 +53,13 @@ pub fn run() {
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let _log_guard = logging::init_backend_logging(&base_dir, true);
 
+    tracing::info!("The Controller starting up");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            tracing::debug!("setting up Tauri plugins and app state");
             let emitter = emitter::TauriEmitter::new(app.handle().clone());
             let app_state = match state::AppState::new(emitter) {
                 Ok(state) => state,
@@ -170,6 +173,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                tracing::info!("exit requested, cleaning up");
                 status_socket::cleanup();
                 // Kill any staged controller instance and clear stale records
                 if let Some(state) = app_handle.try_state::<state::AppState>() {

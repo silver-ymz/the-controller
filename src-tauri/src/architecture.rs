@@ -157,6 +157,7 @@ pub struct ArchitectureRelationship {
 }
 
 pub fn collect_repo_evidence(repo_path: &Path) -> Result<RepoEvidence, String> {
+    tracing::debug!(path = %repo_path.display(), "collecting repo evidence");
     collect_repo_evidence_with_limits(repo_path, DEFAULT_SCAN_LIMITS)
 }
 
@@ -165,6 +166,7 @@ fn collect_repo_evidence_with_limits(
     scan_limits: ScanLimits,
 ) -> Result<RepoEvidence, String> {
     if !repo_path.is_dir() {
+        tracing::warn!(path = %repo_path.display(), "not a directory");
         return Err(format!("Not a directory: {}", repo_path.display()));
     }
     let repo_path = repo_path
@@ -172,6 +174,7 @@ fn collect_repo_evidence_with_limits(
         .map_err(|e| format!("Failed to resolve {}: {}", repo_path.display(), e))?;
     let mut scan_budget = ScanBudget::new(scan_limits);
     let root_entries = read_root_entries(&repo_path, &mut scan_budget)?;
+    tracing::debug!(count = root_entries.len(), "read root entries");
     let top_level_directories = root_entries
         .iter()
         .filter(|path| path_kind(path) == Some(RepoPathKind::Directory))
@@ -243,6 +246,12 @@ fn collect_repo_evidence_with_limits(
         }
     }
 
+    tracing::debug!(
+        directories = top_level_directories.len(),
+        evidence_files = files.len(),
+        budget_remaining = scan_budget.remaining_entries(),
+        "repo evidence collection complete"
+    );
     Ok(RepoEvidence {
         top_level_directories,
         files,
@@ -312,7 +321,15 @@ fn format_prompt_snippet(snippet: &str) -> String {
 }
 
 pub fn generate_architecture_blocking(repo_path: &Path) -> Result<ArchitectureResult, String> {
-    generate_architecture_blocking_with_config(repo_path, &CodexExecConfig::default())
+    tracing::info!(path = %repo_path.display(), "starting architecture generation");
+    let result = generate_architecture_blocking_with_config(repo_path, &CodexExecConfig::default());
+    match &result {
+        Ok(_) => tracing::info!(path = %repo_path.display(), "architecture generation complete"),
+        Err(e) => {
+            tracing::error!(path = %repo_path.display(), error = %e, "architecture generation failed")
+        }
+    }
+    result
 }
 
 fn generate_architecture_blocking_with_config(
@@ -321,24 +338,29 @@ fn generate_architecture_blocking_with_config(
 ) -> Result<ArchitectureResult, String> {
     let evidence = collect_repo_evidence(repo_path)?;
     if evidence.files.is_empty() {
+        tracing::warn!(path = %repo_path.display(), "no usable evidence files found");
         return Err(
             "No usable evidence files were captured for architecture generation".to_string(),
         );
     }
     let prompt = build_architecture_prompt(repo_path, &evidence);
+    tracing::debug!(prompt_len = prompt.len(), "built architecture prompt");
     let output = run_codex_exec(&prompt, config)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!(status = ?output.status, "codex exec returned non-zero exit status");
         return Err(format!("codex exec failed: {}", stderr.trim()));
     }
 
+    tracing::debug!("parsing codex output");
     parse_architecture_output_with_evidence(&String::from_utf8_lossy(&output.stdout), &evidence)
 }
 
 fn run_codex_exec(prompt: &str, config: &CodexExecConfig) -> Result<Output, String> {
     let exec_dir = IsolatedExecDir::create()?;
     let last_message_path = exec_dir.path().join("codex-last-message.txt");
+    tracing::debug!(binary = %config.binary.display(), timeout_secs = config.timeout.as_secs(), "spawning codex exec");
     let mut command = Command::new(&config.binary);
     command
         .arg("exec")
@@ -355,7 +377,10 @@ fn run_codex_exec(prompt: &str, config: &CodexExecConfig) -> Result<Output, Stri
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
-        .map_err(|e| format!("Failed to run codex exec: {}", e))?;
+        .map_err(|e| {
+            tracing::error!(binary = %config.binary.display(), error = %e, "failed to spawn codex exec");
+            format!("Failed to run codex exec: {}", e)
+        })?;
     let stdout_reader = child
         .stdout
         .take()
@@ -371,6 +396,11 @@ fn run_codex_exec(prompt: &str, config: &CodexExecConfig) -> Result<Output, Stri
     let status = loop {
         while let Ok(stream_name) = overflow_rx.try_recv() {
             if stream_name != "stdout" {
+                tracing::error!(
+                    stream = stream_name,
+                    max_bytes = MAX_CAPTURE_BYTES,
+                    "codex exec output overflow"
+                );
                 terminate_codex_process(&mut child);
                 let _ = child.wait();
                 return Err(format!(
@@ -381,6 +411,10 @@ fn run_codex_exec(prompt: &str, config: &CodexExecConfig) -> Result<Output, Stri
         }
 
         if started_at.elapsed() >= config.timeout {
+            tracing::error!(
+                timeout_secs = config.timeout.as_secs(),
+                "codex exec timed out"
+            );
             terminate_codex_process(&mut child);
             let _ = child.wait();
             return Err(format!(
@@ -401,6 +435,13 @@ fn run_codex_exec(prompt: &str, config: &CodexExecConfig) -> Result<Output, Stri
 
     let stdout = join_pipe_reader(stdout_handle, "stdout")?;
     let stderr = join_pipe_reader(stderr_handle, "stderr")?;
+    tracing::debug!(
+        status = ?status,
+        stdout_bytes = stdout.bytes.len(),
+        stderr_bytes = stderr.bytes.len(),
+        elapsed_ms = started_at.elapsed().as_millis() as u64,
+        "codex exec finished"
+    );
     if stdout.overflowed && !status.success() {
         return Err(format!(
             "codex exec stdout exceeded {} bytes of output",
@@ -478,9 +519,19 @@ fn parse_architecture_output_with_evidence(
     output: &str,
     evidence: &RepoEvidence,
 ) -> Result<ArchitectureResult, String> {
-    let json = extract_json(output).ok_or("No JSON found in output")?;
-    let parsed: ArchitectureResult =
-        serde_json::from_str(json).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    let json = extract_json(output).ok_or_else(|| {
+        tracing::error!(output_len = output.len(), "no JSON found in codex output");
+        "No JSON found in output".to_string()
+    })?;
+    tracing::debug!(json_len = json.len(), "extracted JSON from codex output");
+    let parsed: ArchitectureResult = serde_json::from_str(json).map_err(|e| {
+        tracing::error!(error = %e, "failed to deserialize architecture JSON");
+        format!("Failed to parse JSON: {}", e)
+    })?;
+    tracing::debug!(
+        components = parsed.components.len(),
+        "deserialized architecture result"
+    );
     sanitize_architecture_result(parsed, evidence)
 }
 
@@ -490,15 +541,21 @@ fn sanitize_architecture_result(
 ) -> Result<ArchitectureResult, String> {
     let title = result.title.trim().to_string();
     if title.is_empty() {
+        tracing::warn!("architecture title is empty");
         return Err("Architecture title cannot be empty".to_string());
     }
 
     let mermaid = result.mermaid.trim().to_string();
     if mermaid.is_empty() {
+        tracing::warn!("architecture mermaid diagram is empty");
         return Err("Architecture Mermaid cannot be empty".to_string());
     }
 
     let mermaid_node_ids = extract_mermaid_node_ids(&mermaid);
+    tracing::debug!(
+        node_count = mermaid_node_ids.len(),
+        "extracted mermaid node ids"
+    );
     let evidence_paths = evidence
         .files
         .iter()
@@ -520,9 +577,14 @@ fn sanitize_architecture_result(
             component.evidence_paths.is_empty() && component.evidence_snippets.is_empty()
         })
     {
+        tracing::warn!("architecture result has no grounded evidence");
         return Err("Architecture result must include grounded evidence".to_string());
     }
 
+    tracing::debug!(
+        components = components.len(),
+        "architecture result sanitized"
+    );
     Ok(ArchitectureResult {
         title,
         mermaid,

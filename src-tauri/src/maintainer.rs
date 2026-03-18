@@ -138,6 +138,7 @@ impl MaintainerScheduler {
     /// Start the scheduler loop in a background thread.
     /// Checks every 60 seconds which projects are due for a health check.
     pub fn start(app_handle: AppHandle) {
+        tracing::info!("maintainer scheduler starting");
         std::thread::spawn(move || {
             let mut last_run: HashMap<Uuid, Instant> = HashMap::new();
 
@@ -146,20 +147,29 @@ impl MaintainerScheduler {
 
                 let state = match app_handle.try_state::<AppState>() {
                     Some(s) => s,
-                    None => continue,
+                    None => {
+                        tracing::debug!("scheduler tick: AppState not yet available, skipping");
+                        continue;
+                    }
                 };
 
                 let projects = {
                     let storage = match state.storage.lock() {
                         Ok(s) => s,
-                        Err(_) => continue,
+                        Err(_) => {
+                            tracing::warn!("scheduler tick: failed to acquire storage lock");
+                            continue;
+                        }
                     };
                     match storage.list_projects() {
                         Ok(inventory) => {
                             inventory.warn_if_corrupt("maintainer scheduler");
                             inventory.projects
                         }
-                        Err(_) => continue,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "scheduler tick: failed to list projects");
+                            continue;
+                        }
                     }
                 };
 
@@ -174,10 +184,19 @@ impl MaintainerScheduler {
                         .is_none_or(|t| t.elapsed() >= interval);
 
                     if !should_run {
+                        tracing::debug!(
+                            project_id = %project.id,
+                            "maintainer check not yet due, skipping"
+                        );
                         continue;
                     }
 
                     last_run.insert(project.id, Instant::now());
+                    tracing::info!(
+                        project = %project.name,
+                        project_id = %project.id,
+                        "starting maintainer health check"
+                    );
 
                     let _ = state
                         .emitter
@@ -188,6 +207,14 @@ impl MaintainerScheduler {
 
                     match result {
                         Ok(log) => {
+                            tracing::info!(
+                                project = %project.name,
+                                filed = log.issues_filed.len(),
+                                updated = log.issues_updated.len(),
+                                unchanged = log.issues_unchanged,
+                                skipped = log.issues_skipped,
+                                "maintainer health check completed"
+                            );
                             // Only save if something changed (diff-based silence)
                             if has_changes(&log) {
                                 if let Ok(storage) = state.storage.lock() {
@@ -200,7 +227,7 @@ impl MaintainerScheduler {
                                 .emit(&format!("maintainer-status:{}", project.id), "idle");
                         }
                         Err(e) => {
-                            tracing::error!("maintainer check failed for {}: {}", project.name, e);
+                            tracing::error!(project = %project.name, error = %e, "maintainer check failed");
                             let _ = state
                                 .emitter
                                 .emit(&format!("maintainer-status:{}", project.id), "error");
@@ -296,13 +323,22 @@ pub fn extract_json(output: &str) -> Option<&str> {
 
 fn parse_findings_output(output: &str) -> Result<FindingsOutput, String> {
     let json_str = extract_json(output).ok_or("No JSON found in output")?;
-    let raw: RawFindingsOutput =
-        serde_json::from_str(json_str).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    let raw: RawFindingsOutput = serde_json::from_str(json_str).map_err(|e| {
+        tracing::error!(error = %e, "failed to parse findings JSON");
+        format!("Failed to parse JSON: {}", e)
+    })?;
+
+    tracing::debug!(
+        raw_findings = raw.findings.len(),
+        "parsed raw findings from codex output"
+    );
 
     let mut findings = Vec::with_capacity(raw.findings.len());
     for (idx, finding) in raw.findings.into_iter().enumerate() {
-        let sanitized =
-            sanitize_finding(finding).ok_or_else(|| format!("Invalid finding at index {}", idx))?;
+        let sanitized = sanitize_finding(finding).ok_or_else(|| {
+            tracing::warn!(index = idx, "invalid finding dropped during sanitization");
+            format!("Invalid finding at index {}", idx)
+        })?;
         findings.push(sanitized);
     }
 
@@ -707,12 +743,14 @@ fn run_gh_checked(
     mut command: std::process::Command,
     failure_prefix: &str,
 ) -> Result<std::process::Output, String> {
-    let output = command
-        .output()
-        .map_err(|e| format!("Failed to run gh: {}", e))?;
+    let output = command.output().map_err(|e| {
+        tracing::error!(error = %e, "failed to execute gh command");
+        format!("Failed to run gh: {}", e)
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!(prefix = failure_prefix, stderr = %stderr.trim(), "gh command failed");
         return Err(format!("{}: {}", failure_prefix, stderr.trim()));
     }
 
@@ -835,6 +873,7 @@ fn create_issue(
     body: &str,
     labels: &[String],
 ) -> Result<IssueSummary, String> {
+    tracing::debug!(title = finding.title, "creating GitHub issue via gh CLI");
     let mut cmd = gh_command(repo_path, github_repo);
     cmd.arg("issue")
         .arg("create")
@@ -850,6 +889,13 @@ fn create_issue(
     let output = run_gh_checked(cmd, "gh issue create failed")?;
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let issue_number = parse_issue_number_from_url(&url)?;
+
+    tracing::info!(
+        issue_number,
+        title = finding.title,
+        url = url,
+        "GitHub issue created"
+    );
 
     Ok(IssueSummary {
         issue_number,
@@ -868,6 +914,7 @@ fn update_issue(
     labels: &[String],
     labels_to_remove: &[String],
 ) -> Result<(), String> {
+    tracing::debug!(issue_number, "updating GitHub issue via gh CLI");
     let issue_number_arg = issue_number.to_string();
     let mut cmd = gh_command(repo_path, github_repo);
     cmd.arg("issue")
@@ -932,6 +979,7 @@ pub fn has_changes(log: &MaintainerRunLog) -> bool {
 }
 
 fn terminate_maintainer_process(child: &mut std::process::Child) {
+    tracing::warn!(pid = child.id(), "terminating maintainer subprocess");
     #[cfg(unix)]
     {
         unsafe extern "C" {
@@ -955,6 +1003,11 @@ pub fn run_maintainer_check(
     project_id: Uuid,
     github_repo: Option<&str>,
 ) -> Result<MaintainerRunLog, String> {
+    tracing::debug!(
+        project_id = %project_id,
+        repo_path,
+        "building issue-filing prompt"
+    );
     let prompt = build_issue_filing_prompt(repo_path, github_repo);
     let mut command = Command::new("codex");
     command
@@ -971,9 +1024,11 @@ pub fn run_maintainer_check(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Failed to run codex exec: {}", e))?;
+    tracing::debug!(project_id = %project_id, "spawning codex exec subprocess");
+    let mut child = command.spawn().map_err(|e| {
+        tracing::error!(project_id = %project_id, error = %e, "failed to spawn codex exec");
+        format!("Failed to run codex exec: {}", e)
+    })?;
 
     let started_at = Instant::now();
     let status = loop {
@@ -985,6 +1040,11 @@ pub fn run_maintainer_check(
         }
 
         if started_at.elapsed() >= CODEX_EXEC_TIMEOUT {
+            tracing::error!(
+                project_id = %project_id,
+                timeout_secs = CODEX_EXEC_TIMEOUT.as_secs(),
+                "codex exec timed out, terminating process"
+            );
             terminate_maintainer_process(&mut child);
             let _ = child.wait();
             return Err(format!(
@@ -1018,17 +1078,33 @@ pub fn run_maintainer_check(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!(project_id = %project_id, "codex exec returned non-zero exit status");
         return Err(format!("codex exec failed: {}", stderr));
     }
 
+    tracing::debug!(project_id = %project_id, "codex exec completed, parsing findings");
     let findings_output = parse_findings_output(&String::from_utf8_lossy(&output.stdout))?;
     let filtered_findings = filter_semantic_findings(findings_output.findings);
+    tracing::debug!(
+        project_id = %project_id,
+        total_findings = filtered_findings.findings.len(),
+        skipped_semantic = filtered_findings.skipped_semantic,
+        "findings parsed and filtered"
+    );
 
+    tracing::debug!(project_id = %project_id, "ensuring GitHub labels exist");
     ensure_labels_exist(repo_path, github_repo)?;
 
+    tracing::debug!(project_id = %project_id, "fetching existing GitHub issues");
     let mut existing_issues = list_open_maintainer_issues(repo_path, github_repo)?;
     let closed_issues = list_closed_maintainer_issues(repo_path, github_repo)?;
     let existing_issue_count = existing_issues.len();
+    tracing::debug!(
+        project_id = %project_id,
+        open_issues = existing_issue_count,
+        closed_issues = closed_issues.len(),
+        "fetched existing maintainer issues"
+    );
 
     let mut issues_filed = Vec::new();
     let mut issues_updated = Vec::new();
@@ -1042,7 +1118,15 @@ pub fn run_maintainer_check(
         let body = format_issue_body(finding, &fingerprint);
 
         // Skip findings that match a closed issue (already resolved)
-        if find_duplicate_issue(finding, &closed_issues, DEDUP_SIMILARITY_THRESHOLD).is_some() {
+        if let Some(closed_match) =
+            find_duplicate_issue(finding, &closed_issues, DEDUP_SIMILARITY_THRESHOLD)
+        {
+            tracing::debug!(
+                finding_title = finding.title,
+                closed_issue = closed_match.issue.number,
+                similarity = closed_match.similarity,
+                "skipping finding — matches closed issue"
+            );
             issues_skipped += 1;
             skipped_closed += 1;
             continue;
@@ -1052,8 +1136,19 @@ pub fn run_maintainer_check(
             find_duplicate_issue(finding, &existing_issues, DEDUP_SIMILARITY_THRESHOLD)
         {
             if updated_issue_numbers.contains(&duplicate_match.issue.number) {
+                tracing::debug!(
+                    finding_title = finding.title,
+                    issue_number = duplicate_match.issue.number,
+                    "skipping finding — issue already updated this run"
+                );
                 continue;
             }
+            tracing::info!(
+                finding_title = finding.title,
+                issue_number = duplicate_match.issue.number,
+                similarity = duplicate_match.similarity,
+                "updating existing issue with new findings"
+            );
             let remove_labels = labels_to_remove(&duplicate_match.issue.labels, &labels);
             update_issue(
                 repo_path,
@@ -1088,6 +1183,7 @@ pub fn run_maintainer_check(
                 existing_issue.labels = labels.clone();
             }
         } else {
+            tracing::info!(finding_title = finding.title, "filing new GitHub issue");
             let filed = create_issue(repo_path, github_repo, finding, &body, &labels)?;
             existing_issues.push(ExistingIssue {
                 number: filed.issue_number,
