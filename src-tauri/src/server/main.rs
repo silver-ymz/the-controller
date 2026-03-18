@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use the_controller_lib::{
     architecture, auto_worker, commands, config, deploy, emitter::WsBroadcastEmitter, maintainer,
-    models, note_ai_chat, notes, secure_env, session_args, state::AppState, status_socket,
+    models, note_ai_chat, notes, secure_env, service, session_args, state::AppState, status_socket,
     token_usage, voice, worktree::WorktreeManager,
 };
 
@@ -393,27 +393,14 @@ fn forwarded_proto(headers: &HeaderMap) -> Option<&str> {
 async fn list_projects(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let inventory = storage
-        .list_projects()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let inventory = service::list_projects(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(inventory).unwrap()))
 }
 
 async fn check_onboarding(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let base_dir = storage.base_dir();
-    let cfg = config::load_config(&base_dir);
+    let cfg = service::check_onboarding(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(cfg).unwrap()))
 }
 
@@ -520,81 +507,13 @@ async fn load_project(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let name = args["name"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?;
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
 
-    commands::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let path = std::path::Path::new(&repo_path);
-    if !path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("repo_path is not a directory: {}", repo_path),
-        ));
-    }
-
-    // Validate it's a git repo
-    let git_dir = path.join(".git");
-    if !git_dir.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("not a git repository: {}", repo_path),
-        ));
-    }
-
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Return existing project if one with the same repo_path exists
-    if let Ok(inventory) = storage.list_projects() {
-        let existing = inventory.projects;
-        if let Some(project) = existing.iter().find(|p| p.repo_path == repo_path) {
-            return Ok(Json(serde_json::to_value(project.clone()).unwrap()));
-        }
-        // Reject duplicate project names when creating new
-        if existing.iter().any(|p| p.name == name) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("A project named '{}' already exists", name),
-            ));
-        }
-    }
-
-    let project = models::Project {
-        id: uuid::Uuid::new_v4(),
-        name: name.clone(),
-        repo_path: repo_path.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        archived: false,
-        maintainer: models::MaintainerConfig::default(),
-        auto_worker: models::AutoWorkerConfig::default(),
-        prompts: vec![],
-        sessions: vec![],
-        staged_sessions: vec![],
-    };
-
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Only create default agents.md if repo doesn't have one
-    let repo_agents = path.join("agents.md");
-    if !repo_agents.exists() {
-        storage
-            .save_agents_md(project.id, &commands::render_agents_md(&project.name))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    // If repo has agents.md but no CLAUDE.md, create symlink
-    commands::ensure_claude_md_symlink(path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
+    let project =
+        service::load_project(&state.app, name, repo_path).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(project).unwrap()))
 }
 
@@ -888,67 +807,13 @@ async fn create_project(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let name = args["name"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?;
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
 
-    commands::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let path = std::path::Path::new(&repo_path);
-    if !path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("repo_path is not a directory: {}", repo_path),
-        ));
-    }
-
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Reject duplicate project names
-    if let Ok(inventory) = storage.list_projects() {
-        if inventory.projects.iter().any(|p| p.name == name) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("A project named '{}' already exists", name),
-            ));
-        }
-    }
-
-    let project = models::Project {
-        id: uuid::Uuid::new_v4(),
-        name: name.clone(),
-        repo_path: repo_path.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        archived: false,
-        maintainer: models::MaintainerConfig::default(),
-        auto_worker: models::AutoWorkerConfig::default(),
-        prompts: vec![],
-        sessions: vec![],
-        staged_sessions: vec![],
-    };
-
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // If repo doesn't have agents.md, create default one in config dir
-    let repo_agents = path.join("agents.md");
-    if !repo_agents.exists() {
-        storage
-            .save_agents_md(project.id, &commands::render_agents_md(&project.name))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    // If repo has agents.md but no CLAUDE.md, create symlink
-    commands::ensure_claude_md_symlink(path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
+    let project = service::create_project(&state.app, name, repo_path)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(project).unwrap()))
 }
 
@@ -961,46 +826,8 @@ async fn delete_project(
     let id =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let project = storage
-        .load_project(id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Close all PTY sessions and clean up worktrees
-    {
-        let mut pty_manager = state
-            .app
-            .pty_manager
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        for session in &project.sessions {
-            let _ = pty_manager.close_session(session.id);
-            if let (Some(wt_path), Some(branch)) =
-                (&session.worktree_path, &session.worktree_branch)
-            {
-                let _ = WorktreeManager::remove_worktree(wt_path, &project.repo_path, branch);
-            }
-        }
-    }
-
-    // Delete project metadata
-    storage
-        .delete_project_dir(id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Optionally delete the repo directory
-    if delete_repo && std::path::Path::new(&project.repo_path).exists() {
-        std::fs::remove_dir_all(&project.repo_path).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to delete repo: {}", e),
-            )
-        })?;
-    }
+    service::delete_project(&state.app.storage, &state.app.pty_manager, id, delete_repo)
+        .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
@@ -1012,17 +839,8 @@ async fn get_agents_md(
     let project_id = args["projectId"].as_str().unwrap_or_default();
     let id =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let project = storage
-        .load_project(id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let content = storage
-        .get_agents_md(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let content = service::get_agents_md(&state.app, id).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(content)))
 }
 
@@ -1036,14 +854,8 @@ async fn update_agents_md(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing content".to_string()))?;
     let id =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    storage
-        .save_agents_md(id, content)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    service::update_agents_md(&state.app, id, content).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 

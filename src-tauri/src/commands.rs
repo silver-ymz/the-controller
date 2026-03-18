@@ -16,30 +16,9 @@ mod github;
 mod media;
 mod notes;
 
-/// Create a `CLAUDE.md` symlink pointing to `agents.md` in the given directory,
-/// if `agents.md` exists and `CLAUDE.md` does not.
-pub fn ensure_claude_md_symlink(dir: &Path) -> Result<(), String> {
-    let claude_md = dir.join("CLAUDE.md");
-    let agents_md = dir.join("agents.md");
-    if agents_md.exists() && !claude_md.exists() {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("agents.md", &claude_md)
-            .map_err(|e| format!("failed to create CLAUDE.md symlink: {}", e))?;
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file("agents.md", &claude_md)
-            .map_err(|e| format!("failed to create CLAUDE.md symlink: {}", e))?;
-    }
-    Ok(())
-}
-
-/// Validate a project name. Rejects empty names, names containing `/` or `\`,
-/// and names starting with `.`.
-pub fn validate_project_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') {
-        return Err(format!("Invalid project name: {}", name));
-    }
-    Ok(())
-}
+// Re-export helpers that moved to the service layer so external callers
+// (e.g. server/main.rs scaffold_project) keep working.
+pub use crate::service::{ensure_claude_md_symlink, render_agents_md, validate_project_name};
 
 /// Generate the next session label by finding the highest existing session number
 /// and returning "session-N-<6-char-uuid>" where N = max + 1. The UUID suffix
@@ -130,37 +109,6 @@ where
     }
 
     Err("Timed out waiting for merge conflict resolution.".to_string())
-}
-
-const DEFAULT_AGENTS_MD: &str = r#"# {name}
-
-One-line project description.
-
-## Task Structure (CRITICAL -- NEVER SKIP)
-
-**This is the most important rule. Every task, no matter how small, MUST follow this structure before writing any code. No exceptions.**
-
-1. **Definition**: What's the task? Why are we doing it? How will we approach it?
-2. **Constraints**: What are the design constraints -- from the user prompt, codebase conventions, or what can be inferred?
-3. **Validation**: How do I know for sure it was implemented as expected? Can I enforce it with flexible and non-brittle tests? I must validate before I consider a task complete. For semantic changes (bug fixes, feature refinements): if I revert my implementation, the test must still fail. After the implementation, the test must pass.
-
-**If you catch yourself writing code without having stated all three above, STOP and state them first.**
-
-## Key Docs
-
-- `docs/plans/` -- Design and implementation plans.
-
-## Tech Stack
-
-<!-- Fill in your project's tech stack -->
-
-## Dev Commands
-
-<!-- Fill in your project's dev commands -->
-"#;
-
-pub fn render_agents_md(name: &str) -> String {
-    DEFAULT_AGENTS_MD.replace("{name}", name)
 }
 
 fn rollback_scaffold_dir(repo_path: &Path, error: String) -> String {
@@ -431,53 +379,7 @@ pub fn create_project(
     name: String,
     repo_path: String,
 ) -> Result<Project, String> {
-    tracing::info!(project_name = %name, repo_path = %repo_path, "creating project");
-    validate_project_name(&name)?;
-
-    let path = Path::new(&repo_path);
-    if !path.is_dir() {
-        tracing::error!(repo_path = %repo_path, "create_project: repo_path is not a directory");
-        return Err(format!("repo_path is not a directory: {}", repo_path));
-    }
-
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-
-    // Reject duplicate project names.
-    if let Ok(inventory) = storage.list_projects() {
-        let existing = inventory.projects;
-        if existing.iter().any(|p| p.name == name) {
-            tracing::warn!(project_name = %name, "create_project: duplicate project name");
-            return Err(format!("A project named '{}' already exists", name));
-        }
-    }
-
-    let project = Project {
-        id: Uuid::new_v4(),
-        name,
-        repo_path: repo_path.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        archived: false,
-        maintainer: crate::models::MaintainerConfig::default(),
-        auto_worker: crate::models::AutoWorkerConfig::default(),
-        prompts: vec![],
-        sessions: vec![],
-        staged_sessions: vec![],
-    };
-
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-
-    // If repo doesn't have agents.md, create default one in config dir
-    let repo_agents = path.join("agents.md");
-    if !repo_agents.exists() {
-        storage
-            .save_agents_md(project.id, &render_agents_md(&project.name))
-            .map_err(|e| e.to_string())?;
-    }
-
-    // If repo has agents.md but no CLAUDE.md, create symlink
-    ensure_claude_md_symlink(path)?;
-
-    Ok(project)
+    crate::service::create_project(&state, &name, &repo_path).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -486,71 +388,12 @@ pub fn load_project(
     name: String,
     repo_path: String,
 ) -> Result<Project, String> {
-    tracing::info!(project_name = %name, repo_path = %repo_path, "loading project");
-    validate_project_name(&name)?;
-
-    let path = Path::new(&repo_path);
-    if !path.is_dir() {
-        tracing::error!(repo_path = %repo_path, "load_project: repo_path is not a directory");
-        return Err(format!("repo_path is not a directory: {}", repo_path));
-    }
-
-    // Validate it's a git repo
-    let git_dir = path.join(".git");
-    if !git_dir.exists() {
-        tracing::error!(repo_path = %repo_path, "load_project: not a git repository");
-        return Err(format!("not a git repository: {}", repo_path));
-    }
-
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-
-    // Return existing project if one with the same repo_path exists
-    if let Ok(inventory) = storage.list_projects() {
-        let existing = inventory.projects;
-        if let Some(project) = existing.iter().find(|p| p.repo_path == repo_path) {
-            return Ok(project.clone());
-        }
-        // Reject duplicate project names when creating new.
-        if existing.iter().any(|p| p.name == name) {
-            return Err(format!("A project named '{}' already exists", name));
-        }
-    }
-
-    let project = Project {
-        id: Uuid::new_v4(),
-        name,
-        repo_path: repo_path.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        archived: false,
-        maintainer: crate::models::MaintainerConfig::default(),
-        auto_worker: crate::models::AutoWorkerConfig::default(),
-        prompts: vec![],
-        sessions: vec![],
-        staged_sessions: vec![],
-    };
-
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-
-    // Only create default agents.md if repo doesn't have one
-    let repo_agents = path.join("agents.md");
-    if !repo_agents.exists() {
-        storage
-            .save_agents_md(project.id, &render_agents_md(&project.name))
-            .map_err(|e| e.to_string())?;
-    }
-
-    // If repo has agents.md but no CLAUDE.md, create symlink
-    ensure_claude_md_symlink(path)?;
-
-    Ok(project)
+    crate::service::load_project(&state, &name, &repo_path).map_err(Into::into)
 }
 
 #[tauri::command]
 pub fn list_projects(state: State<AppState>) -> Result<ProjectInventory, String> {
-    tracing::debug!("listing projects");
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let inventory = storage.list_projects().map_err(|e| e.to_string())?;
-    Ok(inventory)
+    crate::service::list_projects(&state).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -559,39 +402,12 @@ pub async fn delete_project(
     project_id: String,
     delete_repo: bool,
 ) -> Result<(), String> {
-    tracing::info!(project_id = %project_id, delete_repo, "deleting project");
     let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let storage = storage.lock().map_err(|e| e.to_string())?;
-        let project = storage.load_project(id).map_err(|e| e.to_string())?;
-
-        // Close all PTY sessions and clean up worktrees
-        {
-            let mut pty_manager = pty_manager.lock().map_err(|e| e.to_string())?;
-            for session in &project.sessions {
-                let _ = pty_manager.close_session(session.id);
-                if let (Some(wt_path), Some(branch)) =
-                    (&session.worktree_path, &session.worktree_branch)
-                {
-                    let _ = WorktreeManager::remove_worktree(wt_path, &project.repo_path, branch);
-                }
-            }
-        }
-
-        // Delete project metadata from ~/.the-controller/projects/{id}/
-        storage.delete_project_dir(id).map_err(|e| e.to_string())?;
-
-        // Optionally delete the repo directory
-        if delete_repo && Path::new(&project.repo_path).exists() {
-            std::fs::remove_dir_all(&project.repo_path)
-                .map_err(|e| format!("failed to delete repo: {}", e))?;
-        }
-
-        Ok(())
+        crate::service::delete_project(&storage, &pty_manager, id, delete_repo).map_err(Into::into)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
@@ -600,9 +416,7 @@ pub async fn delete_project(
 #[tauri::command]
 pub fn get_agents_md(state: State<AppState>, project_id: String) -> Result<String, String> {
     let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let project = storage.load_project(id).map_err(|e| e.to_string())?;
-    storage.get_agents_md(&project).map_err(|e| e.to_string())
+    crate::service::get_agents_md(&state, id).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -612,10 +426,7 @@ pub fn update_agents_md(
     content: String,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    storage
-        .save_agents_md(id, &content)
-        .map_err(|e| e.to_string())
+    crate::service::update_agents_md(&state, id, &content).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1412,9 +1223,7 @@ pub fn home_dir() -> Result<String, String> {
 
 #[tauri::command]
 pub fn check_onboarding(state: State<AppState>) -> Result<Option<config::Config>, String> {
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let base_dir = storage.base_dir();
-    Ok(config::load_config(&base_dir))
+    crate::service::check_onboarding(&state).map_err(Into::into)
 }
 
 #[tauri::command]
