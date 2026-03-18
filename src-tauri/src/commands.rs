@@ -463,20 +463,8 @@ pub fn set_initial_prompt(
 ) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| e.to_string())?;
-
-    if let Some(session) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
-        if session.initial_prompt.is_none() {
-            session.initial_prompt = Some(prompt);
-            storage.save_project(&project).map_err(|e| e.to_string())?;
-        }
-    }
-
-    Ok(())
+    crate::service::set_initial_prompt(&state, project_uuid, session_uuid, prompt)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -649,15 +637,11 @@ pub async fn start_claude_login(
     state: State<'_, AppState>,
     _app_handle: AppHandle,
 ) -> Result<String, String> {
-    tracing::info!("starting Claude login session");
-    let session_id = Uuid::new_v4();
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let mut mgr = pty_manager.lock().map_err(|e| e.to_string())?;
-        mgr.spawn_command(session_id, "claude", &["login"], emitter)?;
-        Ok(session_id.to_string())
+        crate::service::start_claude_login(&pty_manager, emitter).map_err(Into::into)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
@@ -666,15 +650,12 @@ pub async fn start_claude_login(
 #[tauri::command]
 pub fn stop_claude_login(state: State<AppState>, session_id: String) -> Result<(), String> {
     let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-    pty_manager.close_session(id)
+    crate::service::stop_claude_login(&state.pty_manager, id).map_err(Into::into)
 }
 
 #[tauri::command]
 pub fn home_dir() -> Result<String, String> {
-    dirs::home_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .ok_or_else(|| "Could not determine home directory".to_string())
+    crate::service::home_dir().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -684,50 +665,26 @@ pub fn check_onboarding(state: State<AppState>) -> Result<Option<config::Config>
 
 #[tauri::command]
 pub fn save_onboarding_config(state: State<AppState>, projects_root: String) -> Result<(), String> {
-    tracing::debug!(projects_root = %projects_root, "saving onboarding config");
-    let path = Path::new(&projects_root);
-    if !path.is_dir() {
-        tracing::error!(projects_root = %projects_root, "save_onboarding_config: not an existing directory");
-        return Err(format!(
-            "projects_root is not an existing directory: {}",
-            projects_root
-        ));
-    }
-
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let base_dir = storage.base_dir();
-
-    // Preserve existing log_level to avoid clobbering it
-    let existing_log_level = config::load_config(&base_dir)
-        .map(|c| c.log_level)
-        .unwrap_or_else(|| "info".to_string());
-
-    let cfg = config::Config {
-        projects_root,
-        default_provider: config::ConfigDefaultProvider::ClaudeCode,
-        log_level: existing_log_level,
-    };
-    config::save_config(&base_dir, &cfg).map_err(|e| e.to_string())
+    crate::service::save_onboarding_config(&state, &projects_root, None).map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn load_terminal_theme(
     state: State<'_, AppState>,
 ) -> Result<terminal_theme::TerminalTheme, String> {
-    let base_dir = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-        storage.base_dir()
-    };
+    let storage = state.storage.clone();
 
-    tokio::task::spawn_blocking(move || terminal_theme::load_terminal_theme(&base_dir))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
-        .map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        let base_dir = storage.lock().map_err(|e| e.to_string())?.base_dir();
+        terminal_theme::load_terminal_theme(&base_dir).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
 pub async fn check_claude_cli() -> Result<String, String> {
-    let result = tokio::task::spawn_blocking(config::check_claude_cli_status)
+    let result = tokio::task::spawn_blocking(crate::service::check_claude_cli)
         .await
         .map_err(|e| format!("Task failed: {}", e))?;
     Ok(result)
@@ -1559,99 +1516,35 @@ pub async fn get_maintainer_issue_detail(
 
 #[tauri::command]
 pub fn log_frontend_error(message: String, state: tauri::State<'_, AppState>) {
-    use std::io::Write;
-    let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
-    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
-    let line = format!("{} ERROR [frontend] {}\n", timestamp, sanitized);
-
-    if let Ok(mut guard) = state.frontend_log.lock() {
-        if let Some(ref mut file) = *guard {
-            let _ = file.write_all(line.as_bytes());
-            let _ = file.flush();
-        }
-    }
-
-    tracing::error!(target: "frontend", "{}", sanitized);
+    crate::service::log_frontend_error(&state, &message);
 }
 
 #[tauri::command]
 pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    tracing::info!("starting voice pipeline");
-    // Snapshot generation before init — if stop is called during init, this will change.
-    let gen_before = state
-        .voice_generation
-        .load(std::sync::atomic::Ordering::SeqCst);
-    // Brief lock to check if already running
-    {
-        let pipeline = state.voice_pipeline.lock().await;
-        if let Some(p) = pipeline.as_ref() {
-            // Pipeline already running — emit current state so a remounted
-            // frontend component picks up the correct label immediately.
-            tracing::debug!("voice pipeline already running, re-emitting state");
-            let voice_state = if p.is_paused() { "paused" } else { "listening" };
-            let payload = serde_json::json!({ "state": voice_state }).to_string();
-            let _ = state.emitter.emit("voice-state-changed", &payload);
-            return Ok(());
-        }
-    }
-    // Release lock during init to avoid blocking stop_voice_pipeline
-    let emitter = state.emitter.clone();
-    let new_pipeline = crate::voice::VoicePipeline::start(emitter).await?;
-    // Re-acquire lock to store the pipeline
-    let mut pipeline = state.voice_pipeline.lock().await;
-    let gen_after = state
-        .voice_generation
-        .load(std::sync::atomic::Ordering::SeqCst);
-    if pipeline.is_some() || gen_before != gen_after {
-        // Another start raced us, or stop was called during init — drop the pipeline
-        return Ok(());
-    }
-    *pipeline = Some(new_pipeline);
-    Ok(())
+    crate::service::start_voice_pipeline(&state)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn stop_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    tracing::info!("stopping voice pipeline");
-    // Bump generation so any in-flight start_voice_pipeline knows to discard its result.
-    state
-        .voice_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let mut pipeline = state.voice_pipeline.lock().await;
-    if let Some(p) = pipeline.take() {
-        // p.stop() calls thread::join which blocks — run on blocking thread pool
-        tokio::task::spawn_blocking(move || {
-            let mut p = p;
-            p.stop();
-        })
+    crate::service::stop_voice_pipeline(&state)
         .await
-        .map_err(|e| format!("Failed to stop pipeline: {e}"))?;
-    }
-    Ok(())
+        .map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn toggle_voice_pause(state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    let pipeline = state.voice_pipeline.lock().await;
-    match pipeline.as_ref() {
-        Some(p) => {
-            let paused = p.toggle_pause();
-            // Emit state change immediately for responsive UI
-            let voice_state = if paused { "paused" } else { "listening" };
-            let payload = serde_json::json!({ "state": voice_state }).to_string();
-            let _ = state.emitter.emit("voice-state-changed", &payload);
-            Ok(paused)
-        }
-        None => Err("Voice pipeline not running".to_string()),
-    }
+    crate::service::toggle_voice_pause(&state)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn load_keybindings(
     state: tauri::State<'_, AppState>,
 ) -> Result<crate::keybindings::KeybindingsResult, String> {
-    let base_dir = state.storage.lock().map_err(|e| e.to_string())?.base_dir();
-    Ok(crate::keybindings::load_keybindings(&base_dir))
+    crate::service::load_keybindings(&state).map_err(Into::into)
 }
 
 fn find_main_branch_oid(repo: &git2::Repository) -> Option<git2::Oid> {

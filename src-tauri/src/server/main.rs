@@ -20,7 +20,7 @@ use std::sync::Arc;
 use the_controller_lib::{
     architecture, auto_worker, commands, config, deploy, emitter::WsBroadcastEmitter, maintainer,
     models, note_ai_chat, secure_env, service, session_args, state::AppState, status_socket,
-    token_usage, voice,
+    token_usage,
 };
 
 use tokio::sync::broadcast;
@@ -643,29 +643,14 @@ async fn set_initial_prompt(
     let session_uuid =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if let Some(session) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
-        if session.initial_prompt.is_none() {
-            session.initial_prompt = Some(prompt);
-            storage
-                .save_project(&project)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        }
-    }
+    service::set_initial_prompt(&state.app, project_uuid, session_uuid, prompt)
+        .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
 
 async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(config::check_claude_cli_status)
+    let result = tokio::task::spawn_blocking(service::check_claude_cli)
         .await
         .map_err(|e| {
             (
@@ -677,14 +662,7 @@ async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
 }
 
 async fn home_dir() -> Result<Json<Value>, (StatusCode, String)> {
-    let path = dirs::home_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not determine home directory".to_string(),
-            )
-        })?;
+    let path = service::home_dir().map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(path)))
 }
 
@@ -699,36 +677,8 @@ async fn save_onboarding_config(
     let default_provider: config::ConfigDefaultProvider =
         serde_json::from_value(args["defaultProvider"].clone()).unwrap_or_default();
 
-    let path = std::path::Path::new(&projects_root);
-    if !path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "projects_root is not an existing directory: {}",
-                projects_root
-            ),
-        ));
-    }
-
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let base_dir = storage.base_dir();
-
-    // Preserve existing log_level to avoid clobbering it
-    let existing_log_level = config::load_config(&base_dir)
-        .map(|c| c.log_level)
-        .unwrap_or_else(|| "info".to_string());
-
-    let cfg = config::Config {
-        projects_root,
-        default_provider,
-        log_level: existing_log_level,
-    };
-    config::save_config(&base_dir, &cfg)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    service::save_onboarding_config(&state.app, &projects_root, Some(default_provider))
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -736,20 +686,8 @@ async fn log_frontend_error(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(args): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    use std::io::Write;
     let message = args["message"].as_str().unwrap_or_default();
-    let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
-    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
-    let line = format!("{} ERROR [frontend] {}\n", timestamp, sanitized);
-
-    if let Ok(mut guard) = state.app.frontend_log.lock() {
-        if let Some(ref mut file) = *guard {
-            let _ = file.write_all(line.as_bytes());
-            let _ = file.flush();
-        }
-    }
-
-    tracing::error!(target: "frontend", "{}", sanitized);
+    service::log_frontend_error(&state.app, message);
     Ok(Json(Value::Null))
 }
 
@@ -758,16 +696,19 @@ async fn detect_project_type(Json(args): Json<Value>) -> Result<Json<Value>, (St
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
         .to_string();
-    let result = deploy::commands::detect_project_type(repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let result =
+        tokio::task::spawn_blocking(move || service::detect_project_type_blocking(&repo_path))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
 async fn get_deploy_credentials() -> Result<Json<Value>, (StatusCode, String)> {
-    let result = deploy::commands::get_deploy_credentials()
+    let result = tokio::task::spawn_blocking(service::get_deploy_credentials_blocking)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
@@ -777,45 +718,41 @@ async fn save_deploy_credentials(
     let credentials: deploy::credentials::DeployCredentials =
         serde_json::from_value(args["credentials"].clone())
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    deploy::commands::save_deploy_credentials(credentials)
+    tokio::task::spawn_blocking(move || service::save_deploy_credentials_blocking(credentials))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn is_deploy_provisioned() -> Result<Json<Value>, (StatusCode, String)> {
-    let provisioned = deploy::commands::is_deploy_provisioned()
+    let provisioned = tokio::task::spawn_blocking(service::is_deploy_provisioned_blocking)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Bool(provisioned)))
 }
 
 async fn deploy_project(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
     let request: deploy::commands::DeployRequest = serde_json::from_value(args["request"].clone())
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let result = deploy::commands::deploy_project(request)
+    let result = service::deploy_project(request)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
 async fn list_deployed_services() -> Result<Json<Value>, (StatusCode, String)> {
-    let services = deploy::commands::list_deployed_services()
+    let services = service::list_deployed_services()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Array(services)))
 }
 
 async fn load_keybindings(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let result = the_controller_lib::keybindings::load_keybindings(&base_dir);
+    let result = service::load_keybindings(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
@@ -838,97 +775,39 @@ async fn capture_app_screenshot() -> Result<Json<Value>, (StatusCode, String)> {
 async fn start_voice_pipeline(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let gen_before = state
-        .app
-        .voice_generation
-        .load(std::sync::atomic::Ordering::SeqCst);
-    // Check if already running
-    {
-        let pipeline = state.app.voice_pipeline.lock().await;
-        if let Some(p) = pipeline.as_ref() {
-            // Pipeline already running — emit current state so a remounted
-            // frontend component picks up the correct label immediately.
-            let voice_state = if p.is_paused() { "paused" } else { "listening" };
-            let payload = serde_json::json!({ "state": voice_state }).to_string();
-            let _ = state.app.emitter.emit("voice-state-changed", &payload);
-            return Ok(Json(Value::Null));
-        }
-    }
-    // Release lock during init to avoid blocking stop
-    let emitter = state.app.emitter.clone();
-    let new_pipeline = voice::VoicePipeline::start(emitter)
+    service::start_voice_pipeline(&state.app)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    // Re-acquire lock to store the pipeline
-    let mut pipeline = state.app.voice_pipeline.lock().await;
-    let gen_after = state
-        .app
-        .voice_generation
-        .load(std::sync::atomic::Ordering::SeqCst);
-    if pipeline.is_some() || gen_before != gen_after {
-        // Another start raced us, or stop was called during init — drop
-        return Ok(Json(Value::Null));
-    }
-    *pipeline = Some(new_pipeline);
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn stop_voice_pipeline(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    state
-        .app
-        .voice_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let mut pipeline = state.app.voice_pipeline.lock().await;
-    if let Some(p) = pipeline.take() {
-        tokio::task::spawn_blocking(move || {
-            let mut p = p;
-            p.stop();
-        })
+    service::stop_voice_pipeline(&state.app)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to stop pipeline: {e}"),
-            )
-        })?;
-    }
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn toggle_voice_pause(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let pipeline = state.app.voice_pipeline.lock().await;
-    match pipeline.as_ref() {
-        Some(p) => {
-            let paused = p.toggle_pause();
-            let voice_state = if paused { "paused" } else { "listening" };
-            let payload = serde_json::json!({ "state": voice_state }).to_string();
-            let _ = state.app.emitter.emit("voice-state-changed", &payload);
-            Ok(Json(serde_json::json!({ "paused": paused })))
-        }
-        None => Err((
-            StatusCode::BAD_REQUEST,
-            "Voice pipeline not running".to_string(),
-        )),
-    }
+    let paused = service::toggle_voice_pause(&state.app)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::json!({ "paused": paused })))
 }
 
 async fn load_terminal_theme(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let base_dir = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        storage.base_dir()
-    };
+    let storage = state.app.storage.clone();
     let theme = tokio::task::spawn_blocking(move || {
+        let base_dir = storage.lock().map_err(|e| e.to_string())?;
+        let base_dir = base_dir.base_dir();
         the_controller_lib::terminal_theme::load_terminal_theme(&base_dir)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| {
@@ -937,7 +816,7 @@ async fn load_terminal_theme(
             format!("Task failed: {}", e),
         )
     })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::to_value(theme).unwrap()))
 }
 
@@ -2337,16 +2216,9 @@ async fn api_duplicate_note(
 async fn start_claude_login(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session_id = uuid::Uuid::new_v4();
-    let mut pty_manager = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty_manager
-        .spawn_command(session_id, "claude", &["login"], state.app.emitter.clone())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(Value::String(session_id.to_string())))
+    let session_id = service::start_claude_login(&state.app.pty_manager, state.app.emitter.clone())
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::String(session_id)))
 }
 
 async fn stop_claude_login(
@@ -2356,14 +2228,7 @@ async fn stop_claude_login(
     let session_id = args["sessionId"].as_str().unwrap_or_default();
     let id =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut pty_manager = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty_manager
-        .close_session(id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    service::stop_claude_login(&state.app.pty_manager, id).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 

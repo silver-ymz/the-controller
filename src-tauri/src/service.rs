@@ -13,8 +13,12 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::config;
+use crate::deploy::commands::{DeployRequest, DeployResult, ProjectSignals};
+use crate::deploy::coolify::CoolifyClient;
+use crate::deploy::credentials::DeployCredentials;
 use crate::emitter::EventEmitter;
 use crate::error::AppError;
+use crate::keybindings;
 use crate::models::{
     AssignedIssue, GithubIssue, MaintainerIssue, MaintainerIssueDetail, Project, SessionConfig,
     StagedSession,
@@ -24,6 +28,8 @@ use crate::notes::{self, NoteEntry};
 use crate::pty_manager::PtyManager;
 use crate::state::AppState;
 use crate::storage::{ProjectInventory, Storage};
+use crate::terminal_theme;
+use crate::voice::VoicePipeline;
 use crate::worktree::WorktreeManager;
 
 // ---------------------------------------------------------------------------
@@ -1875,6 +1881,360 @@ pub fn parse_worker_reports(raw: Vec<serde_json::Value>) -> Vec<WorkerReport> {
             })
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Configuration commands
+// ---------------------------------------------------------------------------
+
+/// Return the user's home directory path.
+pub fn home_dir() -> Result<String, AppError> {
+    dirs::home_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| AppError::Internal("Could not determine home directory".to_string()))
+}
+
+/// Check the Claude CLI installation and authentication status.
+/// This spawns a subprocess and should be called from a blocking context.
+pub fn check_claude_cli() -> String {
+    config::check_claude_cli_status()
+}
+
+/// Save onboarding config with a projects root and optional default provider.
+/// If `default_provider` is `None`, defaults to `ClaudeCode`.
+pub fn save_onboarding_config(
+    state: &AppState,
+    projects_root: &str,
+    default_provider: Option<config::ConfigDefaultProvider>,
+) -> Result<(), AppError> {
+    tracing::debug!(projects_root = %projects_root, "saving onboarding config");
+    let path = Path::new(projects_root);
+    if !path.is_dir() {
+        tracing::error!(projects_root = %projects_root, "save_onboarding_config: not an existing directory");
+        return Err(AppError::BadRequest(format!(
+            "projects_root is not an existing directory: {}",
+            projects_root
+        )));
+    }
+
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    let base_dir = storage.base_dir();
+
+    // Preserve existing log_level to avoid clobbering it
+    let existing_log_level = config::load_config(&base_dir)
+        .map(|c| c.log_level)
+        .unwrap_or_else(|| "info".to_string());
+
+    let cfg = config::Config {
+        projects_root: projects_root.to_string(),
+        default_provider: default_provider.unwrap_or(config::ConfigDefaultProvider::ClaudeCode),
+        log_level: existing_log_level,
+    };
+    config::save_config(&base_dir, &cfg).map_err(AppError::internal)
+}
+
+/// Load the terminal theme from the config directory.
+/// This reads files and should be called from a blocking context.
+pub fn load_terminal_theme_blocking(
+    state: &AppState,
+) -> Result<terminal_theme::TerminalTheme, AppError> {
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
+    terminal_theme::load_terminal_theme(&base_dir).map_err(AppError::internal)
+}
+
+/// Load keybindings from the config directory.
+pub fn load_keybindings(state: &AppState) -> Result<keybindings::KeybindingsResult, AppError> {
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
+    Ok(keybindings::load_keybindings(&base_dir))
+}
+
+/// Log a frontend error to the dedicated log file and tracing.
+pub fn log_frontend_error(state: &AppState, message: &str) {
+    use std::io::Write;
+    let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
+    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
+    let line = format!("{} ERROR [frontend] {}\n", timestamp, sanitized);
+
+    if let Ok(mut guard) = state.frontend_log.lock() {
+        if let Some(ref mut file) = *guard {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.flush();
+        }
+    }
+
+    tracing::error!(target: "frontend", "{}", sanitized);
+}
+
+/// Set the initial prompt for a session (only if not already set).
+pub fn set_initial_prompt(
+    state: &AppState,
+    project_id: Uuid,
+    session_id: Uuid,
+    prompt: String,
+) -> Result<(), AppError> {
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    let mut project = storage
+        .load_project(project_id)
+        .map_err(AppError::internal)?;
+
+    if let Some(session) = project.sessions.iter_mut().find(|s| s.id == session_id) {
+        if session.initial_prompt.is_none() {
+            session.initial_prompt = Some(prompt);
+            storage.save_project(&project).map_err(AppError::internal)?;
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Deploy commands
+// ---------------------------------------------------------------------------
+
+/// Detect the project type based on files present in the repo.
+/// Should be called from a blocking context.
+pub fn detect_project_type_blocking(repo_path: &str) -> Result<ProjectSignals, AppError> {
+    tracing::debug!(repo_path = %repo_path, "detecting project type");
+    let path = Path::new(repo_path);
+    let has_package_json = path.join("package.json").exists();
+    let has_start_script = if has_package_json {
+        std::fs::read_to_string(path.join("package.json"))
+            .map(|content| content.contains("\"start\""))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    Ok(ProjectSignals {
+        has_dockerfile: path.join("Dockerfile").exists(),
+        has_package_json,
+        has_vite_config: path.join("vite.config.ts").exists()
+            || path.join("vite.config.js").exists()
+            || path.join("astro.config.mjs").exists()
+            || path.join("next.config.js").exists()
+            || path.join("next.config.mjs").exists(),
+        has_start_script,
+        has_pyproject: path.join("pyproject.toml").exists()
+            || path.join("requirements.txt").exists(),
+    })
+}
+
+/// Load deploy credentials from the credential store.
+/// Should be called from a blocking context.
+pub fn get_deploy_credentials_blocking() -> Result<DeployCredentials, AppError> {
+    tracing::debug!("loading deploy credentials");
+    DeployCredentials::load().map_err(AppError::Internal)
+}
+
+/// Save deploy credentials to the credential store.
+/// Should be called from a blocking context.
+pub fn save_deploy_credentials_blocking(credentials: DeployCredentials) -> Result<(), AppError> {
+    tracing::info!("saving deploy credentials");
+    credentials.save().map_err(AppError::Internal)
+}
+
+/// Check if deploy is provisioned (credentials are complete).
+/// Should be called from a blocking context.
+pub fn is_deploy_provisioned_blocking() -> Result<bool, AppError> {
+    let creds = DeployCredentials::load().map_err(AppError::Internal)?;
+    Ok(creds.is_provisioned())
+}
+
+/// Deploy a project via the Coolify API.
+pub async fn deploy_project(request: DeployRequest) -> Result<DeployResult, AppError> {
+    tracing::info!(
+        project = %request.project_name,
+        subdomain = %request.subdomain,
+        project_type = %request.project_type,
+        "starting project deployment"
+    );
+    let creds = tokio::task::spawn_blocking(DeployCredentials::load)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(AppError::Internal)?;
+    if !creds.is_provisioned() {
+        tracing::error!("deploy not provisioned — credentials incomplete");
+        return Err(AppError::BadRequest(
+            "Deploy not provisioned. Run setup first.".to_string(),
+        ));
+    }
+
+    let coolify = CoolifyClient::new(
+        creds.coolify_url.as_ref().unwrap(),
+        creds.coolify_api_key.as_ref().unwrap(),
+    );
+
+    let apps = coolify
+        .list_applications()
+        .await
+        .map_err(AppError::Internal)?;
+    let existing = apps.iter().find(|a| a.name == request.project_name);
+
+    let uuid = if let Some(app) = existing {
+        tracing::info!(uuid = %app.uuid, "found existing Coolify app, redeploying");
+        coolify
+            .deploy_application(&app.uuid)
+            .await
+            .map_err(AppError::Internal)?;
+        app.uuid.clone()
+    } else {
+        tracing::error!(project = %request.project_name, "no existing Coolify app found");
+        return Err(AppError::Internal(
+            "Creating new Coolify applications not yet implemented. Create the app in Coolify UI first.".to_string(),
+        ));
+    };
+
+    let domain = format!("{}.{}", request.subdomain, creds.root_domain.unwrap());
+    let url = format!("https://{domain}");
+
+    tracing::info!(url = %url, uuid = %uuid, "deployment complete");
+    Ok(DeployResult {
+        url,
+        coolify_uuid: uuid,
+    })
+}
+
+/// List deployed services via the Coolify API.
+pub async fn list_deployed_services() -> Result<Vec<serde_json::Value>, AppError> {
+    tracing::debug!("listing deployed services");
+    let creds = tokio::task::spawn_blocking(DeployCredentials::load)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(AppError::Internal)?;
+    if !creds.is_provisioned() {
+        tracing::warn!("credentials not provisioned, returning empty service list");
+        return Ok(vec![]);
+    }
+
+    let coolify = CoolifyClient::new(
+        creds.coolify_url.as_ref().unwrap(),
+        creds.coolify_api_key.as_ref().unwrap(),
+    );
+
+    let apps = coolify
+        .list_applications()
+        .await
+        .map_err(AppError::Internal)?;
+    let result: Vec<serde_json::Value> = apps
+        .iter()
+        .map(|app| {
+            serde_json::json!({
+                "uuid": app.uuid,
+                "name": app.name,
+                "status": app.status,
+                "fqdn": app.fqdn,
+            })
+        })
+        .collect();
+
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Voice commands
+// ---------------------------------------------------------------------------
+
+/// Start the voice pipeline. If already running, re-emits the current state.
+pub async fn start_voice_pipeline(state: &AppState) -> Result<(), AppError> {
+    tracing::info!("starting voice pipeline");
+    // Snapshot generation before init — if stop is called during init, this will change.
+    let gen_before = state
+        .voice_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    // Brief lock to check if already running
+    {
+        let pipeline = state.voice_pipeline.lock().await;
+        if let Some(p) = pipeline.as_ref() {
+            // Pipeline already running — emit current state so a remounted
+            // frontend component picks up the correct label immediately.
+            tracing::debug!("voice pipeline already running, re-emitting state");
+            let voice_state = if p.is_paused() { "paused" } else { "listening" };
+            let payload = serde_json::json!({ "state": voice_state }).to_string();
+            let _ = state.emitter.emit("voice-state-changed", &payload);
+            return Ok(());
+        }
+    }
+    // Release lock during init to avoid blocking stop_voice_pipeline
+    let emitter = state.emitter.clone();
+    let new_pipeline = VoicePipeline::start(emitter)
+        .await
+        .map_err(AppError::Internal)?;
+    // Re-acquire lock to store the pipeline
+    let mut pipeline = state.voice_pipeline.lock().await;
+    let gen_after = state
+        .voice_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if pipeline.is_some() || gen_before != gen_after {
+        // Another start raced us, or stop was called during init — drop the pipeline
+        return Ok(());
+    }
+    *pipeline = Some(new_pipeline);
+    Ok(())
+}
+
+/// Stop the voice pipeline.
+pub async fn stop_voice_pipeline(state: &AppState) -> Result<(), AppError> {
+    tracing::info!("stopping voice pipeline");
+    // Bump generation so any in-flight start_voice_pipeline knows to discard its result.
+    state
+        .voice_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut pipeline = state.voice_pipeline.lock().await;
+    if let Some(p) = pipeline.take() {
+        // p.stop() calls thread::join which blocks — run on blocking thread pool
+        tokio::task::spawn_blocking(move || {
+            let mut p = p;
+            p.stop();
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to stop pipeline: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Toggle voice pause state. Returns `true` if now paused.
+pub async fn toggle_voice_pause(state: &AppState) -> Result<bool, AppError> {
+    let pipeline = state.voice_pipeline.lock().await;
+    match pipeline.as_ref() {
+        Some(p) => {
+            let paused = p.toggle_pause();
+            // Emit state change immediately for responsive UI
+            let voice_state = if paused { "paused" } else { "listening" };
+            let payload = serde_json::json!({ "state": voice_state }).to_string();
+            let _ = state.emitter.emit("voice-state-changed", &payload);
+            Ok(paused)
+        }
+        None => Err(AppError::BadRequest(
+            "Voice pipeline not running".to_string(),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth/Login commands
+// ---------------------------------------------------------------------------
+
+/// Start a Claude login session by spawning a `claude login` PTY command.
+/// Should be called from a blocking context.
+pub fn start_claude_login(
+    pty_manager: &Arc<Mutex<PtyManager>>,
+    emitter: Arc<dyn EventEmitter>,
+) -> Result<String, AppError> {
+    tracing::info!("starting Claude login session");
+    let session_id = Uuid::new_v4();
+    let mut mgr = pty_manager.lock().map_err(AppError::internal)?;
+    mgr.spawn_command(session_id, "claude", &["login"], emitter)
+        .map_err(AppError::Internal)?;
+    Ok(session_id.to_string())
+}
+
+/// Stop a Claude login session.
+pub fn stop_claude_login(
+    pty_manager: &Arc<Mutex<PtyManager>>,
+    session_id: Uuid,
+) -> Result<(), AppError> {
+    let mut mgr = pty_manager.lock().map_err(AppError::internal)?;
+    mgr.close_session(session_id).map_err(AppError::Internal)
 }
 
 #[cfg(test)]
