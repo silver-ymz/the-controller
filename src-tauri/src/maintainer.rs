@@ -17,7 +17,7 @@ const PRIORITY_LOW_LABEL: &str = labels::PRIORITY_LOW;
 const PRIORITY_HIGH_LABEL: &str = labels::PRIORITY_HIGH;
 const COMPLEXITY_LOW_LABEL: &str = labels::COMPLEXITY_LOW;
 const COMPLEXITY_HIGH_LABEL: &str = labels::COMPLEXITY_HIGH;
-const MAINTAINER_EXEC_TIMEOUT: Duration = Duration::from_secs(120);
+const MAINTAINER_EXEC_TIMEOUT: Duration = Duration::from_secs(1200);
 
 const STOPWORDS: &[&str] = &[
     "a",
