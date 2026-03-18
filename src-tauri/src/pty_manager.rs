@@ -64,6 +64,7 @@ impl PtyManager {
     ) -> Result<(), String> {
         // Skip if already connected
         if self.sessions.contains_key(&session_id) {
+            tracing::debug!(session_id = %session_id, "session already connected, skipping spawn");
             return Ok(());
         }
 
@@ -72,6 +73,8 @@ impl PtyManager {
             "cursor-agent" => "cursor-agent",
             _ => "claude",
         };
+
+        tracing::info!(session_id = %session_id, command = command, "spawning session");
 
         // Try broker first
         if self.broker.is_available() || self.try_spawn_broker() {
@@ -93,6 +96,7 @@ impl PtyManager {
         }
 
         // Direct PTY
+        tracing::debug!(session_id = %session_id, "using direct PTY mode");
         self.spawn_direct_session(
             session_id,
             working_dir,
@@ -146,6 +150,7 @@ impl PtyManager {
         let needs_spawn = !self.broker.has_session(session_id);
 
         if needs_spawn {
+            tracing::debug!(session_id = %session_id, command = command, "spawning new broker session");
             self.broker.spawn(SpawnRequest {
                 session_id,
                 cmd: command.to_string(),
@@ -157,13 +162,16 @@ impl PtyManager {
             })?;
         } else {
             // Session exists, just resize
+            tracing::debug!(session_id = %session_id, "broker session already exists, resizing");
             let _ = self.broker.resize(session_id, rows, cols);
         }
 
         // Connect to data socket
+        tracing::debug!(session_id = %session_id, "connecting to broker data socket");
         let data_stream = match self.broker.connect_data(session_id) {
             Ok(s) => s,
             Err(e) => {
+                tracing::error!(session_id = %session_id, error = %e, "failed to connect to broker data socket");
                 // Kill the broker session to avoid an orphan
                 if needs_spawn {
                     let _ = self.broker.kill(session_id);
@@ -220,6 +228,7 @@ impl PtyManager {
         rows: u16,
         cols: u16,
     ) -> Result<(), String> {
+        tracing::debug!(session_id = %session_id, command = command, "spawning direct PTY session");
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -228,7 +237,10 @@ impl PtyManager {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| format!("failed to open pty: {}", e))?;
+            .map_err(|e| {
+                tracing::error!(session_id = %session_id, error = %e, "failed to open pty");
+                format!("failed to open pty: {}", e)
+            })?;
 
         let mut cmd = CommandBuilder::new(command);
         cmd.cwd(working_dir);
@@ -423,6 +435,7 @@ impl PtyManager {
     }
 
     pub fn resize_session(&self, session_id: Uuid, rows: u16, cols: u16) -> Result<(), String> {
+        tracing::debug!(session_id = %session_id, rows = rows, cols = cols, "resizing session");
         let session = self
             .sessions
             .get(&session_id)
@@ -454,16 +467,19 @@ impl PtyManager {
 
     /// Close a session.
     pub fn close_session(&mut self, session_id: Uuid) -> Result<(), String> {
+        tracing::info!(session_id = %session_id, "closing session");
         let session = self.sessions.remove(&session_id);
 
         match session {
             Some(Session::Pty(mut s)) => {
+                tracing::debug!(session_id = %session_id, "closing direct PTY session");
                 if !matches!(s.child.try_wait(), Ok(Some(_))) {
                     let _ = s.child.kill();
                     let _ = s.child.wait();
                 }
             }
             Some(Session::Broker(_)) => {
+                tracing::debug!(session_id = %session_id, "closing broker session");
                 let _ = self.broker.kill(session_id);
             }
             None => {

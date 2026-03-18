@@ -55,6 +55,9 @@ impl AutoGain {
 
         // Apply gain
         let gain = (self.target_rms / avg_rms).min(self.max_gain);
+        if gain >= self.max_gain {
+            tracing::debug!(gain, max_gain = self.max_gain, "gain clamped to max");
+        }
         float_samples
             .iter()
             .map(|&s| (s * gain).clamp(-1.0, 1.0))

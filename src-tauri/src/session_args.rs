@@ -5,6 +5,7 @@ const BACKGROUND_WORKFLOW_SUFFIX: &str = "\n\nYou are an autonomous background w
 /// Build the initial prompt injected into a session from a GitHub issue.
 /// When `background` is true, appends the autonomous workflow instructions.
 pub fn build_issue_prompt(issue_number: u64, title: &str, url: &str, background: bool) -> String {
+    tracing::debug!(issue = issue_number, background, "building issue prompt");
     let base = format!(
         "You are working on GitHub issue #{}: {}\nIssue URL: {}\nPlease include 'closes #{}' in any PR descriptions or final commit messages.",
         issue_number, title, url, issue_number
@@ -36,6 +37,13 @@ pub fn build_session_args(
     continue_session: bool,
     initial_prompt: Option<&str>,
 ) -> Vec<String> {
+    tracing::debug!(
+        command,
+        %session_id,
+        continue_session,
+        has_prompt = initial_prompt.is_some(),
+        "building session args"
+    );
     let mut args = Vec::new();
 
     match command {
@@ -44,6 +52,7 @@ pub fn build_session_args(
                 args.push("--continue".to_string());
             }
             let settings_json = crate::status_socket::hook_settings_json(session_id);
+            tracing::debug!("wrote claude settings JSON for hook injection");
             args.push("--settings".to_string());
             args.push(settings_json);
             if let Some(prompt) = initial_prompt {
@@ -65,6 +74,7 @@ pub fn build_session_args(
             args.extend(CURSOR_FULL_PERMISSION_ARGS.iter().map(|s| s.to_string()));
         }
         _ => {
+            tracing::warn!(command, "unknown command, using generic arg handling");
             if continue_session {
                 args.push("--continue".to_string());
             }
@@ -77,6 +87,7 @@ pub fn build_session_args(
         args.push(prompt.to_string());
     }
 
+    tracing::debug!(command, arg_count = args.len(), "session args built");
     args
 }
 

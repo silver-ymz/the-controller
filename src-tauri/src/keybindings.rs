@@ -181,6 +181,7 @@ const COMMAND_DEFAULTS: &[(&str, &str, &str)] = &[
 ];
 
 pub fn generate_template() -> String {
+    tracing::debug!("generating keybindings template");
     let mut out = String::new();
     out.push_str("# Keybindings for The Controller\n");
     out.push_str("# Uncomment and change the key to override a default binding.\n");
@@ -210,6 +211,10 @@ pub fn generate_template() -> String {
 pub fn ensure_keybindings_file(base_dir: &Path) {
     let path = keybindings_path(base_dir);
     if !path.exists() {
+        tracing::debug!(
+            path = %path.display(),
+            "keybindings file not found, creating template"
+        );
         if let Err(e) = fs::write(&path, generate_template()) {
             tracing::error!(
                 "failed to write keybindings template to {}: {e}",
@@ -245,6 +250,11 @@ pub fn start_watcher(base_dir: PathBuf, emitter: Arc<dyn crate::emitter::EventEm
             return;
         }
 
+        tracing::debug!(
+            path = %base_dir.display(),
+            "keybindings file watcher started"
+        );
+
         let target = keybindings_path(&base_dir);
         loop {
             match rx.recv() {
@@ -253,6 +263,7 @@ pub fn start_watcher(base_dir: PathBuf, emitter: Arc<dyn crate::emitter::EventEm
                     if !relevant {
                         continue;
                     }
+                    tracing::info!("keybindings file change detected, reloading");
                     let result = load_keybindings(&base_dir);
                     if let Ok(payload) = serde_json::to_string(&result) {
                         let _ = emitter.emit("keybindings-changed", &payload);

@@ -17,12 +17,28 @@ pub struct DeployCredentials {
 
 impl DeployCredentials {
     pub fn is_provisioned(&self) -> bool {
-        self.hetzner_api_key.is_some()
+        let provisioned = self.hetzner_api_key.is_some()
             && self.cloudflare_api_key.is_some()
             && self.root_domain.is_some()
             && self.coolify_url.is_some()
             && self.coolify_api_key.is_some()
-            && self.server_ip.is_some()
+            && self.server_ip.is_some();
+        if !provisioned {
+            let missing: Vec<&str> = [
+                ("hetzner_api_key", &self.hetzner_api_key),
+                ("cloudflare_api_key", &self.cloudflare_api_key),
+                ("root_domain", &self.root_domain),
+                ("coolify_url", &self.coolify_url),
+                ("coolify_api_key", &self.coolify_api_key),
+                ("server_ip", &self.server_ip),
+            ]
+            .iter()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| *k)
+            .collect();
+            tracing::debug!(missing = ?missing, "deploy credentials incomplete");
+        }
+        provisioned
     }
 
     fn config_path() -> PathBuf {
@@ -35,26 +51,52 @@ impl DeployCredentials {
     pub fn load() -> Result<Self, String> {
         let path = Self::config_path();
         if !path.exists() {
+            tracing::debug!(path = %path.display(), "credentials file not found, returning defaults");
             return Ok(Self::default());
         }
-        let data = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&data).map_err(|e| e.to_string())
+        tracing::debug!(path = %path.display(), "loading deploy credentials");
+        let data = std::fs::read_to_string(&path).map_err(|e| {
+            tracing::error!(path = %path.display(), error = %e, "failed to read credentials file");
+            e.to_string()
+        })?;
+        serde_json::from_str(&data).map_err(|e| {
+            tracing::error!(error = %e, "failed to parse credentials JSON");
+            e.to_string()
+        })
     }
 
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
+        tracing::debug!(path = %path.display(), "saving deploy credentials");
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                tracing::error!(path = %parent.display(), error = %e, "failed to create credentials directory");
+                e.to_string()
+            })?;
         }
-        let data = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        let mut file = open_credentials_file(&path).map_err(|e| e.to_string())?;
-        file.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+        let data = serde_json::to_string_pretty(self).map_err(|e| {
+            tracing::error!(error = %e, "failed to serialize credentials");
+            e.to_string()
+        })?;
+        let mut file = open_credentials_file(&path).map_err(|e| {
+            tracing::error!(path = %path.display(), error = %e, "failed to open credentials file for writing");
+            e.to_string()
+        })?;
+        file.write_all(data.as_bytes()).map_err(|e| {
+            tracing::error!(error = %e, "failed to write credentials file");
+            e.to_string()
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| e.to_string())?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| {
+                    tracing::error!(error = %e, "failed to set credentials file permissions");
+                    e.to_string()
+                },
+            )?;
         }
+        tracing::debug!("deploy credentials saved");
         Ok(())
     }
 }

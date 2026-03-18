@@ -38,6 +38,7 @@ impl IssueCache {
     }
 
     pub fn insert(&mut self, repo_path: String, issues: Vec<GithubIssue>) {
+        tracing::debug!(repo = %repo_path, count = issues.len(), "caching issues for repo");
         self.entries.insert(
             repo_path,
             CacheEntry {
@@ -48,6 +49,7 @@ impl IssueCache {
     }
 
     pub fn invalidate(&mut self, repo_path: &str) {
+        tracing::debug!(repo = %repo_path, "invalidating issue cache for repo");
         self.entries.remove(repo_path);
     }
 
@@ -94,11 +96,19 @@ pub struct AppState {
 
 impl AppState {
     pub fn from_storage(storage: Storage, emitter: Arc<dyn EventEmitter>) -> std::io::Result<Self> {
+        tracing::info!("initializing app state");
         storage.ensure_dirs()?;
         let frontend_log = match crate::logging::init_frontend_log_writer(&storage.base_dir()) {
-            Ok((file, _path)) => Mutex::new(Some(file)),
-            Err(_) => Mutex::new(None),
+            Ok((file, _path)) => {
+                tracing::debug!("frontend log writer initialized");
+                Mutex::new(Some(file))
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to initialize frontend log writer");
+                Mutex::new(None)
+            }
         };
+        tracing::info!("app state initialized");
         Ok(Self {
             storage: Arc::new(Mutex::new(storage)),
             pty_manager: Arc::new(Mutex::new(PtyManager::new())),
