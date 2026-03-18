@@ -61,7 +61,25 @@ pub fn install_controller_cli() {
     for binary_name in &["controller-cli", "pty-broker"] {
         let source = exe_dir.join(binary_name);
         if !source.exists() {
+            tracing::warn!(
+                "{} not found in bundle ({}), skipping install",
+                binary_name,
+                exe_dir.display()
+            );
             continue;
+        }
+
+        // Check if the bundle binary matches this app build
+        if let Some(source_date) = installed_build_date(&source) {
+            if source_date != our_build_date {
+                tracing::warn!(
+                    "{} in bundle is stale (bundle: {}, app: {}), skipping install",
+                    binary_name,
+                    source_date,
+                    our_build_date
+                );
+                continue;
+            }
         }
 
         let dest = bin_dir.join(binary_name);
