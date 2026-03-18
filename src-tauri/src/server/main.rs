@@ -575,7 +575,7 @@ async fn load_project(
         auto_worker: models::AutoWorkerConfig::default(),
         prompts: vec![],
         sessions: vec![],
-        staged_session: None,
+        staged_sessions: vec![],
     };
 
     storage
@@ -929,7 +929,7 @@ async fn create_project(
         auto_worker: models::AutoWorkerConfig::default(),
         prompts: vec![],
         sessions: vec![],
-        staged_session: None,
+        staged_sessions: vec![],
     };
 
     storage
@@ -3119,14 +3119,22 @@ async fn unstage_session(
     let mut project = storage
         .load_project(project_uuid)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let staged = project.staged_session.take().ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "No session is currently staged".to_string(),
-        )
-    })?;
+    let session_id_str = args["sessionId"].as_str().unwrap_or_default();
+    let session_uuid = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let idx = project
+        .staged_sessions
+        .iter()
+        .position(|s| s.session_id == session_uuid)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "No session is currently staged".to_string(),
+            )
+        })?;
+    let staged = project.staged_sessions.remove(idx);
     commands::kill_process_group(staged.pid);
-    let _ = std::fs::remove_file(status_socket::staged_socket_path());
+    let _ = std::fs::remove_file(status_socket::staged_socket_path(&session_uuid));
     storage
         .save_project(&project)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
