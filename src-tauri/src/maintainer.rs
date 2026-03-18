@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -978,24 +979,38 @@ pub fn has_changes(log: &MaintainerRunLog) -> bool {
     !log.issues_filed.is_empty() || !log.issues_updated.is_empty()
 }
 
-fn terminate_maintainer_process(child: &mut std::process::Child) {
-    tracing::warn!(pid = child.id(), "terminating maintainer subprocess");
-    #[cfg(unix)]
-    {
-        unsafe extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        const SIGKILL: i32 = 9;
-        if let Ok(pid) = i32::try_from(child.id()) {
-            // process_group(0) puts the subprocess in its own group,
-            // so negative pid targets its subtree.
-            unsafe {
-                let _ = kill(-pid, SIGKILL);
-            }
-        }
+/// RAII guard that cancels and joins a watchdog thread on drop.
+///
+/// Ensures the watchdog never outlives the scope that spawned it, even on
+/// early `?` returns — preventing thread leaks and stale-PID kills.
+struct WatchdogGuard {
+    cancel: Arc<(Mutex<bool>, Condvar)>,
+    handle: Option<std::thread::JoinHandle<bool>>,
+}
+
+impl WatchdogGuard {
+    /// Cancel the watchdog and return whether it timed out.
+    fn cancel_and_join(mut self) -> bool {
+        self.cancel_inner()
     }
-    // Non-Unix platforms fall back to killing the direct child only.
-    let _ = child.kill();
+
+    fn cancel_inner(&mut self) -> bool {
+        let (lock, cvar) = &*self.cancel;
+        // Recover from poison — the bool value doesn't matter, we just need
+        // to signal cancellation.  Panicking here would abort during unwind.
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cvar.notify_one();
+        self.handle
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for WatchdogGuard {
+    fn drop(&mut self) {
+        self.cancel_inner();
+    }
 }
 
 pub fn run_maintainer_check(
@@ -1023,56 +1038,61 @@ pub fn run_maintainer_check(
         command.process_group(0);
     }
     tracing::debug!(project_id = %project_id, "spawning claude --print subprocess");
-    let mut child = command.spawn().map_err(|e| {
+    let child = command.spawn().map_err(|e| {
         tracing::error!(project_id = %project_id, error = %e, "failed to spawn claude --print");
         format!("Failed to run claude --print: {}", e)
     })?;
 
-    let started_at = Instant::now();
-    let status = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| format!("Failed to wait for claude --print: {}", e))?
-        {
-            break status;
+    // Spawn a watchdog that kills the process group on timeout.
+    // `wait_with_output()` drains stdout/stderr concurrently with the wait,
+    // avoiding pipe-buffer deadlocks (the OS buffer is ~64 KB; if the child
+    // writes more than that without a reader, it blocks forever).
+    let child_pid = child.id();
+    let cancel = Arc::new((Mutex::new(false), Condvar::new()));
+    let cancel_w = cancel.clone();
+    let watchdog = std::thread::spawn(move || {
+        let (lock, cvar) = &*cancel_w;
+        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Wait until cancelled OR timeout elapses.
+        let (guard, _timeout) = cvar
+            .wait_timeout_while(guard, MAINTAINER_EXEC_TIMEOUT, |cancelled| !*cancelled)
+            .unwrap_or_else(|e| e.into_inner());
+        if *guard {
+            return false; // Cancelled — process exited normally.
         }
-
-        if started_at.elapsed() >= MAINTAINER_EXEC_TIMEOUT {
-            tracing::error!(
-                project_id = %project_id,
-                timeout_secs = MAINTAINER_EXEC_TIMEOUT.as_secs(),
-                "claude --print timed out, terminating process"
-            );
-            terminate_maintainer_process(&mut child);
-            let _ = child.wait();
-            return Err(format!(
-                "claude --print timed out after {} seconds",
-                MAINTAINER_EXEC_TIMEOUT.as_secs()
-            ));
+        // Kill the process group so the child (and any subprocesses) exit,
+        // which unblocks wait_with_output().
+        #[cfg(unix)]
+        if let Ok(pid) = i32::try_from(child_pid) {
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
         }
+        true // Timed out.
+    });
 
-        std::thread::sleep(Duration::from_millis(50));
+    // Guard that cancels and joins the watchdog on any exit path (including
+    // early `?` returns), preventing a 20-minute thread leak and stale-PID kill.
+    let watchdog_guard = WatchdogGuard {
+        cancel,
+        handle: Some(watchdog),
     };
 
-    let output = std::process::Output {
-        status,
-        stdout: {
-            let mut buf = Vec::new();
-            if let Some(mut stdout) = child.stdout.take() {
-                use std::io::Read;
-                let _ = stdout.read_to_end(&mut buf);
-            }
-            buf
-        },
-        stderr: {
-            let mut buf = Vec::new();
-            if let Some(mut stderr) = child.stderr.take() {
-                use std::io::Read;
-                let _ = stderr.read_to_end(&mut buf);
-            }
-            buf
-        },
-    };
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for claude --print: {}", e))?;
+
+    let timed_out = watchdog_guard.cancel_and_join();
+
+    if timed_out {
+        tracing::error!(
+            project_id = %project_id,
+            timeout_secs = MAINTAINER_EXEC_TIMEOUT.as_secs(),
+            "claude --print timed out, terminated by watchdog"
+        );
+        return Err(format!(
+            "claude --print timed out after {} seconds",
+            MAINTAINER_EXEC_TIMEOUT.as_secs()
+        ));
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
