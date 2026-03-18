@@ -305,13 +305,13 @@
 
   async function sendScreenshotToSession(sessionId: string, projectId: string) {
     if (!screenshotPickerState) return;
-    const prompt = screenshotPrompt(screenshotPickerState.path);
+    const path = screenshotPickerState.path;
     screenshotPickerState = null;
 
     try {
       // Ensure the PTY is spawned before writing (it may not be active yet)
       await command("connect_session", { sessionId, rows: 24, cols: 80 });
-      await command("write_to_pty", { sessionId, data: prompt + "\n" });
+      await command("write_to_pty", { sessionId, data: path + "\n" });
       activeSessionId.set(sessionId);
       expandedProjects.update((s: Set<string>) => {
         const next = new Set(s);
@@ -390,12 +390,27 @@
         ...currentView,
         isGenerating: true,
         error: null,
+        logs: [],
       });
       return next;
     });
 
+    const unlistenLogs = listen<string>("architecture-log", (message) => {
+      architectureViews.update((views) => {
+        const next = new Map(views);
+        const currentView = next.get(projectId);
+        if (!currentView?.isGenerating) return next;
+        next.set(projectId, {
+          ...currentView,
+          logs: [...currentView.logs, message],
+        });
+        return next;
+      });
+    });
+
     try {
       const result = await command<ArchitectureResult>("generate_architecture", { repoPath });
+      unlistenLogs();
       architectureViews.update((views) => {
         const next = new Map(views);
         const currentView = next.get(projectId) ?? createArchitectureViewState();
@@ -410,10 +425,12 @@
           selectedComponentId,
           isGenerating: false,
           error: null,
+          logs: [],
         });
         return next;
       });
     } catch (error) {
+      unlistenLogs();
       architectureViews.update((views) => {
         const next = new Map(views);
         const currentView = next.get(projectId) ?? createArchitectureViewState();
@@ -539,6 +556,7 @@
             }}
             isGenerating={currentArchitectureView?.isGenerating ?? false}
             error={currentArchitectureView?.error ?? null}
+            logs={currentArchitectureView?.logs ?? []}
           />
         {:else if workspaceModeState.current === "notes"}
           <NotesEditor />

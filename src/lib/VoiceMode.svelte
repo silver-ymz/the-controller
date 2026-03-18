@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { command, listen } from "$lib/backend";
+  import { command, listenAsync } from "$lib/backend";
 
   let voiceState = $state<string>("voice mode");
   let showDebug = $state(false);
@@ -12,9 +12,11 @@
   const MAX_TRANSCRIPT_ENTRIES = 200;
 
   const STATE_LABELS: Record<string, string> = {
-    listening: "listening...",
-    thinking: "thinking...",
-    speaking: "speaking...",
+    initializing: "voice mode (initializing...)",
+    listening: "voice mode (listening...)",
+    thinking: "voice mode (thinking...)",
+    speaking: "voice mode (speaking...)",
+    paused: "voice mode (paused)",
   };
 
   export function toggleDebug() {
@@ -41,53 +43,68 @@
   });
 
   onMount(() => {
-    const unlistenState = listen<string>("voice-state-changed", (payload) => {
-      try {
-        const data = JSON.parse(payload);
-        if (data.state === "downloading" && data.filename) {
-          const pct = data.percent != null ? ` ${data.percent}%` : "";
-          voiceState = `downloading ${data.filename}${pct}`;
-        } else if (data.state === "error") {
-          voiceState = `error: ${data.error ?? "unknown"}`;
-        } else {
-          voiceState = STATE_LABELS[data.state] ?? "voice mode";
-        }
-      } catch {
-        // Ignore malformed events
-      }
-    });
+    let cleanups: (() => void)[] = [];
+    let unmounted = false;
 
-    const unlistenDebug = listen<string>("voice-debug", (payload) => {
-      try {
-        const data = JSON.parse(payload);
-        const line = `[${data.ts}] ${data.msg}`;
-        debugLog = [...debugLog.slice(-(MAX_DEBUG_LINES - 1)), line];
-      } catch {
-        // Ignore
-      }
-    });
+    // Await listener registration before starting the pipeline to avoid
+    // a race where events are emitted before listeners are active.
+    (async () => {
+      const [unlistenState, unlistenDebug, unlistenTranscript] = await Promise.all([
+        listenAsync<string>("voice-state-changed", (payload) => {
+          try {
+            const data = JSON.parse(payload);
+            if (data.state === "downloading" && data.filename) {
+              const pct = data.percent != null ? ` ${data.percent}%` : "";
+              voiceState = `downloading ${data.filename}${pct}`;
+            } else if (data.state === "error") {
+              voiceState = `error: ${data.error ?? "unknown"}`;
+            } else {
+              voiceState = STATE_LABELS[data.state] ?? "voice mode";
+            }
+          } catch {
+            // Ignore malformed events
+          }
+        }),
+        listenAsync<string>("voice-debug", (payload) => {
+          try {
+            const data = JSON.parse(payload);
+            const line = `[${data.ts}] ${data.msg}`;
+            debugLog = [...debugLog.slice(-(MAX_DEBUG_LINES - 1)), line];
+          } catch {
+            // Ignore
+          }
+        }),
+        listenAsync<string>("voice-transcript", (payload) => {
+          try {
+            const data = JSON.parse(payload);
+            transcript = [...transcript, { role: data.role, text: data.text }].slice(-MAX_TRANSCRIPT_ENTRIES);
+          } catch {
+            // Ignore
+          }
+        }),
+      ]);
 
-    const unlistenTranscript = listen<string>("voice-transcript", (payload) => {
-      try {
-        const data = JSON.parse(payload);
-        transcript = [...transcript, { role: data.role, text: data.text }].slice(-MAX_TRANSCRIPT_ENTRIES);
-      } catch {
-        // Ignore
+      if (unmounted) {
+        unlistenState();
+        unlistenDebug();
+        unlistenTranscript();
+        return;
       }
-    });
 
-    command("start_voice_pipeline").catch((e: unknown) => {
-      console.error("[voice] Failed to start pipeline:", e);
-      voiceState = "error";
-    });
+      cleanups = [unlistenState, unlistenDebug, unlistenTranscript];
+
+      command("start_voice_pipeline").catch((e: unknown) => {
+        console.error("[voice] Failed to start pipeline:", e);
+        const msg = e instanceof Error ? e.message : String(e);
+        voiceState = `error: ${msg}`;
+      });
+    })();
 
     return () => {
-      unlistenState();
-      unlistenDebug();
-      unlistenTranscript();
-      command("stop_voice_pipeline").catch((e: unknown) => {
-        console.error("[voice] Failed to stop pipeline:", e);
-      });
+      unmounted = true;
+      cleanups.forEach((fn) => fn());
+      // Pipeline keeps running in the background — don't stop it on unmount.
+      // It will be cleaned up when the app exits (VoicePipeline::Drop).
     };
   });
 </script>

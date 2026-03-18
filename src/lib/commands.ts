@@ -18,6 +18,7 @@ export type CommandId =
   | "toggle-help"
   | "clear-agent-reports"
   | "create-note"
+  | "create-folder"
   | "delete-note"
   | "rename-note"
   | "duplicate-note"
@@ -27,7 +28,9 @@ export type CommandId =
   | "generate-architecture"
   | "stage"
   | "toggle-maintainer-view"
-  | "deploy-project";
+  | "e2e-eval"
+  | "deploy-project"
+  | "rollback-deploy";
 
 // IDs for commands handled outside handleHotkey (Cmd+key, Escape)
 export type ExternalCommandId =
@@ -67,6 +70,7 @@ export const commands: CommandDef[] = [
   { id: "finish-branch", key: "m", section: "Sessions", description: "Merge session branch (create PR)", mode: "development" },
   { id: "save-prompt", key: "P", section: "Sessions", description: "Save focused session's prompt", mode: "development" },
   { id: "load-prompt", key: "p", section: "Sessions", description: "Load saved prompt into new session", mode: "development" },
+  { id: "e2e-eval", key: "e", section: "Sessions", description: "Run e2e eval on focused session", mode: "development" },
   { id: "stage", key: "v", section: "Sessions", description: "Stage/unstage session as separate instance", mode: "development" },
   { id: "screenshot", key: "⌘s", section: "Sessions", description: "Screenshot (full) → new session", handledExternally: true },
   { id: "screenshot-cropped", key: "⌘d", section: "Sessions", description: "Screenshot (cropped) → new session", handledExternally: true },
@@ -91,7 +95,8 @@ export const commands: CommandDef[] = [
   { id: "toggle-maintainer-view", key: "t", section: "Agents", description: "Toggle between Runs / Issues view", mode: "agents" },
 
   // ── Notes ──
-  { id: "create-note", key: "n", section: "Notes", description: "Create new note", mode: "notes" },
+  { id: "create-folder", key: "n", section: "Notes", description: "New folder", mode: "notes" },
+  { id: "create-note", key: "c", section: "Notes", description: "Create new note", mode: "notes" },
   { id: "delete-note", key: "d", section: "Notes", description: "Delete focused note or folder", mode: "notes" },
   { id: "rename-note", key: "r", section: "Notes", description: "Rename focused note or folder", mode: "notes" },
   { id: "duplicate-note", key: "y", section: "Notes", description: "Duplicate focused note", mode: "notes" },

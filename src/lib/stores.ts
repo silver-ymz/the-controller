@@ -110,7 +110,7 @@ export interface Project {
   maintainer: MaintainerConfig;
   auto_worker: AutoWorkerConfig;
   prompts: SavedPrompt[];
-  staged_session: StagedSession | null;
+  staged_sessions: StagedSession[];
 }
 
 export interface CorruptProjectEntry {
@@ -163,6 +163,7 @@ export interface ArchitectureViewState {
   selectedComponentId: string | null;
   isGenerating: boolean;
   error: string | null;
+  logs: string[];
 }
 
 export function createArchitectureViewState(
@@ -173,6 +174,7 @@ export function createArchitectureViewState(
     selectedComponentId: result?.components[0]?.id ?? null,
     isGenerating: false,
     error: null,
+    logs: [],
   };
 }
 
@@ -261,6 +263,7 @@ export type HotkeyAction =
   }
   | { type: "merge-session"; sessionId: string; projectId: string }
   | { type: "finish-branch"; sessionId: string; kind?: "claude" | "codex" | "cursor-agent" }
+  | { type: "e2e-eval"; sessionId: string; kind?: "claude" | "codex" }
   | { type: "screenshot-to-session"; direct?: boolean; cropped?: boolean }
   | { type: "toggle-maintainer-enabled" }
   | { type: "toggle-auto-worker-enabled" }
@@ -270,6 +273,7 @@ export type HotkeyAction =
   | { type: "agent-panel-select" }
   | { type: "agent-panel-escape" }
   | { type: "create-note" }
+  | { type: "create-folder" }
   | { type: "delete-note"; folder: string; filename: string }
   | { type: "rename-note"; folder: string; filename: string }
   | { type: "duplicate-note"; folder: string; filename: string }
@@ -280,7 +284,7 @@ export type HotkeyAction =
   | { type: "pick-prompt-for-session"; projectId: string }
   | { type: "generate-architecture"; projectId: string; repoPath: string }
   | { type: "stage-session"; sessionId: string; projectId: string }
-  | { type: "unstage-session"; projectId: string }
+  | { type: "unstage-session"; projectId: string; sessionId: string }
   | { type: "toggle-maintainer-view" }
   | { type: "open-issue-in-browser" }
   | { type: "deploy-project"; projectId: string; repoPath: string }

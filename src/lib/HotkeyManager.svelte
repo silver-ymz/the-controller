@@ -306,6 +306,13 @@
           dispatchHotkeyAction({ type: "finish-branch", sessionId: activeId, kind: sess?.kind as "claude" | "codex" | undefined });
         }
         return true;
+      case "e2e-eval":
+        if (activeId) {
+          const proj = projectList.find((p) => p.sessions.some((s) => s.id === activeId));
+          const sess = proj?.sessions.find((s) => s.id === activeId);
+          dispatchHotkeyAction({ type: "e2e-eval", sessionId: activeId, kind: sess?.kind as "claude" | "codex" | undefined });
+        }
+        return true;
       case "save-prompt": {
         if (currentFocus?.type === "session") {
           dispatchAction({
@@ -335,14 +342,14 @@
         return true;
       }
       case "stage": {
-        const stageProj = projectList.find((p) => p.staged_session !== null);
-        if (stageProj) {
-          dispatchHotkeyAction({ type: "unstage-session", projectId: stageProj.id });
-        } else if (activeId) {
-          const proj2 = projectList.find((p) => p.sessions.some((s) => s.id === activeId));
-          if (proj2 && proj2.name === "the-controller") {
-            dispatchHotkeyAction({ type: "stage-session", sessionId: activeId, projectId: proj2.id });
-          }
+        if (!activeId) return true;
+        const proj = projectList.find((p) => p.sessions.some((s) => s.id === activeId));
+        if (!proj || proj.name !== "the-controller") return true;
+        const isStaged = proj.staged_sessions.some((s) => s.session_id === activeId);
+        if (isStaged) {
+          dispatchHotkeyAction({ type: "unstage-session", projectId: proj.id, sessionId: activeId });
+        } else {
+          dispatchHotkeyAction({ type: "stage-session", sessionId: activeId, projectId: proj.id });
         }
         return true;
       }
@@ -400,6 +407,9 @@
         return true;
       case "create-note":
         dispatchAction({ type: "create-note" });
+        return true;
+      case "create-folder":
+        dispatchAction({ type: "create-folder" });
         return true;
       case "delete-note":
         if (currentFocus?.type === "note") {
@@ -559,6 +569,28 @@
     }
 
     // --- Ambient mode (not in terminal) ---
+
+    // Voice mode: d = debug, t = transcript, p = pause/play — checked early to bypass focus guards
+    // (voice mode has no terminal/input elements, but stale focus state could block)
+    if (currentMode === "voice") {
+      if (e.key === "d" || e.key === "t") {
+        e.stopPropagation();
+        e.preventDefault();
+        dispatchAction({ type: "voice-toggle-panel", panel: e.key === "d" ? "debug" : "transcript" });
+        pushKeystroke(e.key);
+        return;
+      }
+      if (e.key === "p") {
+        e.stopPropagation();
+        e.preventDefault();
+        command("toggle_voice_pause").catch((err: unknown) => {
+          console.error("[voice] Failed to toggle pause:", err);
+        });
+        pushKeystroke("p");
+        return;
+      }
+    }
+
     // Allow dialog-local keyboard handlers to own key events.
     if (isDialogOpen()) return;
 
@@ -630,17 +662,6 @@
         e.stopPropagation();
         e.preventDefault();
         dispatchAction({ type: "open-issue-in-browser" });
-        pushKeystroke(e.key);
-        return;
-      }
-    }
-
-    // Voice mode: d = debug, t = transcript
-    if (currentMode === "voice") {
-      if (e.key === "d" || e.key === "t") {
-        e.stopPropagation();
-        e.preventDefault();
-        dispatchAction({ type: "voice-toggle-panel", panel: e.key === "d" ? "debug" : "transcript" });
         pushKeystroke(e.key);
         return;
       }

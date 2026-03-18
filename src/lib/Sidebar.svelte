@@ -15,6 +15,7 @@
   import AgentTree from "./sidebar/AgentTree.svelte";
   import NotesTree from "./sidebar/NotesTree.svelte";
   import NewNoteModal from "./NewNoteModal.svelte";
+  import NewFolderModal from "./NewFolderModal.svelte";
   import RenameNoteModal from "./RenameNoteModal.svelte";
 
   let sidebarEl: HTMLElement | undefined = $state();
@@ -37,6 +38,7 @@
   let deleteNoteTarget: { folder: string; filename: string } | null = $state(null);
   let renameNoteTarget: { folder: string; filename: string } | null = $state(null);
   let showNewNoteModal = $state(false);
+  let showNewFolderModal = $state(false);
   let renameFolderTarget: string | null = $state(null);
   let deleteFolderTarget: string | null = $state(null);
   const activeNoteState = fromStore(activeNote);
@@ -182,16 +184,32 @@
           finishBranchTarget = { sessionId: action.sessionId, kind: action.kind };
           break;
         }
+        case "e2e-eval": {
+          const skillCmd = action.kind === "codex"
+            ? "$the-controller-e2e-eval"
+            : "/the-controller-e2e-eval";
+          if (action.kind === "codex") {
+            command("write_to_pty", { sessionId: action.sessionId, data: skillCmd })
+              .then(() => command("send_raw_to_pty", { sessionId: action.sessionId, data: "\r" }));
+          } else {
+            command("write_to_pty", { sessionId: action.sessionId, data: `${skillCmd}\r` });
+          }
+          break;
+        }
         case "stage-session": {
           stageSession(action.projectId, action.sessionId);
           break;
         }
         case "unstage-session": {
-          unstageSession(action.projectId);
+          unstageSession(action.projectId, action.sessionId);
           break;
         }
         case "create-note": {
           showNewNoteModal = true;
+          break;
+        }
+        case "create-folder": {
+          showNewFolderModal = true;
           break;
         }
         case "delete-note": {
@@ -463,9 +481,9 @@
     }
   }
 
-  async function unstageSession(projectId: string) {
+  async function unstageSession(projectId: string, sessionId: string) {
     try {
-      await command("unstage_session", { projectId });
+      await command("unstage_session", { projectId, sessionId });
       await loadProjects();
       showToast("Unstaged — stopped separate instance", "info");
     } catch (e) {
@@ -513,6 +531,19 @@
       focusTarget.set({ type: "notes-editor", folder });
       const folders = await command<string[]>("list_folders", {});
       noteFolders.set(folders);
+    } catch (e) {
+      showToast(String(e), "error");
+    }
+  }
+
+  async function handleCreateFolder(name: string) {
+    showNewFolderModal = false;
+    try {
+      await command("create_folder", { name });
+      const folders = await command<string[]>("list_folders", {});
+      noteFolders.set(folders);
+      expandedProjects.update(s => { const next = new Set(s); next.add(name); return next; });
+      focusTarget.set({ type: "folder", folder: name });
     } catch (e) {
       showToast(String(e), "error");
     }
@@ -613,7 +644,7 @@
 
 <aside class="sidebar" bind:this={sidebarEl}>
   <div class="sidebar-header">
-    <h2>{currentMode === "agents" ? "Agents" : currentMode === "notes" ? "Notes" : "Development"}</h2>
+    <h2>{{ development: "Development", agents: "Agents", architecture: "Architecture", notes: "Notes", infrastructure: "Infrastructure", voice: "Voice" }[currentMode]}</h2>
   </div>
 
   <div class="project-list">
@@ -671,7 +702,6 @@
 
   <div class="sidebar-footer">
     <div class="footer-left">
-      <div class="footer-spacer"></div>
       <div class="provider-indicator">Provider: {currentSessionProviderLabel}</div>
     </div>
     <button
@@ -788,6 +818,13 @@
     />
   {/if}
 
+  {#if showNewFolderModal}
+    <NewFolderModal
+      onSubmit={handleCreateFolder}
+      onClose={() => { showNewFolderModal = false; }}
+    />
+  {/if}
+
   {#if deleteNoteTarget}
     <ConfirmModal
       title="Delete Note"
@@ -883,10 +920,6 @@
     min-width: 0;
   }
 
-  .footer-spacer {
-    min-height: 31px;
-  }
-
   .provider-indicator {
     border-top: 1px solid var(--border-default);
     color: var(--text-secondary);
@@ -908,7 +941,13 @@
     font-weight: 600;
     text-align: center;
     box-shadow: none;
+    outline: none;
     flex-shrink: 0;
+  }
+
+  .btn-help:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
   }
 
   .btn-help:hover {

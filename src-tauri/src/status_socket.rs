@@ -9,11 +9,9 @@ use crate::state::AppState;
 use crate::worktree::WorktreeManager;
 
 const DEFAULT_SOCKET_PATH: &str = "/tmp/the-controller.sock";
-const DEFAULT_STAGED_SOCKET_PATH: &str = "/tmp/the-controller-staged.sock";
-
-/// Return the socket path used by staged Controller instances.
-pub fn staged_socket_path() -> &'static str {
-    DEFAULT_STAGED_SOCKET_PATH
+/// Return the socket path for a specific staged session.
+pub fn staged_socket_path(session_id: &Uuid) -> String {
+    format!("/tmp/the-controller-staged-{}.sock", session_id)
 }
 
 /// Return the socket path, checking the CONTROLLER_SOCKET env var first.
@@ -38,12 +36,25 @@ pub fn parse_status_message(msg: &str) -> Option<(&str, Uuid)> {
 enum SocketMessage {
     Status { status: String, session_id: Uuid },
     SecureEnv(crate::secure_env::SecureEnvRequest),
+    Stage { project_id: Uuid, session_id: Uuid },
 }
 
 fn parse_socket_message(msg: &str) -> Result<SocketMessage, String> {
     if let Some((status, session_id)) = parse_status_message(msg) {
         return Ok(SocketMessage::Status {
             status: status.to_string(),
+            session_id,
+        });
+    }
+
+    if let Some(rest) = msg.strip_prefix("stage:") {
+        let (proj_str, sess_str) = rest
+            .split_once(':')
+            .ok_or_else(|| "stage format: stage:<project_id>:<session_id>".to_string())?;
+        let project_id = Uuid::parse_str(proj_str).map_err(|e| e.to_string())?;
+        let session_id = Uuid::parse_str(sess_str).map_err(|e| e.to_string())?;
+        return Ok(SocketMessage::Stage {
+            project_id,
             session_id,
         });
     }
@@ -263,6 +274,30 @@ fn handle_connection_with_state(
                         if status == "idle" {
                             crate::auto_worker::notify_session_idle(session_id);
                         }
+                    }
+                    Ok(SocketMessage::Stage {
+                        project_id,
+                        session_id,
+                    }) => {
+                        let app_handle = app_handle.clone();
+                        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                        tauri::async_runtime::spawn(async move {
+                            let state = app_handle.state::<AppState>();
+                            let result = crate::commands::stage_session_core(
+                                &state, project_id, session_id, false,
+                            )
+                            .await;
+                            let _ = tx.send(result);
+                        });
+                        let response = match rx.recv() {
+                            Ok(Ok(port)) => format!("staged:{}\n", port),
+                            Ok(Err(e)) => format!("error:{}\n", e),
+                            Err(_) => "error:internal channel error\n".to_string(),
+                        };
+                        if let Err(e) = writer.write_all(response.as_bytes()) {
+                            eprintln!("Failed to write stage response: {}", e);
+                        }
+                        return;
                     }
                     Ok(SocketMessage::SecureEnv(request)) => {
                         let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
@@ -499,7 +534,7 @@ mod tests {
             auto_worker: AutoWorkerConfig::default(),
             prompts: vec![],
             sessions: vec![],
-            staged_session: None,
+            staged_sessions: vec![],
         };
 
         state

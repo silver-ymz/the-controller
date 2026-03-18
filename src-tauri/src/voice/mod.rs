@@ -16,10 +16,12 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VoiceState {
+    Initializing,
     Listening,
     Thinking,
     Speaking,
     Downloading,
+    Paused,
 }
 
 #[derive(Serialize)]
@@ -37,6 +39,7 @@ const MIN_BARGEIN_SAMPLES: usize = 4800; // 300ms at 16kHz — sustained speech 
 
 pub struct VoicePipeline {
     stop_flag: Arc<AtomicBool>,
+    pause_flag: Arc<AtomicBool>,
     audio_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -49,6 +52,7 @@ struct SpeechContext<'a> {
     audio_rx: &'a Receiver<Vec<i16>>,
     emitter: &'a Arc<dyn EventEmitter>,
     stop: &'a Arc<AtomicBool>,
+    pause: &'a Arc<AtomicBool>,
 }
 
 /// Result of processing speech — either completed normally or was interrupted.
@@ -61,8 +65,13 @@ enum SpeechResult {
 
 impl VoicePipeline {
     /// Start the voice pipeline. Downloads models if needed, then begins listening.
+    ///
+    /// Waits for pipeline initialization to complete before returning, so any
+    /// init errors (model loading, codex app-server, mic capture) are propagated
+    /// to the caller instead of being silently lost on the background thread.
     pub async fn start(emitter: Arc<dyn EventEmitter>) -> Result<Self, String> {
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let pause_flag = Arc::new(AtomicBool::new(true));
 
         // Ensure models are downloaded
         let dl_emitter = emitter.clone();
@@ -84,7 +93,11 @@ impl VoicePipeline {
         })
         .await?;
 
+        // Signal the frontend that heavy init is starting (model loading, codex handshake)
+        emit_state(&emitter, VoiceState::Initializing);
+
         let stop = stop_flag.clone();
+        let pause = pause_flag.clone();
         let emitter_clone = emitter.clone();
 
         let vad_path = model_paths.silero_vad.clone();
@@ -92,29 +105,71 @@ impl VoicePipeline {
         let piper_onnx_path = model_paths.piper_onnx.clone();
         let piper_config_path = model_paths.piper_config.clone();
 
+        let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
         let audio_thread = std::thread::spawn(move || {
-            if let Err(e) = run_pipeline(
+            let init_result = pipeline_init(
                 &vad_path,
                 &whisper_path,
                 &piper_onnx_path,
                 &piper_config_path,
-                stop,
-                emitter_clone.clone(),
-            ) {
-                tracing::error!("pipeline error: {e}");
-                let payload = serde_json::json!({
-                    "state": "error",
-                    "error": e,
-                })
-                .to_string();
-                let _ = emitter_clone.emit("voice-state-changed", &payload);
+            );
+
+            match init_result {
+                Err(e) => {
+                    tracing::error!("Pipeline init error: {e}");
+                    let _ = init_tx.send(Err(e.clone()));
+                    let payload = serde_json::json!({
+                        "state": "error",
+                        "error": e,
+                    })
+                    .to_string();
+                    let _ = emitter_clone.emit("voice-state-changed", &payload);
+                }
+                Ok(components) => {
+                    let _ = init_tx.send(Ok(()));
+                    if let Err(e) =
+                        run_pipeline_loop(components, stop, pause, emitter_clone.clone())
+                    {
+                        tracing::error!("Pipeline error: {e}");
+                        let payload = serde_json::json!({
+                            "state": "error",
+                            "error": e,
+                        })
+                        .to_string();
+                        let _ = emitter_clone.emit("voice-state-changed", &payload);
+                    }
+                }
             }
         });
 
-        Ok(Self {
-            stop_flag,
-            audio_thread: Some(audio_thread),
-        })
+        // Wait for pipeline initialization with timeout — propagate errors to caller
+        match tokio::time::timeout(std::time::Duration::from_secs(30), init_rx).await {
+            Ok(Ok(Ok(()))) => Ok(Self {
+                stop_flag,
+                pause_flag,
+                audio_thread: Some(audio_thread),
+            }),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err("Pipeline thread panicked during initialization".to_string()),
+            Err(_) => {
+                // Timeout — signal thread to stop and return error
+                stop_flag.store(true, Ordering::Relaxed);
+                Err("Pipeline initialization timed out after 30s".to_string())
+            }
+        }
+    }
+
+    /// Toggle pause state. Returns `true` if now paused.
+    pub fn toggle_pause(&self) -> bool {
+        let was_paused = self.pause_flag.load(Ordering::SeqCst);
+        self.pause_flag.store(!was_paused, Ordering::SeqCst);
+        !was_paused
+    }
+
+    /// Returns `true` if the pipeline is currently paused.
+    pub fn is_paused(&self) -> bool {
+        self.pause_flag.load(Ordering::SeqCst)
     }
 
     pub fn stop(&mut self) {
@@ -150,36 +205,94 @@ fn emit_debug(emitter: &Arc<dyn EventEmitter>, msg: &str) {
     let _ = emitter.emit("voice-debug", &payload);
 }
 
-/// Main pipeline loop. Runs on a dedicated thread.
-fn run_pipeline(
+/// Holds all initialized pipeline components.
+struct PipelineComponents {
+    vad_engine: vad::Vad,
+    whisper: stt::WhisperStt,
+    tts_engine: tts::PiperTts,
+    audio_out: audio_output::AudioOutput,
+    auto_gain: gain::AutoGain,
+    app_server: llm::CodexAppServer,
+    audio_in: audio_input::AudioInput,
+    audio_rx: Receiver<Vec<i16>>,
+}
+
+/// Initialize all pipeline components. Called on the pipeline thread.
+fn pipeline_init(
     vad_path: &std::path::Path,
     whisper_path: &std::path::Path,
     piper_onnx_path: &std::path::Path,
     piper_config_path: &std::path::Path,
+) -> Result<PipelineComponents, String> {
+    let vad_engine = vad::Vad::new(vad_path, 800)?;
+    let whisper = stt::WhisperStt::new(whisper_path)?;
+    let tts_engine = tts::PiperTts::new(piper_onnx_path, piper_config_path)?;
+    let audio_out = audio_output::AudioOutput::new()?;
+    let auto_gain = gain::AutoGain::new();
+    let app_server = llm::CodexAppServer::start(None)
+        .map_err(|e| format!("Failed to start codex app-server: {e}"))?;
+    let (tx, audio_rx): (Sender<Vec<i16>>, Receiver<Vec<i16>>) = crossbeam_channel::bounded(64);
+    let audio_in = audio_input::AudioInput::start(tx)?;
+    // Start paused — user must explicitly unpause
+    audio_in.pause();
+
+    Ok(PipelineComponents {
+        vad_engine,
+        whisper,
+        tts_engine,
+        audio_out,
+        auto_gain,
+        app_server,
+        audio_in,
+        audio_rx,
+    })
+}
+
+/// Main pipeline loop. Runs on a dedicated thread after initialization.
+fn run_pipeline_loop(
+    components: PipelineComponents,
     stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     emitter: Arc<dyn EventEmitter>,
 ) -> Result<(), String> {
-    // Initialize components
-    let mut vad_engine = vad::Vad::new(vad_path, 800)?;
-    let whisper = stt::WhisperStt::new(whisper_path)?;
-    let mut tts_engine = tts::PiperTts::new(piper_onnx_path, piper_config_path)?;
-    let audio_out = audio_output::AudioOutput::new()?;
-    let mut auto_gain = gain::AutoGain::new();
+    let PipelineComponents {
+        mut vad_engine,
+        whisper,
+        mut tts_engine,
+        audio_out,
+        mut auto_gain,
+        mut app_server,
+        mut audio_in,
+        audio_rx: rx,
+    } = components;
 
-    // CodexAppServer is now blocking — no tokio runtime needed
-    let mut app_server = llm::CodexAppServer::start(None)
-        .map_err(|e| format!("Failed to start codex app-server: {e}"))?;
-
-    // Start mic capture
-    let (tx, rx): (Sender<Vec<i16>>, Receiver<Vec<i16>>) = crossbeam_channel::bounded(64);
-    let mut audio_in = audio_input::AudioInput::start(tx)?;
-
-    emit_state(&emitter, VoiceState::Listening);
+    emit_state(&emitter, VoiceState::Paused);
     let mut speech_buffer: Vec<f32> = Vec::new();
     let mut in_speech = false;
     let mut chunk_count: u64 = 0;
+    let mut was_paused = true;
 
     while !stop.load(Ordering::Relaxed) {
+        // Handle pause/resume transitions
+        let is_paused = pause.load(Ordering::SeqCst);
+        if is_paused && !was_paused {
+            audio_in.pause();
+            in_speech = false;
+            speech_buffer.clear();
+            vad_engine.reset();
+            was_paused = true;
+            // Drain any buffered audio chunks
+            while rx.try_recv().is_ok() {}
+            continue;
+        } else if !is_paused && was_paused {
+            audio_in.resume();
+            emit_state(&emitter, VoiceState::Listening);
+            was_paused = false;
+        } else if is_paused {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
+        }
+
         let chunk = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(c) => c,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
@@ -225,6 +338,7 @@ fn run_pipeline(
                         audio_rx: &rx,
                         emitter: &emitter,
                         stop: &stop,
+                        pause: &pause,
                     };
 
                     // Pass app_server by value; get it back after the turn completes.
@@ -347,8 +461,14 @@ fn process_speech(
     let mut spoken_sentences: Vec<String> = Vec::new();
     let mut started_speaking = false;
     let mut barge_in_speech: Option<Vec<f32>> = None;
+    let mut paused = false;
 
     loop {
+        // Check pause/stop before blocking on select
+        if ctx.pause.load(Ordering::SeqCst) {
+            paused = true;
+            break;
+        }
         crossbeam_channel::select! {
             recv(sentence_rx) -> msg => {
                 match msg {
@@ -411,12 +531,14 @@ fn process_speech(
                     }
                 }
             }
+            // Wake periodically so the pause check at the top of the loop runs
+            default(std::time::Duration::from_millis(50)) => {}
         }
     }
 
     let interrupted = barge_in_speech.is_some();
 
-    if interrupted {
+    if interrupted || paused {
         playback.cancel();
         // Do NOT call cancel_turn() here — the LLM thread owns app_server.
         // Instead, we join the LLM thread below to wait for the turn to finish.
@@ -428,6 +550,12 @@ fn process_speech(
         if !playback.is_done() {
             // Keep monitoring mic while audio drains
             while !playback.is_done() {
+                // Stop draining if paused
+                if ctx.pause.load(Ordering::SeqCst) {
+                    paused = true;
+                    playback.cancel();
+                    break;
+                }
                 if let Ok(chunk) = ctx
                     .audio_rx
                     .recv_timeout(std::time::Duration::from_millis(10))
@@ -472,7 +600,7 @@ fn process_speech(
                     }
                 } // timeout: check is_done again
             }
-            if barge_in_speech.is_none() {
+            if barge_in_speech.is_none() && !paused {
                 // Finished naturally
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -481,14 +609,16 @@ fn process_speech(
 
     emit_debug(
         ctx.emitter,
-        if barge_in_speech.is_some() {
+        if paused {
+            "tts: cancelled (paused)"
+        } else if barge_in_speech.is_some() {
             "tts: cancelled (barge-in)"
         } else {
             "tts: done"
         },
     );
 
-    if barge_in_speech.is_none() {
+    if barge_in_speech.is_none() && !paused {
         // Normal completion — pause for audio settle and reset VAD
         std::thread::sleep(std::time::Duration::from_millis(300));
         ctx.vad_engine.reset();

@@ -120,6 +120,8 @@ pub fn run() {
             commands::list_assigned_issues,
             commands::generate_issue_body,
             commands::create_github_issue,
+            commands::close_github_issue,
+            commands::delete_github_issue,
             commands::post_github_comment,
             commands::add_github_label,
             commands::remove_github_label,
@@ -166,6 +168,7 @@ pub fn run() {
             deploy::commands::list_deployed_services,
             commands::start_voice_pipeline,
             commands::stop_voice_pipeline,
+            commands::toggle_voice_pause,
             commands::log_frontend_error,
             commands::load_keybindings,
         ])
@@ -180,13 +183,15 @@ pub fn run() {
                     if let Ok(storage) = state.storage.lock() {
                         if let Ok(inventory) = storage.list_projects() {
                             for project in &inventory.projects {
-                                if let Some(staged) = &project.staged_session {
-                                    commands::kill_process_group(staged.pid);
-                                    let _ =
-                                        std::fs::remove_file(status_socket::staged_socket_path());
-                                    // Clear stale staged_session record
+                                if !project.staged_sessions.is_empty() {
                                     let mut p = project.clone();
-                                    p.staged_session = None;
+                                    for staged in &project.staged_sessions {
+                                        commands::kill_process_group(staged.pid);
+                                        let _ = std::fs::remove_file(
+                                            status_socket::staged_socket_path(&staged.session_id),
+                                        );
+                                    }
+                                    p.staged_sessions.clear();
                                     let _ = storage.save_project(&p);
                                 }
                             }

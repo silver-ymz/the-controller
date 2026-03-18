@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use crate::architecture::{generate_architecture_blocking, ArchitectureResult};
+use crate::architecture::{generate_architecture_blocking_with_emitter, ArchitectureResult};
 use crate::config;
 use crate::models::{AutoWorkerQueueIssue, CommitInfo, GithubIssue, Project, SessionConfig};
 use crate::state::AppState;
@@ -330,7 +330,7 @@ pub fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Pro
         auto_worker: crate::models::AutoWorkerConfig::default(),
         prompts: vec![],
         sessions: vec![],
-        staged_session: None,
+        staged_sessions: vec![],
     })
 }
 
@@ -461,7 +461,7 @@ pub fn create_project(
         auto_worker: crate::models::AutoWorkerConfig::default(),
         prompts: vec![],
         sessions: vec![],
-        staged_session: None,
+        staged_sessions: vec![],
     };
 
     storage.save_project(&project).map_err(|e| e.to_string())?;
@@ -526,7 +526,7 @@ pub fn load_project(
         auto_worker: crate::models::AutoWorkerConfig::default(),
         prompts: vec![],
         sessions: vec![],
-        staged_session: None,
+        staged_sessions: vec![],
     };
 
     storage.save_project(&project).map_err(|e| e.to_string())?;
@@ -906,20 +906,23 @@ pub fn kill_process_group(pid: u32) {
     }
 }
 
-#[tauri::command]
-pub async fn stage_session(
-    state: State<'_, AppState>,
-    _app_handle: AppHandle,
-    project_id: String,
-    session_id: String,
-) -> Result<(), String> {
+/// Core staging logic. Returns the port on success.
+///
+/// When `allow_pty_prompts` is true (Tauri command path), dirty worktrees and
+/// rebase conflicts are handled by prompting the session's Claude via PTY.
+/// When false (socket path), these conditions return an error immediately —
+/// the caller is expected to commit and resolve conflicts before staging.
+pub(crate) async fn stage_session_core(
+    state: &AppState,
+    project_id: Uuid,
+    session_id: Uuid,
+    allow_pty_prompts: bool,
+) -> Result<u16, String> {
     use crate::models::StagedSession;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    tracing::info!(session_id = %session_uuid, project_id = %project_uuid, "staging session");
+    tracing::info!(session_id = %session_id, project_id = %project_id, "staging session");
 
     let _staging_guard = state.staging_lock.lock().await;
 
@@ -927,7 +930,7 @@ pub async fn stage_session(
     let (repo_path, branch, worktree_path) = {
         let storage = state.storage.lock().map_err(|e| e.to_string())?;
         let project = storage
-            .load_project(project_uuid)
+            .load_project(project_id)
             .map_err(|e| e.to_string())?;
 
         if project.name != "the-controller" {
@@ -935,34 +938,38 @@ pub async fn stage_session(
             return Err("Staging is only supported for the-controller".to_string());
         }
 
-        if let Some(staged) = &project.staged_session {
-            // Check if the staged process is still alive
+        // Check if this specific session is already staged
+        if let Some(existing) = project
+            .staged_sessions
+            .iter()
+            .find(|s| s.session_id == session_id)
+        {
             #[cfg(unix)]
-            let alive = i32::try_from(staged.pid)
+            let alive = i32::try_from(existing.pid)
                 .map(|pid| unsafe { libc::kill(pid, 0) } == 0)
                 .unwrap_or(false);
             #[cfg(not(unix))]
             let alive = false;
             if alive {
                 tracing::warn!(
-                    pid = staged.pid,
-                    "stage_session: another session already staged and alive"
+                    pid = existing.pid,
+                    "stage_session: session already staged and alive"
                 );
-                return Err("A session is already staged — unstage it first".to_string());
+                return Err("This session is already staged — unstage it first".to_string());
             }
-            // Stale record — kill orphaned children (e.g. Vite, esbuild that outlived
-            // the process leader), clean up the socket, then clear the record.
-            kill_process_group(staged.pid);
-            let _ = std::fs::remove_file(crate::status_socket::staged_socket_path());
+            // Stale record — clean up
+            kill_process_group(existing.pid);
+            let stale_socket = crate::status_socket::staged_socket_path(&session_id);
+            let _ = std::fs::remove_file(&stale_socket);
             let mut p = project.clone();
-            p.staged_session = None;
+            p.staged_sessions.retain(|s| s.session_id != session_id);
             storage.save_project(&p).map_err(|e| e.to_string())?;
         }
 
         let session = project
             .sessions
             .iter()
-            .find(|s| s.id == session_uuid)
+            .find(|s| s.id == session_id)
             .ok_or("Session not found")?;
 
         let branch = session
@@ -980,7 +987,7 @@ pub async fn stage_session(
         (project.repo_path.clone(), branch, worktree_path)
     };
 
-    // 1. Ensure worktree is clean — prompt Claude to commit if needed
+    // 1. Ensure worktree is clean
     {
         let wt = worktree_path.clone();
         let is_clean = tokio::task::spawn_blocking(move || WorktreeManager::is_worktree_clean(&wt))
@@ -988,10 +995,14 @@ pub async fn stage_session(
             .map_err(|e| format!("Task failed: {}", e))??;
 
         if !is_clean {
+            if !allow_pty_prompts {
+                return Err("Worktree has uncommitted changes — commit before staging".to_string());
+            }
+
             let prompt = "\nYou have uncommitted changes. Please commit all your work now.\r";
             {
                 let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-                let _ = pty_manager.write_to_session(session_uuid, prompt.as_bytes());
+                let _ = pty_manager.write_to_session(session_id, prompt.as_bytes());
             }
 
             let _ = state
@@ -1014,7 +1025,7 @@ pub async fn stage_session(
                 }
             }
             if !committed {
-                tracing::error!(session_id = %session_uuid, "stage_session: timed out waiting for commit");
+                tracing::error!(session_id = %session_id, "stage_session: timed out waiting for commit");
                 return Err(
                     "Timed out waiting for commit. Please commit manually and retry.".to_string(),
                 );
@@ -1051,11 +1062,15 @@ pub async fn stage_session(
                     .map_err(|e| format!("Task failed: {}", e))??;
 
             if !rebase_clean {
+                if !allow_pty_prompts {
+                    return Err("Rebase has conflicts — resolve before staging".to_string());
+                }
+
                 // Rebase has conflicts — ask Claude to resolve
                 let prompt = "\nThere are rebase conflicts. Please resolve all conflicts, then run `git rebase --continue`.\r";
                 {
                     let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-                    let _ = pty_manager.write_to_session(session_uuid, prompt.as_bytes());
+                    let _ = pty_manager.write_to_session(session_id, prompt.as_bytes());
                 }
 
                 let _ = state
@@ -1080,7 +1095,7 @@ pub async fn stage_session(
                     }
                 }
                 if !resolved {
-                    tracing::error!(session_id = %session_uuid, "stage_session: timed out waiting for rebase conflict resolution");
+                    tracing::error!(session_id = %session_id, "stage_session: timed out waiting for rebase conflict resolution");
                     return Err("Timed out waiting for rebase conflict resolution.".to_string());
                 }
             }
@@ -1134,7 +1149,7 @@ pub async fn stage_session(
         .current_dir(&wt)
         .env(
             "CONTROLLER_SOCKET",
-            crate::status_socket::staged_socket_path(),
+            crate::status_socket::staged_socket_path(&session_id),
         )
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_stderr))
@@ -1143,7 +1158,7 @@ pub async fn stage_session(
         .map_err(|e| format!("Failed to spawn staged instance: {}", e))?;
 
     let pid = child.id();
-    tracing::info!(session_id = %session_uuid, pid, port, "staged instance spawned");
+    tracing::info!(session_id = %session_id, pid, port, "staged instance spawned");
     // Reap the child in a background thread to prevent zombie entries.
     // We manage the process lifetime via PID/process group (kill_process_group),
     // not via this Child handle.
@@ -1155,11 +1170,11 @@ pub async fn stage_session(
     let save_result = (|| -> Result<(), String> {
         let storage = state.storage.lock().map_err(|e| e.to_string())?;
         let mut project = storage
-            .load_project(project_uuid)
+            .load_project(project_id)
             .map_err(|e| e.to_string())?;
 
-        project.staged_session = Some(StagedSession {
-            session_id: session_uuid,
+        project.staged_sessions.push(StagedSession {
+            session_id,
             pid,
             port,
         });
@@ -1173,29 +1188,51 @@ pub async fn stage_session(
         return Err(e);
     }
 
+    Ok(port)
+}
+
+#[tauri::command]
+pub async fn stage_session(
+    state: State<'_, AppState>,
+    _app_handle: AppHandle,
+    project_id: String,
+    session_id: String,
+) -> Result<(), String> {
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    stage_session_core(&state, project_uuid, session_uuid, true).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn unstage_session(state: State<AppState>, project_id: String) -> Result<(), String> {
+pub fn unstage_session(
+    state: State<AppState>,
+    project_id: String,
+    session_id: String,
+) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     tracing::info!(project_id = %project_uuid, "unstaging session");
+    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
 
     let storage = state.storage.lock().map_err(|e| e.to_string())?;
     let mut project = storage
         .load_project(project_uuid)
         .map_err(|e| e.to_string())?;
 
-    let staged = project
-        .staged_session
-        .take()
-        .ok_or("No session is currently staged")?;
+    let idx = project
+        .staged_sessions
+        .iter()
+        .position(|s| s.session_id == session_uuid)
+        .ok_or("This session is not currently staged")?;
+
+    let staged = project.staged_sessions.remove(idx);
 
     // Kill the staged Controller process group
     kill_process_group(staged.pid);
 
-    // Clean up the staged socket
-    let _ = std::fs::remove_file(crate::status_socket::staged_socket_path());
+    // Clean up this session's socket
+    let socket = crate::status_socket::staged_socket_path(&session_uuid);
+    let _ = std::fs::remove_file(&socket);
 
     storage.save_project(&project).map_err(|e| e.to_string())?;
     Ok(())
@@ -1457,9 +1494,13 @@ pub async fn generate_project_names(description: String) -> Result<Vec<String>, 
 }
 
 #[tauri::command]
-pub async fn generate_architecture(repo_path: String) -> Result<ArchitectureResult, String> {
+pub async fn generate_architecture(
+    state: State<'_, AppState>,
+    repo_path: String,
+) -> Result<ArchitectureResult, String> {
+    let emitter = state.emitter.clone();
     tokio::task::spawn_blocking(move || {
-        generate_architecture_blocking(std::path::Path::new(&repo_path))
+        generate_architecture_blocking_with_emitter(std::path::Path::new(&repo_path), &emitter)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
@@ -1538,6 +1579,25 @@ pub async fn create_github_issue(
     body: String,
 ) -> Result<crate::models::GithubIssue, String> {
     github::create_github_issue(state, repo_path, title, body).await
+}
+
+#[tauri::command]
+pub async fn close_github_issue(
+    state: State<'_, AppState>,
+    repo_path: String,
+    issue_number: u64,
+    comment: String,
+) -> Result<(), String> {
+    github::close_github_issue(state, repo_path, issue_number, comment).await
+}
+
+#[tauri::command]
+pub async fn delete_github_issue(
+    state: State<'_, AppState>,
+    repo_path: String,
+    issue_number: u64,
+) -> Result<(), String> {
+    github::delete_github_issue(state, repo_path, issue_number).await
 }
 
 #[tauri::command]
@@ -2262,13 +2322,35 @@ pub fn log_frontend_error(message: String, state: tauri::State<'_, AppState>) {
 #[tauri::command]
 pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
     tracing::info!("starting voice pipeline");
-    let mut pipeline = state.voice_pipeline.lock().await;
-    if pipeline.is_some() {
-        tracing::debug!("voice pipeline already running, skipping");
-        return Ok(()); // Already running
+    // Snapshot generation before init — if stop is called during init, this will change.
+    let gen_before = state
+        .voice_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    // Brief lock to check if already running
+    {
+        let pipeline = state.voice_pipeline.lock().await;
+        if let Some(p) = pipeline.as_ref() {
+            // Pipeline already running — emit current state so a remounted
+            // frontend component picks up the correct label immediately.
+            tracing::debug!("voice pipeline already running, re-emitting state");
+            let voice_state = if p.is_paused() { "paused" } else { "listening" };
+            let payload = serde_json::json!({ "state": voice_state }).to_string();
+            let _ = state.emitter.emit("voice-state-changed", &payload);
+            return Ok(());
+        }
     }
+    // Release lock during init to avoid blocking stop_voice_pipeline
     let emitter = state.emitter.clone();
     let new_pipeline = crate::voice::VoicePipeline::start(emitter).await?;
+    // Re-acquire lock to store the pipeline
+    let mut pipeline = state.voice_pipeline.lock().await;
+    let gen_after = state
+        .voice_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if pipeline.is_some() || gen_before != gen_after {
+        // Another start raced us, or stop was called during init — drop the pipeline
+        return Ok(());
+    }
     *pipeline = Some(new_pipeline);
     Ok(())
 }
@@ -2276,11 +2358,37 @@ pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(
 #[tauri::command]
 pub async fn stop_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
     tracing::info!("stopping voice pipeline");
+    // Bump generation so any in-flight start_voice_pipeline knows to discard its result.
+    state
+        .voice_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut pipeline = state.voice_pipeline.lock().await;
-    if let Some(mut p) = pipeline.take() {
-        p.stop();
+    if let Some(p) = pipeline.take() {
+        // p.stop() calls thread::join which blocks — run on blocking thread pool
+        tokio::task::spawn_blocking(move || {
+            let mut p = p;
+            p.stop();
+        })
+        .await
+        .map_err(|e| format!("Failed to stop pipeline: {e}"))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn toggle_voice_pause(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let pipeline = state.voice_pipeline.lock().await;
+    match pipeline.as_ref() {
+        Some(p) => {
+            let paused = p.toggle_pause();
+            // Emit state change immediately for responsive UI
+            let voice_state = if paused { "paused" } else { "listening" };
+            let payload = serde_json::json!({ "state": voice_state }).to_string();
+            let _ = state.emitter.emit("voice-state-changed", &payload);
+            Ok(paused)
+        }
+        None => Err("Voice pipeline not running".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -2349,6 +2457,7 @@ mod tests {
             staging_lock: tokio::sync::Mutex::new(()),
             voice_pipeline: Arc::new(tokio::sync::Mutex::new(None)),
             frontend_log: Mutex::new(None),
+            voice_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -3266,7 +3375,7 @@ selection_background #444444
                     auto_worker: crate::models::AutoWorkerConfig::default(),
                     prompts: vec![],
                     sessions: vec![],
-                    staged_session: None,
+                    staged_sessions: vec![],
                 })
                 .expect("save existing project");
         }
@@ -3347,7 +3456,7 @@ selection_background #444444
                     auto_worker: crate::models::AutoWorkerConfig::default(),
                     prompts: vec![],
                     sessions: vec![],
-                    staged_session: None,
+                    staged_sessions: vec![],
                 })
                 .expect("save archived-flagged project");
         }
@@ -3565,7 +3674,7 @@ selection_background #444444
                     maintainer: crate::models::MaintainerConfig::default(),
                     auto_worker: crate::models::AutoWorkerConfig { enabled: true },
                     prompts: vec![],
-                    staged_session: None,
+                    staged_sessions: vec![],
                 })
                 .expect("save project");
         }
