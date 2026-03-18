@@ -939,7 +939,11 @@ pub(crate) async fn stage_session_core(
         }
 
         // Check if this specific session is already staged
-        if let Some(existing) = project.staged_sessions.iter().find(|s| s.session_id == session_id) {
+        if let Some(existing) = project
+            .staged_sessions
+            .iter()
+            .find(|s| s.session_id == session_id)
+        {
             #[cfg(unix)]
             let alive = unsafe { libc::kill(existing.pid as i32, 0) } == 0;
             #[cfg(not(unix))]
@@ -1019,7 +1023,7 @@ pub(crate) async fn stage_session_core(
                 }
             }
             if !committed {
-                tracing::error!(session_id = %session_uuid, "stage_session: timed out waiting for commit");
+                tracing::error!(session_id = %session_id, "stage_session: timed out waiting for commit");
                 return Err(
                     "Timed out waiting for commit. Please commit manually and retry.".to_string(),
                 );
@@ -1089,7 +1093,7 @@ pub(crate) async fn stage_session_core(
                     }
                 }
                 if !resolved {
-                    tracing::error!(session_id = %session_uuid, "stage_session: timed out waiting for rebase conflict resolution");
+                    tracing::error!(session_id = %session_id, "stage_session: timed out waiting for rebase conflict resolution");
                     return Err("Timed out waiting for rebase conflict resolution.".to_string());
                 }
             }
@@ -1152,7 +1156,7 @@ pub(crate) async fn stage_session_core(
         .map_err(|e| format!("Failed to spawn staged instance: {}", e))?;
 
     let pid = child.id();
-    tracing::info!(session_id = %session_uuid, pid, port, "staged instance spawned");
+    tracing::info!(session_id = %session_id, pid, port, "staged instance spawned");
     // Reap the child in a background thread to prevent zombie entries.
     // We manage the process lifetime via PID/process group (kill_process_group),
     // not via this Child handle.
@@ -1199,7 +1203,11 @@ pub async fn stage_session(
 }
 
 #[tauri::command]
-pub fn unstage_session(state: State<AppState>, project_id: String, session_id: String) -> Result<(), String> {
+pub fn unstage_session(
+    state: State<AppState>,
+    project_id: String,
+    session_id: String,
+) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     tracing::info!(project_id = %project_uuid, "unstaging session");
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
@@ -1490,10 +1498,7 @@ pub async fn generate_architecture(
 ) -> Result<ArchitectureResult, String> {
     let emitter = state.emitter.clone();
     tokio::task::spawn_blocking(move || {
-        generate_architecture_blocking_with_emitter(
-            std::path::Path::new(&repo_path),
-            &emitter,
-        )
+        generate_architecture_blocking_with_emitter(std::path::Path::new(&repo_path), &emitter)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?

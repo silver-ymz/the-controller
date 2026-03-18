@@ -324,10 +324,7 @@ fn format_prompt_snippet(snippet: &str) -> String {
 }
 
 pub fn generate_architecture_blocking(repo_path: &Path) -> Result<ArchitectureResult, String> {
-    generate_architecture_blocking_with_emitter(
-        repo_path,
-        &crate::emitter::NoopEmitter::new(),
-    )
+    generate_architecture_blocking_with_emitter(repo_path, &crate::emitter::NoopEmitter::new())
 }
 
 pub fn generate_architecture_blocking_with_emitter(
@@ -382,14 +379,13 @@ fn generate_architecture_blocking_with_emitter_and_config(
     }
 
     let _ = emitter.emit("architecture-log", "Parsing architecture output…");
-    let result =
-        parse_architecture_output_with_evidence(&String::from_utf8_lossy(&output.stdout), &evidence)?;
+    let result = parse_architecture_output_with_evidence(
+        &String::from_utf8_lossy(&output.stdout),
+        &evidence,
+    )?;
     let _ = emitter.emit(
         "architecture-log",
-        &format!(
-            "Done — {} components generated",
-            result.components.len()
-        ),
+        &format!("Done — {} components generated", result.components.len()),
     );
     Ok(result)
 }

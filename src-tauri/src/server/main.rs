@@ -20,7 +20,7 @@ use std::sync::Arc;
 use the_controller_lib::{
     architecture, auto_worker, commands, config, deploy, emitter::WsBroadcastEmitter, maintainer,
     models, note_ai_chat, notes, secure_env, session_args, state::AppState, status_socket,
-    token_usage, worktree::WorktreeManager,
+    token_usage, voice, worktree::WorktreeManager,
 };
 
 use tokio::sync::broadcast;
@@ -170,6 +170,7 @@ async fn run_server() -> std::io::Result<()> {
         .route("/api/capture_app_screenshot", post(capture_app_screenshot))
         .route("/api/start_voice_pipeline", post(start_voice_pipeline))
         .route("/api/stop_voice_pipeline", post(stop_voice_pipeline))
+        .route("/api/toggle_voice_pause", post(toggle_voice_pause))
         .route("/api/load_terminal_theme", post(load_terminal_theme))
         .route("/api/list_archived_projects", post(list_archived_projects))
         .route("/api/generate_architecture", post(generate_architecture))
@@ -853,15 +854,19 @@ async fn create_session(
 }
 
 async fn generate_architecture(
+    AxumState(state): AxumState<Arc<ServerState>>,
     Json(args): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
         .to_string();
-
+    let emitter = state.app.emitter.clone();
     let result = tokio::task::spawn_blocking(move || {
-        architecture::generate_architecture_blocking(std::path::Path::new(&repo_path))
+        architecture::generate_architecture_blocking_with_emitter(
+            std::path::Path::new(&repo_path),
+            &emitter,
+        )
     })
     .await
     .map_err(|e| {
@@ -1248,18 +1253,85 @@ async fn capture_app_screenshot() -> Result<Json<Value>, (StatusCode, String)> {
     ))
 }
 
-async fn start_voice_pipeline() -> Result<Json<Value>, (StatusCode, String)> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "start_voice_pipeline is not available in server mode".to_string(),
-    ))
+async fn start_voice_pipeline(
+    AxumState(state): AxumState<Arc<ServerState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let gen_before = state
+        .app
+        .voice_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    // Check if already running
+    {
+        let pipeline = state.app.voice_pipeline.lock().await;
+        if let Some(p) = pipeline.as_ref() {
+            // Pipeline already running — emit current state so a remounted
+            // frontend component picks up the correct label immediately.
+            let voice_state = if p.is_paused() { "paused" } else { "listening" };
+            let payload = serde_json::json!({ "state": voice_state }).to_string();
+            let _ = state.app.emitter.emit("voice-state-changed", &payload);
+            return Ok(Json(Value::Null));
+        }
+    }
+    // Release lock during init to avoid blocking stop
+    let emitter = state.app.emitter.clone();
+    let new_pipeline = voice::VoicePipeline::start(emitter)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Re-acquire lock to store the pipeline
+    let mut pipeline = state.app.voice_pipeline.lock().await;
+    let gen_after = state
+        .app
+        .voice_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if pipeline.is_some() || gen_before != gen_after {
+        // Another start raced us, or stop was called during init — drop
+        return Ok(Json(Value::Null));
+    }
+    *pipeline = Some(new_pipeline);
+    Ok(Json(Value::Null))
 }
 
-async fn stop_voice_pipeline() -> Result<Json<Value>, (StatusCode, String)> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "stop_voice_pipeline is not available in server mode".to_string(),
-    ))
+async fn stop_voice_pipeline(
+    AxumState(state): AxumState<Arc<ServerState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    state
+        .app
+        .voice_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut pipeline = state.app.voice_pipeline.lock().await;
+    if let Some(p) = pipeline.take() {
+        tokio::task::spawn_blocking(move || {
+            let mut p = p;
+            p.stop();
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to stop pipeline: {e}"),
+            )
+        })?;
+    }
+    Ok(Json(Value::Null))
+}
+
+async fn toggle_voice_pause(
+    AxumState(state): AxumState<Arc<ServerState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let pipeline = state.app.voice_pipeline.lock().await;
+    match pipeline.as_ref() {
+        Some(p) => {
+            let paused = p.toggle_pause();
+            let voice_state = if paused { "paused" } else { "listening" };
+            let payload = serde_json::json!({ "state": voice_state }).to_string();
+            let _ = state.app.emitter.emit("voice-state-changed", &payload);
+            Ok(Json(serde_json::json!({ "paused": paused })))
+        }
+        None => Err((
+            StatusCode::BAD_REQUEST,
+            "Voice pipeline not running".to_string(),
+        )),
+    }
 }
 
 async fn load_terminal_theme(
