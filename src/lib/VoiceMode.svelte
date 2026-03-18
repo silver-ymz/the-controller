@@ -77,7 +77,7 @@
         listenAsync<string>("voice-transcript", (payload) => {
           try {
             const data = JSON.parse(payload);
-            transcript = [...transcript, { role: data.role, text: data.text }];
+            transcript = [...transcript, { role: data.role, text: data.text }].slice(-MAX_TRANSCRIPT_ENTRIES);
           } catch {
             // Ignore
           }
