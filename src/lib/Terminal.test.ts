@@ -12,7 +12,7 @@ vi.mock("@xterm/xterm", () => ({
     options: any;
     rows = 24;
     cols = 80;
-    buffer = { active: { type: "normal" } };
+    buffer = { active: { type: "normal", viewportY: 100, baseY: 100 } };
 
     constructor(options?: unknown) {
       this.options = options;
@@ -25,10 +25,12 @@ vi.mock("@xterm/xterm", () => ({
     attachCustomKeyEventHandler() {}
     attachCustomWheelEventHandler() {}
     onData() {}
+    onScroll() {}
     write() {}
     writeln() {}
     refresh() {}
     scrollToBottom() {}
+    scrollToLine() {}
     focus() {}
     dispose() {}
   },
@@ -49,6 +51,9 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 }));
 
 import Terminal from "./Terminal.svelte";
+
+// Scroll-preservation logic is tested directly in terminal-scroll.test.ts.
+// These tests focus on component-level concerns (theme loading, mounting).
 
 describe("Terminal theme loading", () => {
   beforeEach(() => {
