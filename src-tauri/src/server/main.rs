@@ -20,7 +20,7 @@ use std::sync::Arc;
 use the_controller_lib::{
     architecture, auto_worker, commands, config, deploy, emitter::WsBroadcastEmitter, maintainer,
     models, note_ai_chat, notes, secure_env, service, session_args, state::AppState, status_socket,
-    token_usage, voice, worktree::WorktreeManager,
+    token_usage, voice,
 };
 
 use tokio::sync::broadcast;
@@ -407,24 +407,7 @@ async fn check_onboarding(
 async fn restore_sessions(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let inventory = storage
-        .list_projects()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    inventory.warn_if_corrupt("restore_sessions");
-    for project in &inventory.projects {
-        if let Err(e) = storage.migrate_worktree_paths(project) {
-            tracing::error!(
-                "failed to migrate worktrees for project '{}': {}",
-                project.name,
-                e
-            );
-        }
-    }
+    service::restore_sessions(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -438,65 +421,7 @@ async fn connect_session(
     let id =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Check if already connected
-    {
-        let pty_manager = state
-            .app
-            .pty_manager
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        if pty_manager.session_ids().contains(&id) {
-            return Ok(Json(Value::Null));
-        }
-    }
-
-    // Find session config from storage
-    let (session_dir, kind) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let inventory = storage
-            .list_projects()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        inventory.warn_if_corrupt("connect_session");
-        inventory
-            .projects
-            .iter()
-            .flat_map(|p| p.sessions.iter().map(move |s| (p, s)))
-            .find(|(_, s)| s.id == id)
-            .map(|(p, s)| {
-                let dir = s
-                    .worktree_path
-                    .clone()
-                    .unwrap_or_else(|| p.repo_path.clone());
-                (dir, s.kind.clone())
-            })
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    format!("session not found: {}", session_id),
-                )
-            })?
-    };
-
-    let pty_manager = state.app.pty_manager.clone();
-    let emitter = state.app.emitter.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut mgr = pty_manager
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        mgr.spawn_session(id, &session_dir, &kind, emitter, true, None, rows, cols)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })??;
+    service::connect_session(&state.app, id, rows, cols).map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
@@ -525,13 +450,7 @@ async fn write_to_pty(
     let data = args["data"].as_str().unwrap_or_default();
     let id =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut pty = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty.write_to_session(id, data.as_bytes())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    service::write_to_pty(&state.app, id, data.as_bytes()).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -543,13 +462,8 @@ async fn send_raw_to_pty(
     let data = args["data"].as_str().unwrap_or_default();
     let id =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut pty = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty.send_raw_to_session(id, data.as_bytes())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    service::send_raw_to_pty(&state.app, id, data.as_bytes())
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -562,13 +476,7 @@ async fn resize_pty(
     let cols = args["cols"].as_u64().unwrap_or(80) as u16;
     let id =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let pty = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty.resize_session(id, rows, cols)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    service::resize_pty(&state.app, id, rows, cols).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -584,53 +492,8 @@ async fn close_session(
     let session_uuid =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Close PTY / kill broker session
-    {
-        let mut pty_manager = state
-            .app
-            .pty_manager
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let _ = pty_manager.close_session(session_uuid);
-    }
-
-    // Remove session from project
-    let (repo_path, session) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let mut project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .cloned();
-        project.sessions.retain(|s| s.id != session_uuid);
-        storage
-            .save_project(&project)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        (project.repo_path.clone(), session)
-    };
-
-    // Optionally delete worktree
-    if delete_worktree {
-        if let Some(session) = session {
-            if let (Some(wt_path), Some(branch)) = (session.worktree_path, session.worktree_branch)
-            {
-                let rp = repo_path;
-                let _ = tokio::task::spawn_blocking(move || {
-                    the_controller_lib::worktree::WorktreeManager::remove_worktree(
-                        &wt_path, &rp, &branch,
-                    )
-                })
-                .await;
-            }
-        }
-    }
+    service::close_session(&state.app, project_uuid, session_uuid, delete_worktree)
+        .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
@@ -650,42 +513,22 @@ async fn create_session(
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let session_id = uuid::Uuid::new_v4();
 
-    // Load the project and generate session label
-    let (repo_path, label, base_dir, project_name) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let label = commands::next_session_label(&project.sessions);
-        (
-            project.repo_path.clone(),
-            label,
-            storage.base_dir(),
-            project.name.clone(),
+    let storage = state.app.storage.clone();
+    let pty_manager = state.app.pty_manager.clone();
+    let emitter = state.app.emitter.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        service::create_session(
+            &storage,
+            &pty_manager,
+            &emitter,
+            project_uuid,
+            session_id,
+            &kind,
+            github_issue,
+            background,
+            initial_prompt,
         )
-    };
-
-    // Create worktree under ~/.the-controller/worktrees/{project_name}/{label}/
-    let worktree_dir = base_dir.join("worktrees").join(&project_name).join(&label);
-
-    let repo_path_clone = repo_path.clone();
-    let label_clone = label.clone();
-    let (session_dir, wt_path, wt_branch) = tokio::task::spawn_blocking(move || {
-        match WorktreeManager::create_worktree(&repo_path_clone, &label_clone, &worktree_dir) {
-            Ok(worktree_path) => {
-                let wt_str = worktree_path
-                    .to_str()
-                    .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?
-                    .to_string();
-                Ok((wt_str.clone(), Some(wt_str), Some(label_clone)))
-            }
-            Err(e) if e == "unborn_branch" => Ok((repo_path_clone, None, None)),
-            Err(e) => Err(e),
-        }
     })
     .await
     .map_err(|e| {
@@ -694,84 +537,9 @@ async fn create_session(
             format!("Task failed: {}", e),
         )
     })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(<(StatusCode, String)>::from)?;
 
-    // Build initial prompt: explicit prompt takes priority, then GitHub issue context
-    let initial_prompt = initial_prompt.or_else(|| {
-        github_issue.as_ref().map(|issue| {
-            session_args::build_issue_prompt(issue.number, &issue.title, &issue.url, background)
-        })
-    });
-
-    let session_config = models::SessionConfig {
-        id: session_id,
-        label: label.clone(),
-        worktree_path: wt_path.clone(),
-        worktree_branch: wt_branch.clone(),
-        archived: false,
-        kind: kind.clone(),
-        github_issue,
-        initial_prompt: initial_prompt.clone(),
-        done_commits: vec![],
-        auto_worker_session: false,
-    };
-
-    // Save session config to project
-    {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let mut project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        project.sessions.push(session_config);
-        storage
-            .save_project(&project)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    // Spawn PTY session
-    let pty_manager = state.app.pty_manager.clone();
-    let emitter = state.app.emitter.clone();
-    let spawn_result = tokio::task::spawn_blocking(move || {
-        let mut mgr = pty_manager.lock().map_err(|e| e.to_string())?;
-        mgr.spawn_session(
-            session_id,
-            &session_dir,
-            &kind,
-            emitter,
-            false,
-            initial_prompt.as_deref(),
-            24,
-            80,
-        )
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?;
-
-    if let Err(spawn_err) = spawn_result {
-        // Rollback: remove session from project
-        if let Ok(storage) = state.app.storage.lock() {
-            if let Ok(mut project) = storage.load_project(project_uuid) {
-                project.sessions.retain(|s| s.id != session_id);
-                let _ = storage.save_project(&project);
-            }
-        }
-        // Cleanup worktree
-        if let (Some(ref wt_path), Some(ref wt_branch)) = (wt_path, wt_branch) {
-            let _ = WorktreeManager::remove_worktree(wt_path, &repo_path, wt_branch);
-        }
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, spawn_err));
-    }
-
-    Ok(Json(Value::String(session_id.to_string())))
+    Ok(Json(Value::String(result)))
 }
 
 async fn generate_architecture(
@@ -3021,33 +2789,13 @@ async fn unstage_session(
     let project_id = args["projectId"].as_str().unwrap_or_default();
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let session_id_str = args["sessionId"].as_str().unwrap_or_default();
     let session_uuid = uuid::Uuid::parse_str(session_id_str)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let idx = project
-        .staged_sessions
-        .iter()
-        .position(|s| s.session_id == session_uuid)
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "No session is currently staged".to_string(),
-            )
-        })?;
-    let staged = project.staged_sessions.remove(idx);
-    commands::kill_process_group(staged.pid);
-    let _ = std::fs::remove_file(status_socket::staged_socket_path(&session_uuid));
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    service::unstage_session(&state.app, project_uuid, session_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
+
     Ok(Json(Value::Null))
 }
 

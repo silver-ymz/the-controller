@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::architecture::{generate_architecture_blocking_with_emitter, ArchitectureResult};
 use crate::config;
-use crate::models::{AutoWorkerQueueIssue, CommitInfo, GithubIssue, Project, SessionConfig};
+use crate::models::{AutoWorkerQueueIssue, CommitInfo, GithubIssue, Project};
 use crate::state::AppState;
 use crate::storage::ProjectInventory;
 use crate::terminal_theme;
@@ -20,20 +20,15 @@ mod notes;
 // (e.g. server/main.rs scaffold_project) keep working.
 pub use crate::service::{ensure_claude_md_symlink, render_agents_md, validate_project_name};
 
-/// Generate the next session label by finding the highest existing session number
-/// and returning "session-N-<6-char-uuid>" where N = max + 1. The UUID suffix
-/// guarantees uniqueness even when branches from deleted sessions persist on the
-/// remote.
-pub fn next_session_label(sessions: &[SessionConfig]) -> String {
-    let max_num = sessions
-        .iter()
-        .filter_map(|s| s.label.strip_prefix("session-"))
-        .filter_map(|n| n.split('-').next()?.parse::<u32>().ok())
-        .max()
-        .unwrap_or(0);
-    let short_id = &Uuid::new_v4().to_string()[..6];
-    format!("session-{}-{}", max_num + 1, short_id)
-}
+// Re-export session helpers that moved to the service layer so external callers
+// (e.g. auto_worker.rs, lib.rs, status_socket.rs, server/main.rs) keep working.
+pub use crate::service::{kill_process_group, next_session_label, stage_session_core};
+
+// Re-export test-only helpers that moved to the service layer.
+#[cfg(test)]
+pub(crate) use crate::service::{
+    cleanup_failed_session_spawn, find_staging_port, STAGING_PORT_OFFSET,
+};
 
 #[cfg(test)]
 fn update_project_with_rollback<T, C, M, R, A>(
@@ -79,17 +74,6 @@ where
             }
         }
     }
-}
-
-fn cleanup_failed_session_spawn(
-    repo_path: &str,
-    worktree_path: Option<&str>,
-    worktree_branch: Option<&str>,
-) -> Result<(), String> {
-    if let Some((path, branch)) = worktree_path.zip(worktree_branch) {
-        WorktreeManager::remove_worktree(path, repo_path, branch)?;
-    }
-    Ok(())
 }
 
 async fn wait_for_merge_rebase_resolution<F, Fut>(
@@ -287,23 +271,9 @@ pub fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Pro
 /// can attach at the correct size.
 #[tauri::command]
 pub async fn restore_sessions(state: State<'_, AppState>) -> Result<(), String> {
-    tracing::info!("restoring sessions from storage");
     let storage = state.storage.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let storage = storage.lock().map_err(|e| e.to_string())?;
-        let inventory = storage.list_projects().map_err(|e| e.to_string())?;
-        inventory.warn_if_corrupt("restore_sessions");
-        // Migrate worktree paths from UUID-based to name-based directories
-        for project in &inventory.projects {
-            if let Err(e) = storage.migrate_worktree_paths(project) {
-                tracing::error!(
-                    "failed to migrate worktrees for project '{}': {}",
-                    project.name,
-                    e
-                );
-            }
-        }
-        Ok(())
+        crate::service::restore_sessions(&storage).map_err(Into::into)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
@@ -326,10 +296,15 @@ pub async fn connect_session(
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
 
+    // Clone Arcs needed by the service function for spawn_blocking
+    let storage = state.storage.clone();
+    let pty_manager = state.pty_manager.clone();
+    let emitter = state.emitter.clone();
+
     // Check if already connected
     {
-        let pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-        if pty_manager.sessions.contains_key(&id) {
+        let mgr = pty_manager.lock().map_err(|e| e.to_string())?;
+        if mgr.sessions.contains_key(&id) {
             tracing::debug!(session_id = %id, "session already connected, skipping");
             return Ok(());
         }
@@ -338,7 +313,7 @@ pub async fn connect_session(
 
     // Find session config from storage
     let (session_dir, kind) = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
+        let storage = storage.lock().map_err(|e| e.to_string())?;
         let inventory = storage.list_projects().map_err(|e| e.to_string())?;
         inventory.warn_if_corrupt("connect_session");
         inventory
@@ -357,11 +332,6 @@ pub async fn connect_session(
     };
 
     // Run on a background thread to avoid blocking the main thread.
-    // This is critical: the reader thread spawned inside spawn_session emits
-    // pty-output events immediately, and the main thread must be free to
-    // deliver them to the webview (especially the smcup/alternate-screen escape).
-    let pty_manager = state.pty_manager.clone();
-    let emitter = state.emitter.clone();
     tokio::task::spawn_blocking(move || {
         let mut mgr = pty_manager.lock().map_err(|e| e.to_string())?;
         mgr.spawn_session(id, &session_dir, &kind, emitter, true, None, rows, cols)
@@ -443,132 +413,24 @@ pub async fn create_session(
     let background = background.unwrap_or(false);
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_id = Uuid::new_v4();
-    tracing::info!(
-        session_id = %session_id,
-        project_id = %project_uuid,
-        kind = %kind,
-        background,
-        has_github_issue = github_issue.is_some(),
-        has_initial_prompt = initial_prompt.is_some(),
-        "creating session"
-    );
 
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        // Load the project and generate session label
-        let (repo_path, label, base_dir, project_name) = {
-            let storage = storage.lock().map_err(|e| e.to_string())?;
-            let project = storage
-                .load_project(project_uuid)
-                .map_err(|e| e.to_string())?;
-            let label = next_session_label(&project.sessions);
-            (
-                project.repo_path.clone(),
-                label,
-                storage.base_dir(),
-                project.name.clone(),
-            )
-        };
-
-        // Create worktree under ~/.the-controller/worktrees/{project_name}/{label}/
-        let worktree_dir = base_dir.join("worktrees").join(&project_name).join(&label);
-
-        // Try to create a worktree; fall back to repo path for repos without commits
-        let (session_dir, wt_path, wt_branch) =
-            match WorktreeManager::create_worktree(&repo_path, &label, &worktree_dir) {
-                Ok(worktree_path) => {
-                    let wt_str = worktree_path
-                        .to_str()
-                        .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?
-                        .to_string();
-                    (wt_str.clone(), Some(wt_str), Some(label.clone()))
-                }
-                Err(e) if e == "unborn_branch" => {
-                    // Repo has no commits — use repo path directly, no worktree
-                    (repo_path.clone(), None, None)
-                }
-                Err(e) => return Err(e),
-            };
-
-        // Build initial prompt: explicit prompt takes priority, then GitHub issue context
-        let initial_prompt = initial_prompt.or_else(|| {
-            github_issue.as_ref().map(|issue| {
-                crate::session_args::build_issue_prompt(
-                    issue.number,
-                    &issue.title,
-                    &issue.url,
-                    background,
-                )
-            })
-        });
-        let rollback_worktree = wt_path.clone().zip(wt_branch.clone());
-
-        let session_config = SessionConfig {
-            id: session_id,
-            label: label.clone(),
-            worktree_path: wt_path,
-            worktree_branch: wt_branch,
-            archived: false,
-            kind: kind.clone(),
+        crate::service::create_session(
+            &storage,
+            &pty_manager,
+            &emitter,
+            project_uuid,
+            session_id,
+            &kind,
             github_issue,
-            initial_prompt: initial_prompt.clone(),
-            done_commits: vec![],
-            auto_worker_session: false,
-        };
-
-        // Save session config to storage, then spawn PTY (with rollback on failure)
-        {
-            let storage = storage.lock().map_err(|e| e.to_string())?;
-            let mut project = storage
-                .load_project(project_uuid)
-                .map_err(|e| e.to_string())?;
-            project.sessions.push(session_config);
-            storage.save_project(&project).map_err(|e| e.to_string())?;
-        }
-
-        let spawn_result = {
-            let mut mgr = pty_manager.lock().map_err(|e| e.to_string())?;
-            mgr.spawn_session(
-                session_id,
-                &session_dir,
-                &kind,
-                emitter,
-                false,
-                initial_prompt.as_deref(),
-                24,
-                80,
-            )
-        };
-
-        if let Err(ref spawn_err) = spawn_result {
-            tracing::error!(session_id = %session_id, error = %spawn_err, "session PTY spawn failed, rolling back");
-            // Rollback: remove session from storage
-            if let Ok(storage) = storage.lock() {
-                if let Ok(mut project) = storage.load_project(project_uuid) {
-                    project.sessions.retain(|session| session.id != session_id);
-                    let _ = storage.save_project(&project);
-                }
-            }
-            // Clean up worktree on spawn failure
-            if let Some((ref worktree_path, ref worktree_branch)) = rollback_worktree {
-                if let Err(cleanup_err) = cleanup_failed_session_spawn(
-                    &repo_path,
-                    Some(worktree_path.as_str()),
-                    Some(worktree_branch.as_str()),
-                ) {
-                    return Err(format!(
-                        "{} (worktree cleanup failed: {})",
-                        spawn_err, cleanup_err
-                    ));
-                }
-            }
-        }
-
-        spawn_result?;
-        Ok(session_id.to_string())
+            background,
+            initial_prompt,
+        )
+        .map_err(Into::into)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
@@ -581,8 +443,7 @@ pub fn write_to_pty(
     data: String,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-    pty_manager.write_to_session(id, data.as_bytes())
+    crate::service::write_to_pty(&state, id, data.as_bytes()).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -592,8 +453,7 @@ pub fn send_raw_to_pty(
     data: String,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-    pty_manager.send_raw_to_session(id, data.as_bytes())
+    crate::service::send_raw_to_pty(&state, id, data.as_bytes()).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -604,9 +464,7 @@ pub fn resize_pty(
     cols: u16,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    tracing::debug!(session_id = %id, rows, cols, "resizing PTY");
-    let pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-    pty_manager.resize_session(id, rows, cols)
+    crate::service::resize_pty(&state, id, rows, cols).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -667,341 +525,6 @@ pub fn cancel_secure_env_request(state: State<AppState>, request_id: String) -> 
     crate::secure_env::cancel_secure_env_request(&state, &request_id)
 }
 
-const COMMIT_POLL_INTERVAL_SECS: u64 = 3;
-const MAX_COMMIT_WAIT_SECS: u64 = 60;
-const MAX_REBASE_WAIT_SECS: u64 = 360; // 6 minutes
-const STAGING_PORT_OFFSET: u16 = 1000;
-
-/// Find a free port for the staged Controller instance.
-/// Starts at base_port + 1000 and increments until a free port is found.
-fn find_staging_port(base_port: u16) -> Result<u16, String> {
-    let start = base_port
-        .checked_add(STAGING_PORT_OFFSET)
-        .ok_or("Port overflow")?;
-    for candidate in start..start.saturating_add(100) {
-        let ipv4_free = std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok();
-        let ipv6_free = std::net::TcpListener::bind(("::1", candidate)).is_ok();
-        if ipv4_free && ipv6_free {
-            return Ok(candidate);
-        }
-    }
-    Err(format!(
-        "No free port found in range {}-{}",
-        start,
-        start.saturating_add(99)
-    ))
-}
-
-/// Kill a process group by PID. Sends SIGTERM to the group, then SIGKILL after 2s
-/// if the group is still alive.
-pub fn kill_process_group(pid: u32) {
-    tracing::debug!(pid, "killing process group");
-    #[cfg(unix)]
-    {
-        use libc::{kill, SIGKILL, SIGTERM};
-        if let Ok(pgid) = i32::try_from(pid) {
-            unsafe {
-                kill(-pgid, SIGTERM);
-            }
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                // Only send SIGKILL if the process group is still alive
-                // (kill with signal 0 checks existence without sending a signal)
-                if unsafe { kill(-pgid, 0) } == 0 {
-                    unsafe {
-                        kill(-pgid, SIGKILL);
-                    }
-                }
-            });
-        }
-    }
-}
-
-/// Core staging logic. Returns the port on success.
-///
-/// When `allow_pty_prompts` is true (Tauri command path), dirty worktrees and
-/// rebase conflicts are handled by prompting the session's Claude via PTY.
-/// When false (socket path), these conditions return an error immediately —
-/// the caller is expected to commit and resolve conflicts before staging.
-pub(crate) async fn stage_session_core(
-    state: &AppState,
-    project_id: Uuid,
-    session_id: Uuid,
-    allow_pty_prompts: bool,
-) -> Result<u16, String> {
-    use crate::models::StagedSession;
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-
-    tracing::info!(session_id = %session_id, project_id = %project_id, "staging session");
-
-    let _staging_guard = state.staging_lock.lock().await;
-
-    // Extract data under a short-lived storage lock to avoid deadlock with pty_manager
-    let (repo_path, branch, worktree_path) = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-        let project = storage
-            .load_project(project_id)
-            .map_err(|e| e.to_string())?;
-
-        if project.name != "the-controller" {
-            tracing::warn!(project_name = %project.name, "staging rejected: only supported for the-controller");
-            return Err("Staging is only supported for the-controller".to_string());
-        }
-
-        // Check if this specific session is already staged
-        if let Some(existing) = project
-            .staged_sessions
-            .iter()
-            .find(|s| s.session_id == session_id)
-        {
-            #[cfg(unix)]
-            let alive = i32::try_from(existing.pid)
-                .map(|pid| unsafe { libc::kill(pid, 0) } == 0)
-                .unwrap_or(false);
-            #[cfg(not(unix))]
-            let alive = false;
-            if alive {
-                tracing::warn!(
-                    pid = existing.pid,
-                    "stage_session: session already staged and alive"
-                );
-                return Err("This session is already staged — unstage it first".to_string());
-            }
-            // Stale record — clean up
-            kill_process_group(existing.pid);
-            let stale_socket = crate::status_socket::staged_socket_path(&session_id);
-            let _ = std::fs::remove_file(&stale_socket);
-            let mut p = project.clone();
-            p.staged_sessions.retain(|s| s.session_id != session_id);
-            storage.save_project(&p).map_err(|e| e.to_string())?;
-        }
-
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .ok_or("Session not found")?;
-
-        let branch = session
-            .worktree_branch
-            .as_deref()
-            .ok_or("Session has no worktree branch")?
-            .to_string();
-
-        let worktree_path = session
-            .worktree_path
-            .as_deref()
-            .ok_or("Session has no worktree path")?
-            .to_string();
-
-        (project.repo_path.clone(), branch, worktree_path)
-    };
-
-    // 1. Ensure worktree is clean
-    {
-        let wt = worktree_path.clone();
-        let is_clean = tokio::task::spawn_blocking(move || WorktreeManager::is_worktree_clean(&wt))
-            .await
-            .map_err(|e| format!("Task failed: {}", e))??;
-
-        if !is_clean {
-            if !allow_pty_prompts {
-                return Err("Worktree has uncommitted changes — commit before staging".to_string());
-            }
-
-            let prompt = "\nYou have uncommitted changes. Please commit all your work now.\r";
-            {
-                let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-                let _ = pty_manager.write_to_session(session_id, prompt.as_bytes());
-            }
-
-            let _ = state
-                .emitter
-                .emit("staging-status", "Waiting for commit...");
-
-            let max_polls = MAX_COMMIT_WAIT_SECS / COMMIT_POLL_INTERVAL_SECS;
-            let mut committed = false;
-            for _ in 0..max_polls {
-                tokio::time::sleep(std::time::Duration::from_secs(COMMIT_POLL_INTERVAL_SECS)).await;
-                let wt_check = worktree_path.clone();
-                let clean = tokio::task::spawn_blocking(move || {
-                    WorktreeManager::is_worktree_clean(&wt_check)
-                })
-                .await
-                .map_err(|e| format!("Task failed: {}", e))??;
-                if clean {
-                    committed = true;
-                    break;
-                }
-            }
-            if !committed {
-                tracing::error!(session_id = %session_id, "stage_session: timed out waiting for commit");
-                return Err(
-                    "Timed out waiting for commit. Please commit manually and retry.".to_string(),
-                );
-            }
-        }
-    }
-
-    // 2. Rebase onto main if needed
-    {
-        let rp = repo_path.clone();
-        let main_branch =
-            tokio::task::spawn_blocking(move || WorktreeManager::detect_main_branch(&rp))
-                .await
-                .map_err(|e| format!("Task failed: {}", e))??;
-
-        let rp = repo_path.clone();
-        let mb2 = main_branch.clone();
-        let _ = tokio::task::spawn_blocking(move || WorktreeManager::sync_main(&rp, &mb2)).await;
-
-        let rp = repo_path.clone();
-        let br = branch.clone();
-        let mb = main_branch.clone();
-        let is_behind =
-            tokio::task::spawn_blocking(move || WorktreeManager::is_branch_behind(&rp, &br, &mb))
-                .await
-                .map_err(|e| format!("Task failed: {}", e))??;
-
-        if is_behind {
-            let wt = worktree_path.clone();
-            let mb = main_branch.clone();
-            let rebase_clean =
-                tokio::task::spawn_blocking(move || WorktreeManager::rebase_onto(&wt, &mb))
-                    .await
-                    .map_err(|e| format!("Task failed: {}", e))??;
-
-            if !rebase_clean {
-                if !allow_pty_prompts {
-                    return Err("Rebase has conflicts — resolve before staging".to_string());
-                }
-
-                // Rebase has conflicts — ask Claude to resolve
-                let prompt = "\nThere are rebase conflicts. Please resolve all conflicts, then run `git rebase --continue`.\r";
-                {
-                    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-                    let _ = pty_manager.write_to_session(session_id, prompt.as_bytes());
-                }
-
-                let _ = state
-                    .emitter
-                    .emit("staging-status", "Rebase conflicts. Claude is resolving...");
-
-                // Poll until rebase is no longer in progress
-                let max_polls = MAX_REBASE_WAIT_SECS / REBASE_POLL_INTERVAL_SECS;
-                let mut resolved = false;
-                for _ in 0..max_polls {
-                    tokio::time::sleep(std::time::Duration::from_secs(REBASE_POLL_INTERVAL_SECS))
-                        .await;
-                    let wt_check = worktree_path.clone();
-                    let still_rebasing = tokio::task::spawn_blocking(move || {
-                        WorktreeManager::is_rebase_in_progress(&wt_check)
-                    })
-                    .await
-                    .map_err(|e| format!("Task failed: {}", e))?;
-                    if !still_rebasing {
-                        resolved = true;
-                        break;
-                    }
-                }
-                if !resolved {
-                    tracing::error!(session_id = %session_id, "stage_session: timed out waiting for rebase conflict resolution");
-                    return Err("Timed out waiting for rebase conflict resolution.".to_string());
-                }
-            }
-        }
-    }
-
-    // 3. Launch a separate Controller instance from the worktree
-    let _ = state
-        .emitter
-        .emit("staging-status", "Preparing staged instance...");
-
-    // Ensure node_modules exists in the worktree
-    let node_modules = PathBuf::from(&worktree_path).join("node_modules");
-    if !node_modules.exists() {
-        let _ = state
-            .emitter
-            .emit("staging-status", "Installing dependencies...");
-        let wt = worktree_path.clone();
-        let install_status = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("pnpm")
-                .arg("install")
-                .current_dir(&wt)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-        })
-        .await
-        .map_err(|e| format!("Task failed: {}", e))?
-        .map_err(|e| format!("pnpm install failed: {}", e))?;
-
-        if !install_status.success() {
-            return Err("pnpm install failed in worktree".to_string());
-        }
-    }
-
-    let port = find_staging_port(1420)?;
-
-    let _ = state
-        .emitter
-        .emit("staging-status", &format!("Starting on port {}...", port));
-
-    let wt = worktree_path.clone();
-    let log_path = PathBuf::from(&wt).join("staging.log");
-    let log_file = std::fs::File::create(&log_path)
-        .map_err(|e| format!("Failed to create staging log: {}", e))?;
-    let log_stderr = log_file
-        .try_clone()
-        .map_err(|e| format!("Failed to clone log file: {}", e))?;
-    let mut child = std::process::Command::new("bash")
-        .args(["./dev.sh", &port.to_string()])
-        .current_dir(&wt)
-        .env(
-            "CONTROLLER_SOCKET",
-            crate::status_socket::staged_socket_path(&session_id),
-        )
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_stderr))
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("Failed to spawn staged instance: {}", e))?;
-
-    let pid = child.id();
-    tracing::info!(session_id = %session_id, pid, port, "staged instance spawned");
-    // Reap the child in a background thread to prevent zombie entries.
-    // We manage the process lifetime via PID/process group (kill_process_group),
-    // not via this Child handle.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-
-    // Save staged session info — if save fails, kill the orphan process
-    let save_result = (|| -> Result<(), String> {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-        let mut project = storage
-            .load_project(project_id)
-            .map_err(|e| e.to_string())?;
-
-        project.staged_sessions.push(StagedSession {
-            session_id,
-            pid,
-            port,
-        });
-
-        storage.save_project(&project).map_err(|e| e.to_string())
-    })();
-
-    if let Err(e) = save_result {
-        tracing::error!(pid, error = %e, "stage_session: failed to save staged session, killing orphan process");
-        kill_process_group(pid);
-        return Err(e);
-    }
-
-    Ok(port)
-}
-
 #[tauri::command]
 pub async fn stage_session(
     state: State<'_, AppState>,
@@ -1011,7 +534,7 @@ pub async fn stage_session(
 ) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    stage_session_core(&state, project_uuid, session_uuid, true).await?;
+    crate::service::stage_session_core(&state, project_uuid, session_uuid, true).await?;
     Ok(())
 }
 
@@ -1022,31 +545,8 @@ pub fn unstage_session(
     session_id: String,
 ) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    tracing::info!(project_id = %project_uuid, "unstaging session");
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| e.to_string())?;
-
-    let idx = project
-        .staged_sessions
-        .iter()
-        .position(|s| s.session_id == session_uuid)
-        .ok_or("This session is not currently staged")?;
-
-    let staged = project.staged_sessions.remove(idx);
-
-    // Kill the staged Controller process group
-    kill_process_group(staged.pid);
-
-    // Clean up this session's socket
-    let socket = crate::status_socket::staged_socket_path(&session_uuid);
-    let _ = std::fs::remove_file(&socket);
-
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-    Ok(())
+    crate::service::unstage_session(&state, project_uuid, session_uuid).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1153,39 +653,8 @@ pub fn close_session(
 ) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    tracing::info!(session_id = %session_uuid, project_id = %project_uuid, delete_worktree, "closing session");
-
-    // Try to close the PTY session even if the terminal is already gone.
-    {
-        let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-        let _ = pty_manager.close_session(session_uuid);
-    }
-
-    // Remove session from project
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| e.to_string())?;
-
-    let session = project
-        .sessions
-        .iter()
-        .find(|s| s.id == session_uuid)
-        .cloned();
-    project.sessions.retain(|s| s.id != session_uuid);
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-
-    // Optionally clean up worktree
-    if delete_worktree {
-        if let Some(session) = session {
-            if let (Some(wt_path), Some(branch)) = (session.worktree_path, session.worktree_branch)
-            {
-                let _ = WorktreeManager::remove_worktree(&wt_path, &project.repo_path, &branch);
-            }
-        }
-    }
-
-    Ok(())
+    crate::service::close_session(&state, project_uuid, session_uuid, delete_worktree)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
