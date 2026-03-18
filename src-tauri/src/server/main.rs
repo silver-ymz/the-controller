@@ -1315,103 +1315,12 @@ async fn list_github_issues(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
 
-    // Check cache
-    let cache_result = {
-        let cache = state
-            .app
-            .issue_cache
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        match cache.get(&repo_path) {
-            Some(entry) if entry.is_fresh() => {
-                return Ok(Json(serde_json::to_value(&entry.issues).unwrap()))
-            }
-            Some(entry) => Some(entry.issues.clone()),
-            None => None,
-        }
-    };
-
-    if let Some(stale_issues) = cache_result {
-        let cache_arc = state.app.issue_cache.clone();
-        let repo_bg = repo_path.clone();
-        tokio::spawn(async move {
-            if let Ok(fresh) = fetch_github_issues_async(&repo_bg).await {
-                if let Ok(mut cache) = cache_arc.lock() {
-                    cache.insert(repo_bg, fresh);
-                }
-            }
-        });
-        return Ok(Json(serde_json::to_value(stale_issues).unwrap()));
-    }
-
-    let issues = fetch_github_issues_async(&repo_path)
+    let issues = service::list_github_issues(&state.app, repo_path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    {
-        let mut cache = state
-            .app
-            .issue_cache
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        cache.insert(repo_path, issues.clone());
-    }
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(issues).unwrap()))
-}
-
-async fn extract_github_repo_async(repo_path: &str) -> Result<String, String> {
-    let rp = repo_path.to_string();
-    tokio::task::spawn_blocking(move || {
-        let repo =
-            git2::Repository::discover(&rp).map_err(|e| format!("Failed to open repo: {}", e))?;
-        let remote = repo
-            .find_remote("origin")
-            .map_err(|_| "No 'origin' remote found".to_string())?;
-        let url = remote
-            .url()
-            .ok_or_else(|| "Origin remote URL is not valid UTF-8".to_string())?;
-        parse_github_nwo(url)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
-}
-
-fn parse_github_nwo(url: &str) -> Result<String, String> {
-    if let Some(rest) = url.strip_prefix("git@github.com:") {
-        return Ok(rest.trim_end_matches(".git").to_string());
-    }
-    if let Some(rest) = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("http://github.com/"))
-    {
-        return Ok(rest.trim_end_matches(".git").to_string());
-    }
-    Err(format!("Not a GitHub remote URL: {}", url))
-}
-
-async fn fetch_github_issues_async(repo_path: &str) -> Result<Vec<models::GithubIssue>, String> {
-    let nwo = extract_github_repo_async(repo_path).await?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            &nwo,
-            "--json",
-            "number,title,url,body,labels",
-            "--limit",
-            "50",
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run gh: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh issue list failed: {}", stderr));
-    }
-    serde_json::from_slice(&output.stdout).map_err(|e| format!("Failed to parse gh output: {}", e))
 }
 
 async fn list_assigned_issues(
@@ -1419,47 +1328,11 @@ async fn list_assigned_issues(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
+
+    let assigned = service::list_assigned_issues(repo_path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            &nwo,
-            "--json",
-            "number,title,url,assignees,updatedAt,labels",
-            "--limit",
-            "100",
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue list failed: {}", stderr),
-        ));
-    }
-    let all: Vec<models::AssignedIssue> = serde_json::from_slice(&output.stdout).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to parse gh output: {}", e),
-        )
-    })?;
-    let assigned: Vec<_> = all
-        .into_iter()
-        .filter(|i| !i.assignees.is_empty())
-        .collect();
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(assigned).unwrap()))
 }
 
@@ -1469,132 +1342,45 @@ async fn create_github_issue(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
     let title = args["title"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing title".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing title".to_string()))?;
     let body = args["body"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing body".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing body".to_string()))?;
+
+    let issue = service::create_github_issue(&state.app, repo_path, title, body)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue", "create", "--repo", &nwo, "--title", &title, "--body", &body,
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue create failed: {}", stderr),
-        ));
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let number = url
-        .rsplit('/')
-        .next()
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not parse issue number".to_string(),
-            )
-        })?;
-    let issue = models::GithubIssue {
-        number,
-        title,
-        url,
-        body: Some(body),
-        labels: vec![],
-    };
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.add_issue(&repo_path, issue.clone());
-    }
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(issue).unwrap()))
 }
 
 async fn generate_issue_body(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
     let title = args["title"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing title".to_string()))?
-        .to_string();
-    let prompt = format!(
-        "Write a concise GitHub issue body for an issue titled: \"{}\". \
-         Include a Summary section and a Details section. \
-         Keep it under 200 words. Return only the markdown body, nothing else.",
-        title
-    );
-    let output = tokio::process::Command::new("claude")
-        .args(["--print", &prompt])
-        .env_remove("CLAUDECODE")
-        .output()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing title".to_string()))?;
+
+    let body = service::generate_issue_body(title)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run claude: {}", e),
-            )
-        })?;
-    let body = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
-        String::new()
-    };
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(body)))
 }
 
 async fn post_github_comment(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
     let issue_number = args["issueNumber"]
         .as_u64()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
     let body = args["body"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing body".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing body".to_string()))?;
+
+    service::post_github_comment(repo_path, issue_number, body)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "comment",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--body",
-            &body,
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue comment failed: {}", stderr),
-        ));
-    }
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1604,66 +1390,26 @@ async fn add_github_label(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
     let issue_number = args["issueNumber"]
         .as_u64()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
     let label = args["label"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing label".to_string()))?
-        .to_string();
-    let description = args["description"].as_str().map(|s| s.to_string());
-    let color = args["color"].as_str().map(|s| s.to_string());
-    let nwo = extract_github_repo_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let desc = description
-        .as_deref()
-        .unwrap_or("Issue is being worked on in a session");
-    let col = color.as_deref().unwrap_or("F9E2AF");
-    let _ = tokio::process::Command::new("gh")
-        .args([
-            "label",
-            "create",
-            &label,
-            "--repo",
-            &nwo,
-            "--description",
-            desc,
-            "--color",
-            col,
-        ])
-        .output()
-        .await;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "edit",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--add-label",
-            &label,
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue edit failed: {}", stderr),
-        ));
-    }
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.add_label(&repo_path, issue_number, &label);
-    }
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing label".to_string()))?;
+    let description = args["description"].as_str();
+    let color = args["color"].as_str();
+
+    service::add_github_label(
+        &state.app,
+        repo_path,
+        issue_number,
+        label,
+        description,
+        color,
+    )
+    .await
+    .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1673,46 +1419,17 @@ async fn remove_github_label(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
     let issue_number = args["issueNumber"]
         .as_u64()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
     let label = args["label"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing label".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing label".to_string()))?;
+
+    service::remove_github_label(&state.app, repo_path, issue_number, label)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "edit",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--remove-label",
-            &label,
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue edit failed: {}", stderr),
-        ));
-    }
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.remove_label(&repo_path, issue_number, &label);
-    }
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1722,49 +1439,17 @@ async fn close_github_issue(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
     let issue_number = args["issueNumber"]
         .as_u64()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
     let comment = args["comment"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing comment".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing comment".to_string()))?;
+
+    service::close_github_issue(&state.app, repo_path, issue_number, comment)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut gh_args = vec![
-        "issue".to_string(),
-        "close".to_string(),
-        issue_number.to_string(),
-        "--repo".to_string(),
-        nwo,
-    ];
-    if !comment.trim().is_empty() {
-        gh_args.push("--comment".to_string());
-        gh_args.push(comment);
-    }
-    let output = tokio::process::Command::new("gh")
-        .args(&gh_args)
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue close failed: {}", stderr),
-        ));
-    }
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.remove_issue(&repo_path, issue_number);
-    }
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1774,41 +1459,14 @@ async fn delete_github_issue(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
     let issue_number = args["issueNumber"]
         .as_u64()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
-    let nwo = extract_github_repo_async(&repo_path)
+
+    service::delete_github_issue(&state.app, repo_path, issue_number)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "delete",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--yes",
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue delete failed: {}", stderr),
-        ));
-    }
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.remove_issue(&repo_path, issue_number);
-    }
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1997,49 +1655,10 @@ async fn get_maintainer_issues(
             project.maintainer.github_repo.clone(),
         )
     };
-    let nwo = match github_repo {
-        Some(ref repo) if !repo.is_empty() => repo.clone(),
-        _ => extract_github_repo_async(&repo_path)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?,
-    };
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            &nwo,
-            "--label",
-            "filed-by-maintainer",
-            "--state",
-            "all",
-            "--json",
-            "number,title,state,url,labels,createdAt,closedAt",
-            "--limit",
-            "100",
-        ])
-        .output()
+
+    let issues = service::get_maintainer_issues(&repo_path, github_repo.as_deref())
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue list failed: {}", stderr),
-        ));
-    }
-    let issues: Vec<models::MaintainerIssue> =
-        serde_json::from_slice(&output.stdout).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to parse gh output: {}", e),
-            )
-        })?;
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(issues).unwrap()))
 }
 
@@ -2070,44 +1689,11 @@ async fn get_maintainer_issue_detail(
             project.maintainer.github_repo.clone(),
         )
     };
-    let nwo = match github_repo {
-        Some(ref repo) if !repo.is_empty() => repo.clone(),
-        _ => extract_github_repo_async(&repo_path)
+
+    let detail =
+        service::get_maintainer_issue_detail(&repo_path, github_repo.as_deref(), issue_number)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?,
-    };
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "view",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--json",
-            "number,title,state,body,url,labels,createdAt,closedAt",
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue view failed: {}", stderr),
-        ));
-    }
-    let detail: models::MaintainerIssueDetail =
-        serde_json::from_slice(&output.stdout).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to parse gh output: {}", e),
-            )
-        })?;
+            .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(detail).unwrap()))
 }
 
@@ -2160,9 +1746,9 @@ async fn get_auto_worker_queue(
         .iter()
         .find(|s| s.auto_worker_session)
         .and_then(|s| s.github_issue.clone());
-    let issues = fetch_github_issues_async(&project.repo_path)
+    let issues = service::fetch_github_issues(&project.repo_path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(<(StatusCode, String)>::from)?;
     // Update cache
     if let Ok(mut cache) = state.app.issue_cache.lock() {
         cache.insert(project.repo_path.clone(), issues.clone());
@@ -2199,74 +1785,11 @@ async fn get_auto_worker_queue(
 async fn get_worker_reports(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = args["repoPath"]
         .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?;
+
+    let reports = service::get_worker_reports(repo_path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            &nwo,
-            "--label",
-            "assigned-to-auto-worker",
-            "--state",
-            "all",
-            "--json",
-            "number,title,state,comments,updatedAt",
-            "--limit",
-            "50",
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue list failed: {}", stderr),
-        ));
-    }
-    let raw: Vec<Value> = serde_json::from_slice(&output.stdout).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to parse gh output: {}", e),
-        )
-    })?;
-    let reports: Vec<Value> = raw
-        .into_iter()
-        .filter_map(|issue| {
-            if issue["state"].as_str() != Some("CLOSED") {
-                return None;
-            }
-            let number = issue["number"].as_u64()?;
-            let title = issue["title"].as_str()?.to_string();
-            let updated_at = issue["updatedAt"].as_str().unwrap_or("").to_string();
-            let body = issue["comments"]
-                .as_array()
-                .and_then(|comments| {
-                    comments.iter().rev().find_map(|c| {
-                        let text = c["body"].as_str()?;
-                        text.contains("<!-- auto-worker-report -->")
-                            .then_some(text.to_string())
-                    })
-                })
-                .unwrap_or_else(|| "No worker report was posted for this issue.".to_string());
-            Some(serde_json::json!({
-                "issue_number": number,
-                "title": title,
-                "comment_body": body,
-                "updated_at": updated_at,
-            }))
-        })
-        .collect();
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(reports).unwrap()))
 }
 

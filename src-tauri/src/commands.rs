@@ -103,20 +103,6 @@ fn rollback_scaffold_dir(repo_path: &Path, error: String) -> String {
     }
 }
 
-fn parse_github_nwo(url: &str) -> Result<String, String> {
-    if let Some(rest) = url.strip_prefix("git@github.com:") {
-        return Ok(rest.trim_end_matches(".git").to_string());
-    }
-    if let Some(rest) = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("http://github.com/"))
-    {
-        return Ok(rest.trim_end_matches(".git").to_string());
-    }
-
-    Err(format!("Not a GitHub remote URL: {}", url))
-}
-
 fn github_cli_command() -> std::process::Command {
     std::process::Command::new(
         std::env::var("THE_CONTROLLER_GH_BIN").unwrap_or_else(|_| "gh".to_string()),
@@ -135,7 +121,7 @@ fn rollback_scaffold_state(repo_path: &Path, error: String) -> String {
     if let Ok(repo) = git2::Repository::open(repo_path) {
         if let Ok(remote) = repo.find_remote("origin") {
             if let Some(url) = remote.url() {
-                if let Ok(nwo) = parse_github_nwo(url) {
+                if let Ok(nwo) = crate::service::parse_github_nwo(url) {
                     match github_cli_command()
                         .args(["repo", "delete", &nwo, "--yes"])
                         .output()
