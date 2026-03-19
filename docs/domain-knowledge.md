@@ -117,8 +117,37 @@ The Controller can run without a desktop environment as a standalone Axum HTTP/W
 **Graceful shutdown:** The server handles `SIGTERM`/`SIGINT` by cleaning up the Unix domain socket and killing all PTY/broker sessions.
 
 **Key files:**
-- `src-tauri/src/bin/server.rs` — Axum server (~2800 lines, 40+ routes)
+- `src-tauri/src/server/main.rs` — Axum server (thin handlers delegating to service layer)
+- `src-tauri/src/service/` — shared business logic (11 submodules)
+- `src-tauri/src/commands.rs` — Tauri IPC commands (thin adapters delegating to service layer)
+- `src-tauri/src/error.rs` — `AppError` enum bridging Tauri and Axum error formats
 - `src/lib/backend.ts` — dual-mode command/event routing
 - `src/lib/platform.ts` — lazy Tauri imports with browser fallbacks
 - `src-tauri/src/emitter.rs` — EventEmitter trait + implementations
 - `src-tauri/src/status_socket.rs` — decoupled from AppHandle for server use
+
+## Service Layer Architecture
+
+Business logic lives in `src-tauri/src/service/` (11 submodules). Both `commands.rs` (Tauri IPC) and `server/main.rs` (Axum HTTP) are thin adapters that delegate to service functions.
+
+**Pattern for Tauri commands:**
+```rust
+#[tauri::command]
+pub async fn foo(state: State<'_, AppState>, id: Uuid) -> Result<T, String> {
+    crate::service::foo(&state, id).map_err(Into::into)
+}
+```
+
+**Pattern for Axum handlers:**
+```rust
+async fn foo(State(state): State<SharedState>, Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
+    let result = service::foo(&state.app, id).map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(json!(result)))
+}
+```
+
+**Error bridging:** `AppError` in `error.rs` has `From` impls for both `String` (Tauri) and `(StatusCode, String)` (Axum, feature-gated behind `server`).
+
+**Submodules:** `sessions`, `github`, `scaffold`, `projects`, `maintainer`, `notes`, `deploy`, `config`, `voice`, `auth`, `secure_env`. Shared helpers (`validate_project_name`, `render_agents_md`, `ensure_claude_md_symlink`) live in `service/mod.rs`.
+
+**`spawn_blocking` caveat:** Some service functions take individual `Arc` fields instead of `&AppState` because `spawn_blocking` requires `'static`. The Tauri command clones the Arc fields before entering the closure.

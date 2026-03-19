@@ -12,20 +12,368 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 use the_controller_lib::{
-    architecture, auto_worker, commands, config, deploy, emitter::WsBroadcastEmitter, maintainer,
-    models, note_ai_chat, notes, secure_env, session_args, state::AppState, status_socket,
-    token_usage, voice, worktree::WorktreeManager,
+    config, deploy, emitter::WsBroadcastEmitter, models, note_ai_chat, service, state::AppState,
+    status_socket,
 };
 
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
+
+mod requests {
+    use super::*;
+
+    // --- Reusable single-field structs ---
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ProjectIdRequest {
+        pub project_id: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RepoPathRequest {
+        pub repo_path: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SessionIdRequest {
+        pub session_id: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ProjectSessionRequest {
+        pub project_id: String,
+        pub session_id: String,
+    }
+
+    // --- Handler-specific structs ---
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ConnectSessionRequest {
+        pub session_id: String,
+        #[serde(default = "default_rows")]
+        pub rows: u16,
+        #[serde(default = "default_cols")]
+        pub cols: u16,
+    }
+
+    fn default_rows() -> u16 {
+        24
+    }
+    fn default_cols() -> u16 {
+        80
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct LoadProjectRequest {
+        pub name: String,
+        pub repo_path: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct WriteToPtyRequest {
+        pub session_id: String,
+        pub data: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ResizePtyRequest {
+        pub session_id: String,
+        #[serde(default = "default_rows")]
+        pub rows: u16,
+        #[serde(default = "default_cols")]
+        pub cols: u16,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CloseSessionRequest {
+        pub project_id: String,
+        pub session_id: String,
+        #[serde(default)]
+        pub delete_worktree: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CreateSessionRequest {
+        pub project_id: String,
+        #[serde(default = "default_kind")]
+        pub kind: String,
+        #[serde(default)]
+        pub background: bool,
+        pub initial_prompt: Option<String>,
+        pub github_issue: Option<models::GithubIssue>,
+    }
+
+    fn default_kind() -> String {
+        "claude".to_string()
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CreateProjectRequest {
+        pub name: String,
+        pub repo_path: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct DeleteProjectRequest {
+        pub project_id: String,
+        #[serde(default)]
+        pub delete_repo: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct UpdateAgentsMdRequest {
+        pub project_id: String,
+        pub content: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SetInitialPromptRequest {
+        pub project_id: String,
+        pub session_id: String,
+        pub prompt: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SaveOnboardingConfigRequest {
+        pub projects_root: String,
+        #[serde(default)]
+        pub default_provider: config::ConfigDefaultProvider,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct LogFrontendErrorRequest {
+        #[serde(default)]
+        pub message: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SaveDeployCredentialsRequest {
+        pub credentials: deploy::credentials::DeployCredentials,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct DeployProjectRequest {
+        pub request: deploy::commands::DeployRequest,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SendNoteAiChatRequest {
+        pub note_content: String,
+        pub selected_text: String,
+        pub prompt: String,
+        #[serde(default)]
+        pub conversation_history: Vec<note_ai_chat::NoteAiChatMessage>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct FolderRequest {
+        pub folder: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct FolderFilenameRequest {
+        pub folder: String,
+        pub filename: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct WriteNoteRequest {
+        pub folder: String,
+        pub filename: String,
+        pub content: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CreateNoteRequest {
+        pub folder: String,
+        pub title: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RenameNoteRequest {
+        pub folder: String,
+        pub old_name: String,
+        pub new_name: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct NameRequest {
+        pub name: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RenameFolderRequest {
+        pub old_name: String,
+        pub new_name: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct DeleteFolderRequest {
+        pub name: String,
+        #[serde(default)]
+        pub force: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RepoPathIssueNumberRequest {
+        pub repo_path: String,
+        pub issue_number: u64,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CreateGithubIssueRequest {
+        pub repo_path: String,
+        pub title: String,
+        pub body: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct TitleRequest {
+        pub title: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct PostGithubCommentRequest {
+        pub repo_path: String,
+        pub issue_number: u64,
+        pub body: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct AddGithubLabelRequest {
+        pub repo_path: String,
+        pub issue_number: u64,
+        pub label: String,
+        pub description: Option<String>,
+        pub color: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RemoveGithubLabelRequest {
+        pub repo_path: String,
+        pub issue_number: u64,
+        pub label: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CloseGithubIssueRequest {
+        pub repo_path: String,
+        pub issue_number: u64,
+        pub comment: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ConfigureMaintainerRequest {
+        pub project_id: String,
+        #[serde(default)]
+        pub enabled: bool,
+        #[serde(default = "default_interval_minutes")]
+        pub interval_minutes: u64,
+        pub github_repo: Option<String>,
+    }
+
+    fn default_interval_minutes() -> u64 {
+        30
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct GetMaintainerIssueDetailRequest {
+        pub project_id: String,
+        pub issue_number: u64,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ConfigureAutoWorkerRequest {
+        pub project_id: String,
+        #[serde(default)]
+        pub enabled: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct PathRequest {
+        pub path: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct DescriptionRequest {
+        pub description: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SubmitSecureEnvValueRequest {
+        pub request_id: String,
+        pub value: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct CancelSecureEnvRequestRequest {
+        pub request_id: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SaveNoteImageRequest {
+        pub folder: String,
+        pub extension: String,
+        pub image_bytes: Vec<u8>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ResolveNoteAssetPathRequest {
+        pub folder: String,
+        pub relative_path: String,
+    }
+}
+
+use requests::*;
 
 struct ServerState {
     app: Arc<AppState>,
@@ -393,380 +741,129 @@ fn forwarded_proto(headers: &HeaderMap) -> Option<&str> {
 async fn list_projects(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let inventory = storage
-        .list_projects()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let inventory = service::list_projects(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(inventory).unwrap()))
 }
 
 async fn check_onboarding(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let base_dir = storage.base_dir();
-    let cfg = config::load_config(&base_dir);
+    let cfg = service::check_onboarding(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(cfg).unwrap()))
 }
 
 async fn restore_sessions(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let inventory = storage
-        .list_projects()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    inventory.warn_if_corrupt("restore_sessions");
-    for project in &inventory.projects {
-        if let Err(e) = storage.migrate_worktree_paths(project) {
-            tracing::error!(
-                "failed to migrate worktrees for project '{}': {}",
-                project.name,
-                e
-            );
-        }
-    }
+    service::restore_sessions(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn connect_session(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<ConnectSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let rows = args["rows"].as_u64().unwrap_or(24) as u16;
-    let cols = args["cols"].as_u64().unwrap_or(80) as u16;
-    let id =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let id = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Check if already connected
-    {
-        let pty_manager = state
-            .app
-            .pty_manager
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        if pty_manager.session_ids().contains(&id) {
-            return Ok(Json(Value::Null));
-        }
-    }
-
-    // Find session config from storage
-    let (session_dir, kind) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let inventory = storage
-            .list_projects()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        inventory.warn_if_corrupt("connect_session");
-        inventory
-            .projects
-            .iter()
-            .flat_map(|p| p.sessions.iter().map(move |s| (p, s)))
-            .find(|(_, s)| s.id == id)
-            .map(|(p, s)| {
-                let dir = s
-                    .worktree_path
-                    .clone()
-                    .unwrap_or_else(|| p.repo_path.clone());
-                (dir, s.kind.clone())
-            })
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    format!("session not found: {}", session_id),
-                )
-            })?
-    };
-
-    let pty_manager = state.app.pty_manager.clone();
-    let emitter = state.app.emitter.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut mgr = pty_manager
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        mgr.spawn_session(id, &session_dir, &kind, emitter, true, None, rows, cols)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })??;
+    service::connect_session(
+        &state.app.storage,
+        &state.app.pty_manager,
+        &state.app.emitter,
+        id,
+        req.rows,
+        req.cols,
+    )
+    .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
 
 async fn load_project(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<LoadProjectRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let name = args["name"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
-        .to_string();
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-
-    commands::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let path = std::path::Path::new(&repo_path);
-    if !path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("repo_path is not a directory: {}", repo_path),
-        ));
-    }
-
-    // Validate it's a git repo
-    let git_dir = path.join(".git");
-    if !git_dir.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("not a git repository: {}", repo_path),
-        ));
-    }
-
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Return existing project if one with the same repo_path exists
-    if let Ok(inventory) = storage.list_projects() {
-        let existing = inventory.projects;
-        if let Some(project) = existing.iter().find(|p| p.repo_path == repo_path) {
-            return Ok(Json(serde_json::to_value(project.clone()).unwrap()));
-        }
-        // Reject duplicate project names when creating new
-        if existing.iter().any(|p| p.name == name) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("A project named '{}' already exists", name),
-            ));
-        }
-    }
-
-    let project = models::Project {
-        id: uuid::Uuid::new_v4(),
-        name: name.clone(),
-        repo_path: repo_path.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        archived: false,
-        maintainer: models::MaintainerConfig::default(),
-        auto_worker: models::AutoWorkerConfig::default(),
-        prompts: vec![],
-        sessions: vec![],
-        staged_sessions: vec![],
-    };
-
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Only create default agents.md if repo doesn't have one
-    let repo_agents = path.join("agents.md");
-    if !repo_agents.exists() {
-        storage
-            .save_agents_md(project.id, &commands::render_agents_md(&project.name))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    // If repo has agents.md but no CLAUDE.md, create symlink
-    commands::ensure_claude_md_symlink(path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
+    let project = service::load_project(&state.app, &req.name, &req.repo_path)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(project).unwrap()))
 }
 
 async fn write_to_pty(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<WriteToPtyRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let data = args["data"].as_str().unwrap_or_default();
-    let id =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut pty = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty.write_to_session(id, data.as_bytes())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let id = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service::write_to_pty(&state.app, id, req.data.as_bytes())
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn send_raw_to_pty(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<WriteToPtyRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let data = args["data"].as_str().unwrap_or_default();
-    let id =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut pty = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty.send_raw_to_session(id, data.as_bytes())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let id = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service::send_raw_to_pty(&state.app, id, req.data.as_bytes())
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn resize_pty(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<ResizePtyRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let rows = args["rows"].as_u64().unwrap_or(24) as u16;
-    let cols = args["cols"].as_u64().unwrap_or(80) as u16;
-    let id =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let pty = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty.resize_session(id, rows, cols)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let id = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service::resize_pty(&state.app, id, req.rows, req.cols)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn close_session(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<CloseSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let delete_worktree = args["deleteWorktree"].as_bool().unwrap_or(false);
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Close PTY / kill broker session
-    {
-        let mut pty_manager = state
-            .app
-            .pty_manager
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let _ = pty_manager.close_session(session_uuid);
-    }
-
-    // Remove session from project
-    let (repo_path, session) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let mut project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .cloned();
-        project.sessions.retain(|s| s.id != session_uuid);
-        storage
-            .save_project(&project)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        (project.repo_path.clone(), session)
-    };
-
-    // Optionally delete worktree
-    if delete_worktree {
-        if let Some(session) = session {
-            if let (Some(wt_path), Some(branch)) = (session.worktree_path, session.worktree_branch)
-            {
-                let rp = repo_path;
-                let _ = tokio::task::spawn_blocking(move || {
-                    the_controller_lib::worktree::WorktreeManager::remove_worktree(
-                        &wt_path, &rp, &branch,
-                    )
-                })
-                .await;
-            }
-        }
-    }
+    service::close_session(&state.app, project_uuid, session_uuid, req.delete_worktree)
+        .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
 
 async fn create_session(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let kind = args["kind"].as_str().unwrap_or("claude").to_string();
-    let background = args["background"].as_bool().unwrap_or(false);
-    let initial_prompt = args["initialPrompt"].as_str().map(|s| s.to_string());
-    let github_issue: Option<models::GithubIssue> =
-        serde_json::from_value(args["githubIssue"].clone()).ok();
-
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let session_id = uuid::Uuid::new_v4();
 
-    // Load the project and generate session label
-    let (repo_path, label, base_dir, project_name) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let label = commands::next_session_label(&project.sessions);
-        (
-            project.repo_path.clone(),
-            label,
-            storage.base_dir(),
-            project.name.clone(),
+    let storage = state.app.storage.clone();
+    let pty_manager = state.app.pty_manager.clone();
+    let emitter = state.app.emitter.clone();
+    let kind = req.kind;
+    let github_issue = req.github_issue;
+    let background = req.background;
+    let initial_prompt = req.initial_prompt;
+
+    let result = tokio::task::spawn_blocking(move || {
+        service::create_session(
+            &storage,
+            &pty_manager,
+            &emitter,
+            project_uuid,
+            session_id,
+            &kind,
+            github_issue,
+            background,
+            initial_prompt,
         )
-    };
-
-    // Create worktree under ~/.the-controller/worktrees/{project_name}/{label}/
-    let worktree_dir = base_dir.join("worktrees").join(&project_name).join(&label);
-
-    let repo_path_clone = repo_path.clone();
-    let label_clone = label.clone();
-    let (session_dir, wt_path, wt_branch) = tokio::task::spawn_blocking(move || {
-        match WorktreeManager::create_worktree(&repo_path_clone, &label_clone, &worktree_dir) {
-            Ok(worktree_path) => {
-                let wt_str = worktree_path
-                    .to_str()
-                    .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?
-                    .to_string();
-                Ok((wt_str.clone(), Some(wt_str), Some(label_clone)))
-            }
-            Err(e) if e == "unborn_branch" => Ok((repo_path_clone, None, None)),
-            Err(e) => Err(e),
-        }
     })
     .await
     .map_err(|e| {
@@ -775,100 +872,18 @@ async fn create_session(
             format!("Task failed: {}", e),
         )
     })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(<(StatusCode, String)>::from)?;
 
-    // Build initial prompt: explicit prompt takes priority, then GitHub issue context
-    let initial_prompt = initial_prompt.or_else(|| {
-        github_issue.as_ref().map(|issue| {
-            session_args::build_issue_prompt(issue.number, &issue.title, &issue.url, background)
-        })
-    });
-
-    let session_config = models::SessionConfig {
-        id: session_id,
-        label: label.clone(),
-        worktree_path: wt_path.clone(),
-        worktree_branch: wt_branch.clone(),
-        archived: false,
-        kind: kind.clone(),
-        github_issue,
-        initial_prompt: initial_prompt.clone(),
-        done_commits: vec![],
-        auto_worker_session: false,
-    };
-
-    // Save session config to project
-    {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let mut project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        project.sessions.push(session_config);
-        storage
-            .save_project(&project)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    // Spawn PTY session
-    let pty_manager = state.app.pty_manager.clone();
-    let emitter = state.app.emitter.clone();
-    let spawn_result = tokio::task::spawn_blocking(move || {
-        let mut mgr = pty_manager.lock().map_err(|e| e.to_string())?;
-        mgr.spawn_session(
-            session_id,
-            &session_dir,
-            &kind,
-            emitter,
-            false,
-            initial_prompt.as_deref(),
-            24,
-            80,
-        )
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?;
-
-    if let Err(spawn_err) = spawn_result {
-        // Rollback: remove session from project
-        if let Ok(storage) = state.app.storage.lock() {
-            if let Ok(mut project) = storage.load_project(project_uuid) {
-                project.sessions.retain(|s| s.id != session_id);
-                let _ = storage.save_project(&project);
-            }
-        }
-        // Cleanup worktree
-        if let (Some(ref wt_path), Some(ref wt_branch)) = (wt_path, wt_branch) {
-            let _ = WorktreeManager::remove_worktree(wt_path, &repo_path, wt_branch);
-        }
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, spawn_err));
-    }
-
-    Ok(Json(Value::String(session_id.to_string())))
+    Ok(Json(Value::String(result)))
 }
 
 async fn generate_architecture(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<RepoPathRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
     let emitter = state.app.emitter.clone();
     let result = tokio::task::spawn_blocking(move || {
-        architecture::generate_architecture_blocking_with_emitter(
-            std::path::Path::new(&repo_path),
-            &emitter,
-        )
+        service::generate_architecture(&req.repo_path, &emitter)
     })
     .await
     .map_err(|e| {
@@ -877,215 +892,78 @@ async fn generate_architecture(
             format!("Task failed: {}", e),
         )
     })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
 async fn create_project(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<CreateProjectRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let name = args["name"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
-        .to_string();
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-
-    commands::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let path = std::path::Path::new(&repo_path);
-    if !path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("repo_path is not a directory: {}", repo_path),
-        ));
-    }
-
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Reject duplicate project names
-    if let Ok(inventory) = storage.list_projects() {
-        if inventory.projects.iter().any(|p| p.name == name) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("A project named '{}' already exists", name),
-            ));
-        }
-    }
-
-    let project = models::Project {
-        id: uuid::Uuid::new_v4(),
-        name: name.clone(),
-        repo_path: repo_path.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        archived: false,
-        maintainer: models::MaintainerConfig::default(),
-        auto_worker: models::AutoWorkerConfig::default(),
-        prompts: vec![],
-        sessions: vec![],
-        staged_sessions: vec![],
-    };
-
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // If repo doesn't have agents.md, create default one in config dir
-    let repo_agents = path.join("agents.md");
-    if !repo_agents.exists() {
-        storage
-            .save_agents_md(project.id, &commands::render_agents_md(&project.name))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    // If repo has agents.md but no CLAUDE.md, create symlink
-    commands::ensure_claude_md_symlink(path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
+    let project = service::create_project(&state.app, &req.name, &req.repo_path)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(project).unwrap()))
 }
 
 async fn delete_project(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<DeleteProjectRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let delete_repo = args["deleteRepo"].as_bool().unwrap_or(false);
-    let id =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let id = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let project = storage
-        .load_project(id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Close all PTY sessions and clean up worktrees
-    {
-        let mut pty_manager = state
-            .app
-            .pty_manager
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        for session in &project.sessions {
-            let _ = pty_manager.close_session(session.id);
-            if let (Some(wt_path), Some(branch)) =
-                (&session.worktree_path, &session.worktree_branch)
-            {
-                let _ = WorktreeManager::remove_worktree(wt_path, &project.repo_path, branch);
-            }
-        }
-    }
-
-    // Delete project metadata
-    storage
-        .delete_project_dir(id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Optionally delete the repo directory
-    if delete_repo && std::path::Path::new(&project.repo_path).exists() {
-        std::fs::remove_dir_all(&project.repo_path).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to delete repo: {}", e),
-            )
-        })?;
-    }
+    service::delete_project(
+        &state.app.storage,
+        &state.app.pty_manager,
+        id,
+        req.delete_repo,
+    )
+    .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
 
 async fn get_agents_md(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<ProjectIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let id =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let project = storage
-        .load_project(id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let content = storage
-        .get_agents_md(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let id = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let content = service::get_agents_md(&state.app, id).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(content)))
 }
 
 async fn update_agents_md(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<UpdateAgentsMdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let content = args["content"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing content".to_string()))?;
-    let id =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    storage
-        .save_agents_md(id, content)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let id = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    service::update_agents_md(&state.app, id, &req.content)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn set_initial_prompt(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<SetInitialPromptRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let prompt = args["prompt"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing prompt".to_string()))?
-        .to_string();
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if let Some(session) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
-        if session.initial_prompt.is_none() {
-            session.initial_prompt = Some(prompt);
-            storage
-                .save_project(&project)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        }
-    }
+    service::set_initial_prompt(&state.app, project_uuid, session_uuid, req.prompt)
+        .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
 
 async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(config::check_claude_cli_status)
+    let result = tokio::task::spawn_blocking(service::check_claude_cli)
         .await
         .map_err(|e| {
             (
@@ -1097,145 +975,85 @@ async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
 }
 
 async fn home_dir() -> Result<Json<Value>, (StatusCode, String)> {
-    let path = dirs::home_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not determine home directory".to_string(),
-            )
-        })?;
+    let path = service::home_dir().map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(path)))
 }
 
 async fn save_onboarding_config(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<SaveOnboardingConfigRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let projects_root = args["projectsRoot"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectsRoot".to_string()))?
-        .to_string();
-    let default_provider: config::ConfigDefaultProvider =
-        serde_json::from_value(args["defaultProvider"].clone()).unwrap_or_default();
-
-    let path = std::path::Path::new(&projects_root);
-    if !path.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "projects_root is not an existing directory: {}",
-                projects_root
-            ),
-        ));
-    }
-
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let base_dir = storage.base_dir();
-
-    // Preserve existing log_level to avoid clobbering it
-    let existing_log_level = config::load_config(&base_dir)
-        .map(|c| c.log_level)
-        .unwrap_or_else(|| "info".to_string());
-
-    let cfg = config::Config {
-        projects_root,
-        default_provider,
-        log_level: existing_log_level,
-    };
-    config::save_config(&base_dir, &cfg)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    service::save_onboarding_config(&state.app, &req.projects_root, Some(req.default_provider))
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn log_frontend_error(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<LogFrontendErrorRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    use std::io::Write;
-    let message = args["message"].as_str().unwrap_or_default();
-    let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
-    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
-    let line = format!("{} ERROR [frontend] {}\n", timestamp, sanitized);
-
-    if let Ok(mut guard) = state.app.frontend_log.lock() {
-        if let Some(ref mut file) = *guard {
-            let _ = file.write_all(line.as_bytes());
-            let _ = file.flush();
-        }
-    }
-
-    tracing::error!(target: "frontend", "{}", sanitized);
+    service::log_frontend_error(&state.app, &req.message);
     Ok(Json(Value::Null))
 }
 
-async fn detect_project_type(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let result = deploy::commands::detect_project_type(repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+async fn detect_project_type(
+    Json(req): Json<RepoPathRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let repo_path = req.repo_path;
+    let result =
+        tokio::task::spawn_blocking(move || service::detect_project_type_blocking(&repo_path))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
 async fn get_deploy_credentials() -> Result<Json<Value>, (StatusCode, String)> {
-    let result = deploy::commands::get_deploy_credentials()
+    let result = tokio::task::spawn_blocking(service::get_deploy_credentials_blocking)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
 async fn save_deploy_credentials(
-    Json(args): Json<Value>,
+    Json(req): Json<SaveDeployCredentialsRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let credentials: deploy::credentials::DeployCredentials =
-        serde_json::from_value(args["credentials"].clone())
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    deploy::commands::save_deploy_credentials(credentials)
+    tokio::task::spawn_blocking(move || service::save_deploy_credentials_blocking(req.credentials))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn is_deploy_provisioned() -> Result<Json<Value>, (StatusCode, String)> {
-    let provisioned = deploy::commands::is_deploy_provisioned()
+    let provisioned = tokio::task::spawn_blocking(service::is_deploy_provisioned_blocking)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Bool(provisioned)))
 }
 
-async fn deploy_project(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
-    let request: deploy::commands::DeployRequest = serde_json::from_value(args["request"].clone())
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let result = deploy::commands::deploy_project(request)
+async fn deploy_project(
+    Json(req): Json<DeployProjectRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let result = service::deploy_project(req.request)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
 async fn list_deployed_services() -> Result<Json<Value>, (StatusCode, String)> {
-    let services = deploy::commands::list_deployed_services()
+    let services = service::list_deployed_services()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Array(services)))
 }
 
 async fn load_keybindings(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let result = the_controller_lib::keybindings::load_keybindings(&base_dir);
+    let result = service::load_keybindings(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
@@ -1258,1783 +1076,36 @@ async fn capture_app_screenshot() -> Result<Json<Value>, (StatusCode, String)> {
 async fn start_voice_pipeline(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let gen_before = state
-        .app
-        .voice_generation
-        .load(std::sync::atomic::Ordering::SeqCst);
-    // Check if already running
-    {
-        let pipeline = state.app.voice_pipeline.lock().await;
-        if let Some(p) = pipeline.as_ref() {
-            // Pipeline already running — emit current state so a remounted
-            // frontend component picks up the correct label immediately.
-            let voice_state = if p.is_paused() { "paused" } else { "listening" };
-            let payload = serde_json::json!({ "state": voice_state }).to_string();
-            let _ = state.app.emitter.emit("voice-state-changed", &payload);
-            return Ok(Json(Value::Null));
-        }
-    }
-    // Release lock during init to avoid blocking stop
-    let emitter = state.app.emitter.clone();
-    let new_pipeline = voice::VoicePipeline::start(emitter)
+    service::start_voice_pipeline(&state.app)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    // Re-acquire lock to store the pipeline
-    let mut pipeline = state.app.voice_pipeline.lock().await;
-    let gen_after = state
-        .app
-        .voice_generation
-        .load(std::sync::atomic::Ordering::SeqCst);
-    if pipeline.is_some() || gen_before != gen_after {
-        // Another start raced us, or stop was called during init — drop
-        return Ok(Json(Value::Null));
-    }
-    *pipeline = Some(new_pipeline);
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn stop_voice_pipeline(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    state
-        .app
-        .voice_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let mut pipeline = state.app.voice_pipeline.lock().await;
-    if let Some(p) = pipeline.take() {
-        tokio::task::spawn_blocking(move || {
-            let mut p = p;
-            p.stop();
-        })
+    service::stop_voice_pipeline(&state.app)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to stop pipeline: {e}"),
-            )
-        })?;
-    }
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
 async fn toggle_voice_pause(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let pipeline = state.app.voice_pipeline.lock().await;
-    match pipeline.as_ref() {
-        Some(p) => {
-            let paused = p.toggle_pause();
-            let voice_state = if paused { "paused" } else { "listening" };
-            let payload = serde_json::json!({ "state": voice_state }).to_string();
-            let _ = state.app.emitter.emit("voice-state-changed", &payload);
-            Ok(Json(serde_json::json!({ "paused": paused })))
-        }
-        None => Err((
-            StatusCode::BAD_REQUEST,
-            "Voice pipeline not running".to_string(),
-        )),
-    }
+    let paused = service::toggle_voice_pause(&state.app)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::json!({ "paused": paused })))
 }
 
 async fn load_terminal_theme(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let base_dir = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        storage.base_dir()
-    };
-    let theme = tokio::task::spawn_blocking(move || {
-        the_controller_lib::terminal_theme::load_terminal_theme(&base_dir)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(theme).unwrap()))
-}
-
-async fn list_archived_projects(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let inventory = storage
-        .list_projects()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let filtered = inventory.filter_projects(|project| {
-        project.archived || project.sessions.iter().any(|session| session.archived)
-    });
-    Ok(Json(serde_json::to_value(filtered).unwrap()))
-}
-async fn merge_session_branch(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
-    let (repo_path, worktree_path, branch_name) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".to_string()))?;
-        let wt_path = session.worktree_path.clone().ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Session has no worktree".to_string(),
-            )
-        })?;
-        let branch = session
-            .worktree_branch
-            .clone()
-            .ok_or_else(|| (StatusCode::BAD_REQUEST, "Session has no branch".to_string()))?;
-        (project.repo_path.clone(), wt_path, branch)
-    };
-
-    const OVERALL_TIMEOUT_SECS: u64 = 600; // 10 minutes
-
-    let merge_result = tokio::time::timeout(
-        std::time::Duration::from_secs(OVERALL_TIMEOUT_SECS),
-        do_merge_with_retries(
-            &state,
-            &repo_path,
-            &worktree_path,
-            &branch_name,
-            session_uuid,
-        ),
-    )
-    .await;
-
-    match merge_result {
-        Ok(inner) => inner,
-        Err(_) => Err((
-            StatusCode::GATEWAY_TIMEOUT,
-            format!("Merge timed out after {} seconds", OVERALL_TIMEOUT_SECS),
-        )),
-    }
-}
-
-async fn do_merge_with_retries(
-    state: &Arc<ServerState>,
-    repo_path: &str,
-    worktree_path: &str,
-    branch_name: &str,
-    session_uuid: uuid::Uuid,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    use the_controller_lib::models::MergeResponse;
-    use the_controller_lib::worktree::{MergeResult, WorktreeManager};
-
-    const MAX_RETRIES: u32 = 5;
-    const POLL_INTERVAL_SECS: u64 = 3;
-
-    for attempt in 0..MAX_RETRIES {
-        let rp = repo_path.to_string();
-        let wt = worktree_path.to_string();
-        let br = branch_name.to_string();
-
-        let result = tokio::task::spawn_blocking(move || {
-            if WorktreeManager::is_rebase_in_progress(&wt) {
-                Ok(MergeResult::RebaseConflicts)
-            } else {
-                WorktreeManager::merge_via_pr(&rp, &wt, &br)
-            }
-        })
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Task failed: {}", e),
-            )
-        })?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-        match result {
-            MergeResult::PrCreated(url) => {
-                let resp = MergeResponse::PrCreated { url };
-                return Ok(Json(serde_json::to_value(resp).unwrap()));
-            }
-            MergeResult::RebaseConflicts => {
-                let prompt = "merge\r";
-                {
-                    let mut pty_manager = state
-                        .app
-                        .pty_manager
-                        .lock()
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                    let _ = pty_manager.write_to_session(session_uuid, prompt.as_bytes());
-                }
-
-                let _ = state.app.emitter.emit(
-                    "merge-status",
-                    &format!(
-                        "Rebase conflicts (attempt {}/{}). Claude is resolving...",
-                        attempt + 1,
-                        MAX_RETRIES
-                    ),
-                );
-
-                let wt_poll = worktree_path.to_string();
-                let max_polls = 200; // 600s / 3s
-                let mut poll_count = 0;
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
-                    poll_count += 1;
-                    if poll_count >= max_polls {
-                        break;
-                    }
-                    let wt_check = wt_poll.clone();
-                    let still_rebasing = tokio::task::spawn_blocking(move || {
-                        WorktreeManager::is_rebase_in_progress(&wt_check)
-                    })
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Task failed: {}", e),
-                        )
-                    })?;
-                    if !still_rebasing {
-                        break;
-                    }
-                }
-                continue;
-            }
-        }
-    }
-
-    Err((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!(
-            "Merge failed after {} attempts due to recurring conflicts",
-            MAX_RETRIES
-        ),
-    ))
-}
-
-async fn send_note_ai_chat(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
-    let note_content = args["noteContent"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing noteContent".to_string()))?
-        .to_string();
-    let selected_text = args["selectedText"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing selectedText".to_string()))?
-        .to_string();
-    let prompt = args["prompt"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing prompt".to_string()))?
-        .to_string();
-
-    let conversation_history: Vec<note_ai_chat::NoteAiChatMessage> =
-        serde_json::from_value(args["conversationHistory"].clone()).unwrap_or_default();
-
-    let response = note_ai_chat::send_note_ai_message(
-        std::env::temp_dir().to_string_lossy().to_string(),
-        note_content,
-        selected_text,
-        conversation_history,
-        prompt,
-    )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    Ok(Json(serde_json::to_value(response).unwrap()))
-}
-// --- Notes ---
-
-fn server_try_commit(state: &Arc<ServerState>, message: &str) {
-    if let Ok(storage) = state.app.storage.lock() {
-        let base_dir = storage.base_dir();
-        if let Err(e) = notes::commit_notes(&base_dir, message) {
-            tracing::error!("notes git commit failed: {}", e);
-        }
-    }
-}
-
-async fn api_list_notes(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let folder = args["folder"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let entries = notes::list_notes(&base_dir, &folder)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(entries).unwrap()))
-}
-
-async fn api_read_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let folder = args["folder"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
-        .to_string();
-    let filename = args["filename"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing filename".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let content = notes::read_note(&base_dir, &folder, &filename)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(content).unwrap()))
-}
-
-async fn api_write_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let folder = args["folder"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
-        .to_string();
-    let filename = args["filename"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing filename".to_string()))?
-        .to_string();
-    let content = args["content"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing content".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::write_note(&base_dir, &folder, &filename, &content)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(Value::Null))
-}
-
-async fn api_create_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let folder = args["folder"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
-        .to_string();
-    let title = args["title"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing title".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let filename = notes::create_note(&base_dir, &folder, &title)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(&state, &format!("create {}/{}", folder, filename));
-    Ok(Json(serde_json::to_value(filename).unwrap()))
-}
-
-async fn api_delete_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let folder = args["folder"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
-        .to_string();
-    let filename = args["filename"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing filename".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::delete_note(&base_dir, &folder, &filename)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(&state, &format!("delete {}/{}", folder, filename));
-    Ok(Json(Value::Null))
-}
-
-async fn api_rename_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let folder = args["folder"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
-        .to_string();
-    let old_name = args["oldName"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing oldName".to_string()))?
-        .to_string();
-    let new_name = args["newName"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing newName".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let filename = notes::rename_note(&base_dir, &folder, &old_name, &new_name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(
-        &state,
-        &format!("rename {}/{} → {}", folder, old_name, filename),
-    );
-    Ok(Json(serde_json::to_value(filename).unwrap()))
-}
-
-async fn api_list_folders(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(_args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let folders = notes::list_folders(&base_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(folders).unwrap()))
-}
-
-async fn api_create_folder(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let name = args["name"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::create_folder(&base_dir, &name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(&state, &format!("create folder {}", name));
-    Ok(Json(Value::Null))
-}
-
-async fn api_rename_folder(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let old_name = args["oldName"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing oldName".to_string()))?
-        .to_string();
-    let new_name = args["newName"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing newName".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::rename_folder(&base_dir, &old_name, &new_name)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(
-        &state,
-        &format!("rename folder {} → {}", old_name, new_name),
-    );
-    Ok(Json(Value::Null))
-}
-
-async fn api_delete_folder(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let name = args["name"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
-        .to_string();
-    let force = args["force"].as_bool().unwrap_or(false);
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    notes::delete_folder(&base_dir, &name, force)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(&state, &format!("delete folder {}", name));
-    Ok(Json(Value::Null))
-}
-
-async fn api_commit_notes(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let committed = notes::commit_notes(&base_dir, "update notes")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(committed).unwrap()))
-}
-
-// --- GitHub Issues ---
-
-async fn list_github_issues(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-
-    // Check cache
-    let cache_result = {
-        let cache = state
-            .app
-            .issue_cache
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        match cache.get(&repo_path) {
-            Some(entry) if entry.is_fresh() => {
-                return Ok(Json(serde_json::to_value(&entry.issues).unwrap()))
-            }
-            Some(entry) => Some(entry.issues.clone()),
-            None => None,
-        }
-    };
-
-    if let Some(stale_issues) = cache_result {
-        let cache_arc = state.app.issue_cache.clone();
-        let repo_bg = repo_path.clone();
-        tokio::spawn(async move {
-            if let Ok(fresh) = fetch_github_issues_async(&repo_bg).await {
-                if let Ok(mut cache) = cache_arc.lock() {
-                    cache.insert(repo_bg, fresh);
-                }
-            }
-        });
-        return Ok(Json(serde_json::to_value(stale_issues).unwrap()));
-    }
-
-    let issues = fetch_github_issues_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    {
-        let mut cache = state
-            .app
-            .issue_cache
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        cache.insert(repo_path, issues.clone());
-    }
-    Ok(Json(serde_json::to_value(issues).unwrap()))
-}
-
-async fn extract_github_repo_async(repo_path: &str) -> Result<String, String> {
-    let rp = repo_path.to_string();
-    tokio::task::spawn_blocking(move || {
-        let repo =
-            git2::Repository::discover(&rp).map_err(|e| format!("Failed to open repo: {}", e))?;
-        let remote = repo
-            .find_remote("origin")
-            .map_err(|_| "No 'origin' remote found".to_string())?;
-        let url = remote
-            .url()
-            .ok_or_else(|| "Origin remote URL is not valid UTF-8".to_string())?;
-        parse_github_nwo(url)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
-}
-
-fn parse_github_nwo(url: &str) -> Result<String, String> {
-    if let Some(rest) = url.strip_prefix("git@github.com:") {
-        return Ok(rest.trim_end_matches(".git").to_string());
-    }
-    if let Some(rest) = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("http://github.com/"))
-    {
-        return Ok(rest.trim_end_matches(".git").to_string());
-    }
-    Err(format!("Not a GitHub remote URL: {}", url))
-}
-
-async fn fetch_github_issues_async(repo_path: &str) -> Result<Vec<models::GithubIssue>, String> {
-    let nwo = extract_github_repo_async(repo_path).await?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            &nwo,
-            "--json",
-            "number,title,url,body,labels",
-            "--limit",
-            "50",
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run gh: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gh issue list failed: {}", stderr));
-    }
-    serde_json::from_slice(&output.stdout).map_err(|e| format!("Failed to parse gh output: {}", e))
-}
-
-async fn list_assigned_issues(
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            &nwo,
-            "--json",
-            "number,title,url,assignees,updatedAt,labels",
-            "--limit",
-            "100",
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue list failed: {}", stderr),
-        ));
-    }
-    let all: Vec<models::AssignedIssue> = serde_json::from_slice(&output.stdout).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to parse gh output: {}", e),
-        )
-    })?;
-    let assigned: Vec<_> = all
-        .into_iter()
-        .filter(|i| !i.assignees.is_empty())
-        .collect();
-    Ok(Json(serde_json::to_value(assigned).unwrap()))
-}
-
-async fn create_github_issue(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let title = args["title"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing title".to_string()))?
-        .to_string();
-    let body = args["body"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing body".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue", "create", "--repo", &nwo, "--title", &title, "--body", &body,
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue create failed: {}", stderr),
-        ));
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let number = url
-        .rsplit('/')
-        .next()
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not parse issue number".to_string(),
-            )
-        })?;
-    let issue = models::GithubIssue {
-        number,
-        title,
-        url,
-        body: Some(body),
-        labels: vec![],
-    };
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.add_issue(&repo_path, issue.clone());
-    }
-    Ok(Json(serde_json::to_value(issue).unwrap()))
-}
-
-async fn generate_issue_body(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
-    let title = args["title"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing title".to_string()))?
-        .to_string();
-    let prompt = format!(
-        "Write a concise GitHub issue body for an issue titled: \"{}\". \
-         Include a Summary section and a Details section. \
-         Keep it under 200 words. Return only the markdown body, nothing else.",
-        title
-    );
-    let output = tokio::process::Command::new("claude")
-        .args(["--print", &prompt])
-        .env_remove("CLAUDECODE")
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run claude: {}", e),
-            )
-        })?;
-    let body = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
-        String::new()
-    };
-    Ok(Json(Value::String(body)))
-}
-
-async fn post_github_comment(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let issue_number = args["issueNumber"]
-        .as_u64()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
-    let body = args["body"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing body".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "comment",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--body",
-            &body,
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue comment failed: {}", stderr),
-        ));
-    }
-    Ok(Json(Value::Null))
-}
-
-async fn add_github_label(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let issue_number = args["issueNumber"]
-        .as_u64()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
-    let label = args["label"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing label".to_string()))?
-        .to_string();
-    let description = args["description"].as_str().map(|s| s.to_string());
-    let color = args["color"].as_str().map(|s| s.to_string());
-    let nwo = extract_github_repo_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let desc = description
-        .as_deref()
-        .unwrap_or("Issue is being worked on in a session");
-    let col = color.as_deref().unwrap_or("F9E2AF");
-    let _ = tokio::process::Command::new("gh")
-        .args([
-            "label",
-            "create",
-            &label,
-            "--repo",
-            &nwo,
-            "--description",
-            desc,
-            "--color",
-            col,
-        ])
-        .output()
-        .await;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "edit",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--add-label",
-            &label,
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue edit failed: {}", stderr),
-        ));
-    }
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.add_label(&repo_path, issue_number, &label);
-    }
-    Ok(Json(Value::Null))
-}
-
-async fn remove_github_label(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let issue_number = args["issueNumber"]
-        .as_u64()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
-    let label = args["label"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing label".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "edit",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--remove-label",
-            &label,
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue edit failed: {}", stderr),
-        ));
-    }
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.remove_label(&repo_path, issue_number, &label);
-    }
-    Ok(Json(Value::Null))
-}
-
-async fn close_github_issue(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let issue_number = args["issueNumber"]
-        .as_u64()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
-    let comment = args["comment"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing comment".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut gh_args = vec![
-        "issue".to_string(),
-        "close".to_string(),
-        issue_number.to_string(),
-        "--repo".to_string(),
-        nwo,
-    ];
-    if !comment.trim().is_empty() {
-        gh_args.push("--comment".to_string());
-        gh_args.push(comment);
-    }
-    let output = tokio::process::Command::new("gh")
-        .args(&gh_args)
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue close failed: {}", stderr),
-        ));
-    }
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.remove_issue(&repo_path, issue_number);
-    }
-    Ok(Json(Value::Null))
-}
-
-async fn delete_github_issue(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let issue_number = args["issueNumber"]
-        .as_u64()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?;
-    let nwo = extract_github_repo_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "delete",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--yes",
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue delete failed: {}", stderr),
-        ));
-    }
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.remove_issue(&repo_path, issue_number);
-    }
-    Ok(Json(Value::Null))
-}
-
-// --- Maintainer & Auto-Worker ---
-
-async fn configure_maintainer(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
-    let enabled = args["enabled"].as_bool().unwrap_or(false);
-    let interval_minutes = args["intervalMinutes"].as_u64().unwrap_or(30);
-    let github_repo = args["githubRepo"].as_str().map(|s| s.to_string());
-    commands::validate_maintainer_interval(interval_minutes)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    project.maintainer.enabled = enabled;
-    project.maintainer.interval_minutes = interval_minutes;
-    project.maintainer.github_repo = github_repo;
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(Value::Null))
-}
-
-async fn get_maintainer_status(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let log = storage
-        .latest_maintainer_run_log(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(log).unwrap()))
-}
-
-async fn get_maintainer_history(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let logs = storage
-        .maintainer_run_log_history(project_uuid, 20)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(logs).unwrap()))
-}
-
-async fn trigger_maintainer_check(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (repo_path, github_repo) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        (
-            project.repo_path.clone(),
-            project.maintainer.github_repo.clone(),
-        )
-    };
-    let _ = state
-        .app
-        .emitter
-        .emit(&format!("maintainer-status:{}", project_uuid), "running");
-    let log = tokio::task::spawn_blocking(move || {
-        maintainer::run_maintainer_check(&repo_path, project_uuid, github_repo.as_deref())
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(|e| {
-        let _ = state
-            .app
-            .emitter
-            .emit(&format!("maintainer-status:{}", project_uuid), "error");
-        let _ = state
-            .app
-            .emitter
-            .emit(&format!("maintainer-error:{}", project_uuid), &e);
-        (StatusCode::INTERNAL_SERVER_ERROR, e)
-    })?;
-    {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        storage
-            .save_maintainer_run_log(&log)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-    let _ = state
-        .app
-        .emitter
-        .emit(&format!("maintainer-status:{}", project_uuid), "idle");
-    Ok(Json(serde_json::to_value(log).unwrap()))
-}
-
-async fn clear_maintainer_reports(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    storage
-        .clear_maintainer_run_logs(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let _ = state
-        .app
-        .emitter
-        .emit(&format!("maintainer-status:{}", project_uuid), "idle");
-    Ok(Json(Value::Null))
-}
-
-async fn get_maintainer_issues(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (repo_path, github_repo) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        (
-            project.repo_path.clone(),
-            project.maintainer.github_repo.clone(),
-        )
-    };
-    let nwo = match github_repo {
-        Some(ref repo) if !repo.is_empty() => repo.clone(),
-        _ => extract_github_repo_async(&repo_path)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?,
-    };
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            &nwo,
-            "--label",
-            "filed-by-maintainer",
-            "--state",
-            "all",
-            "--json",
-            "number,title,state,url,labels,createdAt,closedAt",
-            "--limit",
-            "100",
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue list failed: {}", stderr),
-        ));
-    }
-    let issues: Vec<models::MaintainerIssue> =
-        serde_json::from_slice(&output.stdout).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to parse gh output: {}", e),
-            )
-        })?;
-    Ok(Json(serde_json::to_value(issues).unwrap()))
-}
-
-async fn get_maintainer_issue_detail(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
-    let issue_number = args["issueNumber"]
-        .as_u64()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing issueNumber".to_string()))?
-        as u32;
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (repo_path, github_repo) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        (
-            project.repo_path.clone(),
-            project.maintainer.github_repo.clone(),
-        )
-    };
-    let nwo = match github_repo {
-        Some(ref repo) if !repo.is_empty() => repo.clone(),
-        _ => extract_github_repo_async(&repo_path)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?,
-    };
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "view",
-            &issue_number.to_string(),
-            "--repo",
-            &nwo,
-            "--json",
-            "number,title,state,body,url,labels,createdAt,closedAt",
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue view failed: {}", stderr),
-        ));
-    }
-    let detail: models::MaintainerIssueDetail =
-        serde_json::from_slice(&output.stdout).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to parse gh output: {}", e),
-            )
-        })?;
-    Ok(Json(serde_json::to_value(detail).unwrap()))
-}
-
-async fn configure_auto_worker(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
-    let enabled = args["enabled"].as_bool().unwrap_or(false);
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    project.auto_worker.enabled = enabled;
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(Value::Null))
-}
-
-async fn get_auto_worker_queue(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let project = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    };
-    let active_issue = project
-        .sessions
-        .iter()
-        .find(|s| s.auto_worker_session)
-        .and_then(|s| s.github_issue.clone());
-    let issues = fetch_github_issues_async(&project.repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    // Update cache
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.insert(project.repo_path.clone(), issues.clone());
-    }
-    let active_number = active_issue.as_ref().map(|i| i.number);
-    let mut queue = Vec::new();
-    if let Some(issue) = active_issue {
-        queue.push(models::AutoWorkerQueueIssue {
-            number: issue.number,
-            title: issue.title,
-            url: issue.url,
-            body: issue.body,
-            labels: issue.labels.into_iter().map(|l| l.name).collect(),
-            is_active: true,
-        });
-    }
-    queue.extend(
-        issues
-            .into_iter()
-            .filter(auto_worker::is_eligible)
-            .filter(|i| Some(i.number) != active_number)
-            .map(|i| models::AutoWorkerQueueIssue {
-                number: i.number,
-                title: i.title,
-                url: i.url,
-                body: i.body,
-                labels: i.labels.into_iter().map(|l| l.name).collect(),
-                is_active: false,
-            }),
-    );
-    Ok(Json(serde_json::to_value(queue).unwrap()))
-}
-
-async fn get_worker_reports(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let nwo = extract_github_repo_async(&repo_path)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            &nwo,
-            "--label",
-            "assigned-to-auto-worker",
-            "--state",
-            "all",
-            "--json",
-            "number,title,state,comments,updatedAt",
-            "--limit",
-            "50",
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to run gh: {}", e),
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("gh issue list failed: {}", stderr),
-        ));
-    }
-    let raw: Vec<Value> = serde_json::from_slice(&output.stdout).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to parse gh output: {}", e),
-        )
-    })?;
-    let reports: Vec<Value> = raw
-        .into_iter()
-        .filter_map(|issue| {
-            if issue["state"].as_str() != Some("CLOSED") {
-                return None;
-            }
-            let number = issue["number"].as_u64()?;
-            let title = issue["title"].as_str()?.to_string();
-            let updated_at = issue["updatedAt"].as_str().unwrap_or("").to_string();
-            let body = issue["comments"]
-                .as_array()
-                .and_then(|comments| {
-                    comments.iter().rev().find_map(|c| {
-                        let text = c["body"].as_str()?;
-                        text.contains("<!-- auto-worker-report -->")
-                            .then_some(text.to_string())
-                    })
-                })
-                .unwrap_or_else(|| "No worker report was posted for this issue.".to_string());
-            Some(serde_json::json!({
-                "issue_number": number,
-                "title": title,
-                "comment_body": body,
-                "updated_at": updated_at,
-            }))
-        })
-        .collect();
-    Ok(Json(serde_json::to_value(reports).unwrap()))
-}
-
-// --- Storage/Git Operations ---
-
-async fn get_session_commits(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (worktree_path, done_commits) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".to_string()))?;
-        match &session.worktree_path {
-            Some(p) => (p.clone(), session.done_commits.clone()),
-            None => {
-                return Ok(Json(serde_json::to_value(&session.done_commits).unwrap()));
-            }
-        }
-    };
-    let wt = worktree_path.clone();
-    let new_commits = tokio::task::spawn_blocking(move || {
-        discover_branch_commits_server(&wt).unwrap_or_default()
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?;
-    let mut seen = HashSet::new();
-    let mut all_commits = Vec::new();
-    for c in new_commits.iter().chain(done_commits.iter()) {
-        if seen.insert(c.hash.clone()) {
-            all_commits.push(c.clone());
-        }
-    }
-    if all_commits.len() > done_commits.len() {
-        if let Ok(storage) = state.app.storage.lock() {
-            if let Ok(mut project) = storage.load_project(project_uuid) {
-                if let Some(s) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
-                    s.done_commits = all_commits.clone();
-                }
-                let _ = storage.save_project(&project);
-            }
-        }
-    }
-    Ok(Json(serde_json::to_value(all_commits).unwrap()))
-}
-
-fn discover_branch_commits_server(worktree_path: &str) -> Result<Vec<models::CommitInfo>, String> {
-    let repo = git2::Repository::discover(worktree_path)
-        .map_err(|e| format!("Failed to open repo: {e}"))?;
-    let head = repo.head().map_err(|e| format!("No HEAD: {e}"))?;
-    let head_commit = head.peel_to_commit().map_err(|e| e.to_string())?;
-    let main_oid = find_main_branch_oid_server(&repo);
-    let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
-    revwalk.push(head_commit.id()).map_err(|e| e.to_string())?;
-    revwalk
-        .set_sorting(git2::Sort::TOPOLOGICAL)
-        .map_err(|e| e.to_string())?;
-    let mut commits = Vec::new();
-    for oid in revwalk {
-        let oid = oid.map_err(|e| e.to_string())?;
-        if let Some(main) = main_oid {
-            if oid == main {
-                break;
-            }
-            if let Ok(base) = repo.merge_base(oid, main) {
-                if base == oid {
-                    break;
-                }
-            }
-        }
-        let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
-        let message = commit.summary().unwrap_or("").to_string();
-        if message.starts_with("Initial commit") {
-            continue;
-        }
-        let hash = oid.to_string()[..7].to_string();
-        commits.push(models::CommitInfo { hash, message });
-        if commits.len() >= 20 {
-            break;
-        }
-    }
-    Ok(commits)
-}
-
-fn find_main_branch_oid_server(repo: &git2::Repository) -> Option<git2::Oid> {
-    for name in &["refs/heads/main", "refs/heads/master"] {
-        if let Ok(reference) = repo.find_reference(name) {
-            if let Ok(commit) = reference.peel_to_commit() {
-                return Some(commit.id());
-            }
-        }
-    }
-    None
-}
-
-async fn save_session_prompt(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let session = project
-        .sessions
-        .iter()
-        .find(|s| s.id == session_uuid)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".to_string()))?;
-    let prompt_text = session
-        .initial_prompt
-        .clone()
-        .or_else(|| {
-            session.github_issue.as_ref().map(|issue| {
-                session_args::build_issue_prompt(issue.number, &issue.title, &issue.url, false)
-            })
-        })
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Session has no prompt to save".to_string(),
-            )
-        })?;
-    let name = {
-        let truncated: String = prompt_text.chars().take(60).collect();
-        if truncated.len() < prompt_text.len() {
-            format!("{}...", truncated)
-        } else {
-            truncated
-        }
-    };
-    let saved = models::SavedPrompt {
-        id: uuid::Uuid::new_v4(),
-        name,
-        text: prompt_text,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        source_session_label: session.label.clone(),
-    };
-    project.prompts.push(saved);
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(Value::Null))
-}
-
-async fn list_project_prompts(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(project.prompts).unwrap()))
-}
-
-async fn get_repo_head(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = args["repoPath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
-        .to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        let repo = git2::Repository::open(&repo_path)
-            .map_err(|e| format!("Failed to open repo: {}", e))?;
-        let head = repo
-            .head()
-            .map_err(|e| format!("Failed to get HEAD: {}", e))?;
-        let branch = head.shorthand().unwrap_or("HEAD").to_string();
-        let commit = head
-            .peel_to_commit()
-            .map_err(|e| format!("Failed to peel to commit: {}", e))?;
-        let short_hash = commit.id().to_string()[..7].to_string();
-        Ok::<_, String>((branch, short_hash))
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(serde_json::to_value(result).unwrap()))
-}
-
-async fn get_session_token_usage(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (working_dir, kind) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".to_string()))?;
-        let dir = session
-            .worktree_path
-            .as_deref()
-            .unwrap_or(&project.repo_path)
-            .to_string();
-        (dir, session.kind.clone())
-    };
-    let data =
-        tokio::task::spawn_blocking(move || token_usage::get_token_usage(&working_dir, &kind))
+    let storage = state.app.storage.clone();
+    let theme =
+        tokio::task::spawn_blocking(move || service::load_terminal_theme_blocking(&storage))
             .await
             .map_err(|e| {
                 (
@@ -3042,129 +1113,399 @@ async fn get_session_token_usage(
                     format!("Task failed: {}", e),
                 )
             })?
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(serde_json::to_value(data).unwrap()))
+            .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(theme).unwrap()))
 }
 
-// --- Directory Listing ---
-
-async fn list_directories_at(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
-    let path = args["path"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing path".to_string()))?
-        .to_string();
-    let p = Path::new(&path);
-    if !p.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Not a directory: {}", path),
-        ));
-    }
-    // Restrict to directories under $HOME to prevent arbitrary filesystem enumeration
-    let requested = std::fs::canonicalize(p).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("cannot resolve path: {}", e),
-        )
-    })?;
-    let home = dirs::home_dir().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot determine home directory".to_string(),
-        )
-    })?;
-    if !requested.starts_with(&home) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "path must be under the home directory".to_string(),
-        ));
-    }
-    let entries = config::list_directories(p)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(entries).unwrap()))
-}
-
-async fn list_root_directories(
+async fn list_archived_projects(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let base_dir = storage.base_dir();
-    let cfg = config::load_config(&base_dir).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "No config found. Complete onboarding first.".to_string(),
-        )
-    })?;
-    let entries = config::list_directories(Path::new(&cfg.projects_root))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(entries).unwrap()))
+    let filtered =
+        service::list_archived_projects(&state.app).map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(filtered).unwrap()))
 }
-
-async fn generate_project_names(
-    Json(args): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let description = args["description"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing description".to_string()))?
-        .to_string();
-    let names = tokio::task::spawn_blocking(move || config::generate_names_via_cli(&description))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Task failed: {}", e),
-            )
-        })?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(serde_json::to_value(names).unwrap()))
-}
-
-// --- Scaffold ---
-
-async fn scaffold_project(
+async fn merge_session_branch(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<ProjectSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let name = args["name"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
-        .to_string();
-    commands::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let repo_path = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        if let Ok(inventory) = storage.list_projects() {
-            if inventory.projects.iter().any(|p| p.name == name) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("A project named '{}' already exists", name),
-                ));
-            }
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    const OVERALL_TIMEOUT_SECS: u64 = 600; // 10 minutes
+
+    let merge_result = tokio::time::timeout(
+        std::time::Duration::from_secs(OVERALL_TIMEOUT_SECS),
+        service::merge_session_branch(&state.app, project_uuid, session_uuid, true),
+    )
+    .await;
+
+    match merge_result {
+        Ok(inner) => {
+            let resp = inner.map_err(<(StatusCode, String)>::from)?;
+            Ok(Json(serde_json::to_value(resp).unwrap()))
         }
-        let cfg = config::load_config(&storage.base_dir()).ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "No config found. Complete onboarding first.".to_string(),
-            )
-        })?;
-        PathBuf::from(&cfg.projects_root).join(&name)
-    };
-    if repo_path.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Directory already exists: {}", name),
-        ));
+        Err(_) => Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            format!("Merge timed out after {} seconds", OVERALL_TIMEOUT_SECS),
+        )),
     }
-    let name_clone = name.clone();
-    let project = tokio::task::spawn_blocking(move || {
-        commands::scaffold_project_blocking(name_clone, repo_path)
+}
+
+async fn send_note_ai_chat(
+    Json(req): Json<SendNoteAiChatRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let response = service::send_note_ai_chat(
+        req.note_content,
+        req.selected_text,
+        req.conversation_history,
+        req.prompt,
+    )
+    .await
+    .map_err(<(StatusCode, String)>::from)?;
+
+    Ok(Json(serde_json::to_value(response).unwrap()))
+}
+// --- Notes ---
+
+async fn api_list_notes(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<FolderRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let entries = service::list_notes(&state.app.storage, &req.folder)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(entries).unwrap()))
+}
+
+async fn api_read_note(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<FolderFilenameRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let content = service::read_note(&state.app.storage, &req.folder, &req.filename)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(content).unwrap()))
+}
+
+async fn api_write_note(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<WriteNoteRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::write_note(&state.app.storage, &req.folder, &req.filename, &req.content)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn api_create_note(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<CreateNoteRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let filename = service::create_note(&state.app.storage, &req.folder, &req.title)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(filename).unwrap()))
+}
+
+async fn api_delete_note(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<FolderFilenameRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::delete_note(&state.app.storage, &req.folder, &req.filename)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn api_rename_note(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<RenameNoteRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let filename = service::rename_note(
+        &state.app.storage,
+        &req.folder,
+        &req.old_name,
+        &req.new_name,
+    )
+    .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(filename).unwrap()))
+}
+
+async fn api_list_folders(
+    AxumState(state): AxumState<Arc<ServerState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let folders =
+        service::list_note_folders(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(folders).unwrap()))
+}
+
+async fn api_create_folder(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<NameRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::create_note_folder(&state.app.storage, &req.name)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn api_rename_folder(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<RenameFolderRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::rename_note_folder(&state.app.storage, &req.old_name, &req.new_name)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn api_delete_folder(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<DeleteFolderRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::delete_note_folder(&state.app.storage, &req.name, req.force)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn api_commit_notes(
+    AxumState(state): AxumState<Arc<ServerState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let committed =
+        service::commit_pending_notes(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(committed).unwrap()))
+}
+
+// --- GitHub Issues ---
+
+async fn list_github_issues(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<RepoPathRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let issues = service::list_github_issues(&state.app, &req.repo_path)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(issues).unwrap()))
+}
+
+async fn list_assigned_issues(
+    Json(req): Json<RepoPathRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let assigned = service::list_assigned_issues(&req.repo_path)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(assigned).unwrap()))
+}
+
+async fn create_github_issue(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<CreateGithubIssueRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let issue = service::create_github_issue(&state.app, &req.repo_path, &req.title, &req.body)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(issue).unwrap()))
+}
+
+async fn generate_issue_body(
+    Json(req): Json<TitleRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let body = service::generate_issue_body(&req.title)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::String(body)))
+}
+
+async fn post_github_comment(
+    Json(req): Json<PostGithubCommentRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::post_github_comment(&req.repo_path, req.issue_number, &req.body)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn add_github_label(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<AddGithubLabelRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::add_github_label(
+        &state.app,
+        &req.repo_path,
+        req.issue_number,
+        &req.label,
+        req.description.as_deref(),
+        req.color.as_deref(),
+    )
+    .await
+    .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn remove_github_label(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<RemoveGithubLabelRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::remove_github_label(&state.app, &req.repo_path, req.issue_number, &req.label)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn close_github_issue(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<CloseGithubIssueRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::close_github_issue(&state.app, &req.repo_path, req.issue_number, &req.comment)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn delete_github_issue(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<RepoPathIssueNumberRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    service::delete_github_issue(&state.app, &req.repo_path, req.issue_number)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+// --- Maintainer & Auto-Worker ---
+
+async fn configure_maintainer(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ConfigureMaintainerRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service::configure_maintainer(
+        &state.app,
+        project_uuid,
+        req.enabled,
+        req.interval_minutes,
+        req.github_repo,
+    )
+    .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn get_maintainer_status(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectIdRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let log = service::get_maintainer_status(&state.app, project_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(log).unwrap()))
+}
+
+async fn get_maintainer_history(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectIdRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let logs = service::get_maintainer_history(&state.app, project_uuid, 20)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(logs).unwrap()))
+}
+
+async fn trigger_maintainer_check(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectIdRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let log = service::trigger_maintainer_check(&state.app, project_uuid)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(log).unwrap()))
+}
+
+async fn clear_maintainer_reports(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectIdRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service::clear_maintainer_reports(&state.app, project_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn get_maintainer_issues(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectIdRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let issues = service::get_maintainer_issues_for_project(&state.app, project_uuid)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(issues).unwrap()))
+}
+
+async fn get_maintainer_issue_detail(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<GetMaintainerIssueDetailRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let detail = service::get_maintainer_issue_detail_for_project(
+        &state.app,
+        project_uuid,
+        req.issue_number as u32,
+    )
+    .await
+    .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(detail).unwrap()))
+}
+
+async fn configure_auto_worker(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ConfigureAutoWorkerRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service::configure_auto_worker(&state.app, project_uuid, req.enabled)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn get_auto_worker_queue(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectIdRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let queue = service::get_auto_worker_queue(&state.app, project_uuid)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(queue).unwrap()))
+}
+
+async fn get_worker_reports(
+    Json(req): Json<RepoPathRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let reports = service::get_worker_reports(&req.repo_path)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(reports).unwrap()))
+}
+
+// --- Storage/Git Operations ---
+
+async fn get_session_commits(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectSessionRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let storage = state.app.storage.clone();
+    let commits = tokio::task::spawn_blocking(move || {
+        service::get_session_commits(&storage, project_uuid, session_uuid)
     })
     .await
     .map_err(|e| {
@@ -3173,23 +1514,116 @@ async fn scaffold_project(
             format!("Task failed: {}", e),
         )
     })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if let Ok(inventory) = storage.list_projects() {
-        if inventory.projects.iter().any(|p| p.name == project.name) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("A project named '{}' already exists", project.name),
-            ));
-        }
-    }
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(commits).unwrap()))
+}
+
+async fn save_session_prompt(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectSessionRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service::save_session_prompt(&state.app, project_uuid, session_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::Null))
+}
+
+async fn list_project_prompts(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectIdRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let prompts = service::list_project_prompts(&state.app, project_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(prompts).unwrap()))
+}
+
+async fn get_repo_head(
+    Json(req): Json<RepoPathRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let repo_path = req.repo_path;
+    let result = tokio::task::spawn_blocking(move || service::get_repo_head(&repo_path))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Task failed: {}", e),
+            )
+        })?
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(result).unwrap()))
+}
+
+async fn get_session_token_usage(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<ProjectSessionRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let storage = state.app.storage.clone();
+    let data = tokio::task::spawn_blocking(move || {
+        service::get_session_token_usage(&storage, project_uuid, session_uuid)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task failed: {}", e),
+        )
+    })?
+    .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(data).unwrap()))
+}
+
+// --- Directory Listing ---
+
+async fn list_directories_at(
+    Json(req): Json<PathRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let entries =
+        service::list_directories_at_safe(&req.path).map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(entries).unwrap()))
+}
+
+async fn list_root_directories(
+    AxumState(state): AxumState<Arc<ServerState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let entries =
+        service::list_root_directories(&state.app).map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(entries).unwrap()))
+}
+
+async fn generate_project_names(
+    Json(req): Json<DescriptionRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let description = req.description;
+    let names = tokio::task::spawn_blocking(move || service::generate_project_names(&description))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Task failed: {}", e),
+            )
+        })?
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(names).unwrap()))
+}
+
+// --- Scaffold ---
+
+async fn scaffold_project(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<NameRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let project = service::scaffold_project(&state.app, &req.name)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(project).unwrap()))
 }
 
@@ -3204,82 +1638,35 @@ async fn stage_session() -> Result<Json<Value>, (StatusCode, String)> {
 
 async fn unstage_session(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<ProjectSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_id = args["projectId"].as_str().unwrap_or_default();
-    let project_uuid =
-        uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let session_id_str = args["sessionId"].as_str().unwrap_or_default();
-    let session_uuid = uuid::Uuid::parse_str(session_id_str)
+    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let idx = project
-        .staged_sessions
-        .iter()
-        .position(|s| s.session_id == session_uuid)
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "No session is currently staged".to_string(),
-            )
-        })?;
-    let staged = project.staged_sessions.remove(idx);
-    commands::kill_process_group(staged.pid);
-    let _ = std::fs::remove_file(status_socket::staged_socket_path(&session_uuid));
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    service::unstage_session(&state.app, project_uuid, session_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
+
     Ok(Json(Value::Null))
 }
 
 async fn submit_secure_env_value(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<SubmitSecureEnvValueRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let request_id = args["requestId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing requestId".to_string()))?
-        .to_string();
-    let value = args["value"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing value".to_string()))?
-        .to_string();
-    let (pending, response_tx) = secure_env::take_secure_env_submission(&state.app, &request_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let req_id = request_id.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        secure_env::update_env_file(&pending.env_path, &pending.key, &value)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {e}"),
-        )
-    })?;
-    let result = secure_env::finish_secure_env_submission(&req_id, response_tx, result)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let status = if result.created { "created" } else { "updated" };
-    Ok(Json(Value::String(status.to_string())))
+    let status = service::submit_secure_env_value(&state.app, &req.request_id, &req.value)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::String(status)))
 }
 
 async fn cancel_secure_env_request(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<CancelSecureEnvRequestRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let request_id = args["requestId"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing requestId".to_string()))?
-        .to_string();
-    secure_env::cancel_secure_env_request(&state.app, &request_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    service::cancel_secure_env_request(&state.app, &req.request_id)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -3287,81 +1674,34 @@ async fn cancel_secure_env_request(
 
 async fn api_save_note_image(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<SaveNoteImageRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let folder = args["folder"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
-        .to_string();
-    let extension = args["extension"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing extension".to_string()))?
-        .to_string();
-    let image_bytes: Vec<u8> = serde_json::from_value(args["imageBytes"].clone()).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid imageBytes: {}", e),
-        )
-    })?;
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let filename = notes::save_note_image(&base_dir, &folder, &image_bytes, &extension)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let filename = service::save_note_image(
+        &state.app.storage,
+        &req.folder,
+        &req.image_bytes,
+        &req.extension,
+    )
+    .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(filename)))
 }
 
 async fn api_resolve_note_asset_path(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<ResolveNoteAssetPathRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let folder = args["folder"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
-        .to_string();
-    let relative_path = args["relativePath"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing relativePath".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let resolved = notes::resolve_note_asset_path(&base_dir, &folder, &relative_path)
-        .map(|p| p.to_string_lossy().to_string())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let resolved =
+        service::resolve_note_asset_path(&state.app.storage, &req.folder, &req.relative_path)
+            .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(resolved)))
 }
 
 async fn api_duplicate_note(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<FolderFilenameRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let folder = args["folder"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing folder".to_string()))?
-        .to_string();
-    let filename = args["filename"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing filename".to_string()))?
-        .to_string();
-    let base_dir = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .base_dir();
-    let copy = notes::duplicate_note(&base_dir, &folder, &filename)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    server_try_commit(
-        &state,
-        &format!("duplicate {}/{} → {}", folder, filename, copy),
-    );
+    let copy = service::duplicate_note(&state.app.storage, &req.folder, &req.filename)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(copy).unwrap()))
 }
 
@@ -3370,33 +1710,18 @@ async fn api_duplicate_note(
 async fn start_claude_login(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session_id = uuid::Uuid::new_v4();
-    let mut pty_manager = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty_manager
-        .spawn_command(session_id, "claude", &["login"], state.app.emitter.clone())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(Value::String(session_id.to_string())))
+    let session_id = service::start_claude_login(&state.app.pty_manager, state.app.emitter.clone())
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::String(session_id)))
 }
 
 async fn stop_claude_login(
     AxumState(state): AxumState<Arc<ServerState>>,
-    Json(args): Json<Value>,
+    Json(req): Json<SessionIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session_id = args["sessionId"].as_str().unwrap_or_default();
-    let id =
-        uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let mut pty_manager = state
-        .app
-        .pty_manager
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    pty_manager
-        .close_session(id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let id = uuid::Uuid::parse_str(&req.session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    service::stop_claude_login(&state.app.pty_manager, id).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
