@@ -31,6 +31,9 @@ pub mod token_usage;
 pub mod voice;
 pub mod worktree;
 
+#[cfg(feature = "server")]
+pub mod server_helpers;
+
 fn show_startup_error(error: &std::io::Error) {
     tracing::error!("failed to initialize app storage: {error}");
     let _ = rfd::MessageDialog::new()

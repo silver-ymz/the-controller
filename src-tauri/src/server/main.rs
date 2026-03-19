@@ -17,7 +17,12 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use the_controller_lib::{
-    config, deploy, emitter::WsBroadcastEmitter, models, note_ai_chat, service, state::AppState,
+    config, deploy,
+    emitter::WsBroadcastEmitter,
+    models, note_ai_chat,
+    server_helpers::{ok_json, parse_uuid, ServerState},
+    service,
+    state::AppState,
     status_socket,
 };
 
@@ -374,11 +379,6 @@ mod requests {
 }
 
 use requests::*;
-
-struct ServerState {
-    app: Arc<AppState>,
-    ws_tx: broadcast::Sender<String>,
-}
 
 fn report_startup_error(error: &std::io::Error) {
     tracing::error!("failed to start server: {error}");
@@ -737,20 +737,6 @@ fn forwarded_proto(headers: &HeaderMap) -> Option<&str> {
 }
 
 // --- Shared handler utilities ---
-
-/// Parse a UUID string, returning `BAD_REQUEST` on failure.
-fn parse_uuid(s: &str) -> Result<uuid::Uuid, (StatusCode, String)> {
-    uuid::Uuid::parse_str(s).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
-}
-
-/// Serialize a value to `Json<Value>`, mapping serialization failure to
-/// `INTERNAL_SERVER_ERROR`. Nearly all service return types implement
-/// `Serialize`, so this replaces the scattered `serde_json::to_value(x).unwrap()` calls.
-fn ok_json<T: serde::Serialize>(v: T) -> Result<Json<Value>, (StatusCode, String)> {
-    Ok(Json(serde_json::to_value(v).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?))
-}
 
 /// Run a blocking closure on a threadpool and map both join-failure and
 /// `AppError` to Axum's error tuple.
@@ -1680,7 +1666,7 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{auth_middleware, handle_ws, startup_messages, ServerState};
+    use crate::{auth_middleware, handle_ws, startup_messages};
     use axum::{
         extract::{ws::WebSocketUpgrade, State as AxumState},
         middleware,
@@ -1695,6 +1681,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use the_controller_lib::server_helpers::ServerState;
     use tokio::net::TcpListener;
     use tokio::sync::broadcast;
     use tokio::time::{timeout, Duration};
