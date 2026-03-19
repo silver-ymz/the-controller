@@ -9,7 +9,9 @@ use crate::pty_manager::PtyManager;
 use crate::state::AppState;
 use crate::storage::{ProjectInventory, Storage};
 use crate::worktree::WorktreeManager;
+use the_controller_macros::derive_handlers;
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn list_projects(state: &AppState) -> Result<ProjectInventory, AppError> {
     tracing::debug!("listing projects");
     let storage = state.storage.lock().map_err(AppError::internal)?;
@@ -23,6 +25,7 @@ pub fn check_onboarding(state: &AppState) -> Result<Option<crate::config::Config
     Ok(crate::config::load_config(&base_dir))
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn create_project(state: &AppState, name: &str, repo_path: &str) -> Result<Project, AppError> {
     tracing::info!(project_name = %name, repo_path = %repo_path, "creating project");
     super::validate_project_name(name).map_err(AppError::BadRequest)?;
@@ -193,6 +196,7 @@ pub fn delete_project(
     Ok(())
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn get_agents_md(state: &AppState, project_id: Uuid) -> Result<String, AppError> {
     let storage = state.storage.lock().map_err(AppError::internal)?;
     let project = storage

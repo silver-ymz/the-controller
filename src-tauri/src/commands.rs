@@ -16,7 +16,7 @@ mod notes;
 
 /// Parse a UUID string, mapping failure to a `String` error (Tauri command
 /// return type).
-fn parse_uuid(s: &str) -> Result<Uuid, String> {
+pub fn parse_uuid(s: &str) -> Result<Uuid, String> {
     Uuid::parse_str(s).map_err(|e| e.to_string())
 }
 
