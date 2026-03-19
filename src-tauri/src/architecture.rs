@@ -2462,7 +2462,7 @@ That should be enough to render the view."#;
         let function_body = &rest[..end];
 
         assert!(
-            function_body.contains("spawn_blocking"),
+            function_body.contains("spawn_blocking") || function_body.contains("tauri_blocking!"),
             "generate_architecture must offload repo scanning and codex exec with spawn_blocking"
         );
     }

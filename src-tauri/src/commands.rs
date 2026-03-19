@@ -14,6 +14,31 @@ mod github;
 mod media;
 mod notes;
 
+/// Parse a UUID string, mapping failure to a `String` error (Tauri command
+/// return type).
+fn parse_uuid(s: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(s).map_err(|e| e.to_string())
+}
+
+/// Run a blocking closure on a threadpool and propagate both join-failure and
+/// `AppError` as `String` (Tauri command error type).
+///
+/// Usage:
+/// ```ignore
+/// let result = tauri_blocking!({
+///     let foo = state.foo.clone();
+///     move || service::do_thing(&foo, arg)
+/// });
+/// // Note: the macro already applies `?` internally; do not add `?` at the callsite.
+/// ```
+macro_rules! tauri_blocking {
+    ($closure:expr) => {
+        tauri::async_runtime::spawn_blocking($closure)
+            .await
+            .map_err(|e| format!("Task failed: {e}"))?
+    };
+}
+
 // Re-export helpers that moved to the service layer so external callers
 // (e.g. server/main.rs scaffold_project) keep working.
 pub use crate::service::{ensure_claude_md_symlink, render_agents_md, validate_project_name};
@@ -90,11 +115,7 @@ pub(crate) use crate::service::wait_for_merge_rebase_resolution;
 #[tauri::command]
 pub async fn restore_sessions(state: State<'_, AppState>) -> Result<(), String> {
     let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::service::restore_sessions(&storage).map_err(Into::into)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    tauri_blocking!(move || crate::service::restore_sessions(&storage).map_err(|e| e.to_string()))
 }
 
 /// Connect a terminal to its PTY session at the given size.
@@ -112,17 +133,19 @@ pub async fn connect_session(
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
-    let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let id = parse_uuid(&session_id)?;
 
     // Clone Arcs for spawn_blocking (service::connect_session is synchronous
     // and takes individual Arc fields for 'static ownership in the closure).
+    // Not using tauri_blocking! here — the join-error path logs the session
+    // ID for structured debugging, which the macro cannot express.
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
 
     tokio::task::spawn_blocking(move || {
         service::connect_session(&storage, &pty_manager, &emitter, id, rows, cols)
-            .map_err(Into::into)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| {
@@ -137,7 +160,7 @@ pub fn create_project(
     name: String,
     repo_path: String,
 ) -> Result<Project, String> {
-    crate::service::create_project(&state, &name, &repo_path).map_err(Into::into)
+    crate::service::create_project(&state, &name, &repo_path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -146,12 +169,12 @@ pub fn load_project(
     name: String,
     repo_path: String,
 ) -> Result<Project, String> {
-    crate::service::load_project(&state, &name, &repo_path).map_err(Into::into)
+    crate::service::load_project(&state, &name, &repo_path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn list_projects(state: State<AppState>) -> Result<ProjectInventory, String> {
-    crate::service::list_projects(&state).map_err(Into::into)
+    crate::service::list_projects(&state).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -160,21 +183,20 @@ pub async fn delete_project(
     project_id: String,
     delete_repo: bool,
 ) -> Result<(), String> {
-    let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let id = parse_uuid(&project_id)?;
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::service::delete_project(&storage, &pty_manager, id, delete_repo).map_err(Into::into)
+    tauri_blocking!(move || {
+        crate::service::delete_project(&storage, &pty_manager, id, delete_repo)
+            .map_err(|e| e.to_string())
     })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
 pub fn get_agents_md(state: State<AppState>, project_id: String) -> Result<String, String> {
-    let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    crate::service::get_agents_md(&state, id).map_err(Into::into)
+    let id = parse_uuid(&project_id)?;
+    crate::service::get_agents_md(&state, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -183,8 +205,8 @@ pub fn update_agents_md(
     project_id: String,
     content: String,
 ) -> Result<(), String> {
-    let id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    crate::service::update_agents_md(&state, id, &content).map_err(Into::into)
+    let id = parse_uuid(&project_id)?;
+    crate::service::update_agents_md(&state, id, &content).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -199,14 +221,14 @@ pub async fn create_session(
 ) -> Result<String, String> {
     let kind = kind.unwrap_or_else(|| "claude".to_string());
     let background = background.unwrap_or(false);
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
     let session_id = Uuid::new_v4();
 
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri_blocking!(move || {
         crate::service::create_session(
             &storage,
             &pty_manager,
@@ -218,10 +240,8 @@ pub async fn create_session(
             background,
             initial_prompt,
         )
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
     })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -230,8 +250,8 @@ pub fn write_to_pty(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    crate::service::write_to_pty(&state, id, data.as_bytes()).map_err(Into::into)
+    let id = parse_uuid(&session_id)?;
+    crate::service::write_to_pty(&state, id, data.as_bytes()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -240,8 +260,8 @@ pub fn send_raw_to_pty(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    crate::service::send_raw_to_pty(&state, id, data.as_bytes()).map_err(Into::into)
+    let id = parse_uuid(&session_id)?;
+    crate::service::send_raw_to_pty(&state, id, data.as_bytes()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -251,8 +271,8 @@ pub fn resize_pty(
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
-    let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    crate::service::resize_pty(&state, id, rows, cols).map_err(Into::into)
+    let id = parse_uuid(&session_id)?;
+    crate::service::resize_pty(&state, id, rows, cols).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -262,10 +282,10 @@ pub fn set_initial_prompt(
     session_id: String,
     prompt: String,
 ) -> Result<(), String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
+    let session_uuid = parse_uuid(&session_id)?;
     crate::service::set_initial_prompt(&state, project_uuid, session_uuid, prompt)
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -276,12 +296,12 @@ pub async fn submit_secure_env_value(
 ) -> Result<String, String> {
     crate::service::submit_secure_env_value(&state, &request_id, &value)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn cancel_secure_env_request(state: State<AppState>, request_id: String) -> Result<(), String> {
-    crate::service::cancel_secure_env_request(&state, &request_id).map_err(Into::into)
+    crate::service::cancel_secure_env_request(&state, &request_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -291,8 +311,8 @@ pub async fn stage_session(
     project_id: String,
     session_id: String,
 ) -> Result<(), String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
+    let session_uuid = parse_uuid(&session_id)?;
     crate::service::stage_session_core(&state, project_uuid, session_uuid, true).await?;
     Ok(())
 }
@@ -303,18 +323,14 @@ pub fn unstage_session(
     project_id: String,
     session_id: String,
 ) -> Result<(), String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    crate::service::unstage_session(&state, project_uuid, session_uuid).map_err(Into::into)
+    let project_uuid = parse_uuid(&project_id)?;
+    let session_uuid = parse_uuid(&session_id)?;
+    crate::service::unstage_session(&state, project_uuid, session_uuid).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn get_repo_head(repo_path: String) -> Result<(String, String), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        service::get_repo_head(&repo_path).map_err(Into::into)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    tauri_blocking!(move || service::get_repo_head(&repo_path).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -323,9 +339,9 @@ pub fn save_session_prompt(
     project_id: String,
     session_id: String,
 ) -> Result<(), String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    service::save_session_prompt(&state, project_uuid, session_uuid).map_err(Into::into)
+    let project_uuid = parse_uuid(&project_id)?;
+    let session_uuid = parse_uuid(&session_id)?;
+    service::save_session_prompt(&state, project_uuid, session_uuid).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -333,8 +349,8 @@ pub fn list_project_prompts(
     state: State<AppState>,
     project_id: String,
 ) -> Result<Vec<crate::models::SavedPrompt>, String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    service::list_project_prompts(&state, project_uuid).map_err(Into::into)
+    let project_uuid = parse_uuid(&project_id)?;
+    service::list_project_prompts(&state, project_uuid).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -344,10 +360,10 @@ pub fn close_session(
     session_id: String,
     delete_worktree: bool,
 ) -> Result<(), String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
+    let session_uuid = parse_uuid(&session_id)?;
     crate::service::close_session(&state, project_uuid, session_uuid, delete_worktree)
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -358,32 +374,30 @@ pub async fn start_claude_login(
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::service::start_claude_login(&pty_manager, emitter).map_err(Into::into)
+    tauri_blocking!(move || {
+        crate::service::start_claude_login(&pty_manager, emitter).map_err(|e| e.to_string())
     })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
 pub fn stop_claude_login(state: State<AppState>, session_id: String) -> Result<(), String> {
-    let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    crate::service::stop_claude_login(&state.pty_manager, id).map_err(Into::into)
+    let id = parse_uuid(&session_id)?;
+    crate::service::stop_claude_login(&state.pty_manager, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn home_dir() -> Result<String, String> {
-    crate::service::home_dir().map_err(Into::into)
+    crate::service::home_dir().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn check_onboarding(state: State<AppState>) -> Result<Option<config::Config>, String> {
-    crate::service::check_onboarding(&state).map_err(Into::into)
+    crate::service::check_onboarding(&state).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn save_onboarding_config(state: State<AppState>, projects_root: String) -> Result<(), String> {
-    crate::service::save_onboarding_config(&state, &projects_root, None).map_err(Into::into)
+    crate::service::save_onboarding_config(&state, &projects_root, None).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -391,38 +405,29 @@ pub async fn load_terminal_theme(
     state: State<'_, AppState>,
 ) -> Result<terminal_theme::TerminalTheme, String> {
     let storage = state.storage.clone();
-    tokio::task::spawn_blocking(move || {
-        service::load_terminal_theme_blocking(&storage).map_err(Into::into)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    tauri_blocking!(
+        move || service::load_terminal_theme_blocking(&storage).map_err(|e| e.to_string())
+    )
 }
 
 #[tauri::command]
 pub async fn check_claude_cli() -> Result<String, String> {
-    let result = tokio::task::spawn_blocking(crate::service::check_claude_cli)
-        .await
-        .map_err(|e| format!("Task failed: {}", e))?;
-    Ok(result)
+    tauri_blocking!(|| Ok(crate::service::check_claude_cli()))
 }
 
 #[tauri::command]
 pub fn list_directories_at(path: String) -> Result<Vec<config::DirEntry>, String> {
-    service::list_directories_at(&path).map_err(Into::into)
+    service::list_directories_at(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn list_root_directories(state: State<AppState>) -> Result<Vec<config::DirEntry>, String> {
-    service::list_root_directories(&state).map_err(Into::into)
+    service::list_root_directories(&state).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn generate_project_names(description: String) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        service::generate_project_names(&description).map_err(Into::into)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    tauri_blocking!(move || service::generate_project_names(&description).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -431,18 +436,16 @@ pub async fn generate_architecture(
     repo_path: String,
 ) -> Result<ArchitectureResult, String> {
     let emitter = state.emitter.clone();
-    tokio::task::spawn_blocking(move || {
-        service::generate_architecture(&repo_path, &emitter).map_err(Into::into)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    tauri_blocking!(
+        move || service::generate_architecture(&repo_path, &emitter).map_err(|e| e.to_string())
+    )
 }
 
 #[tauri::command]
 pub async fn scaffold_project(state: State<'_, AppState>, name: String) -> Result<Project, String> {
     crate::service::scaffold_project(&state, &name)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -640,11 +643,10 @@ pub async fn save_note_image(
     extension: String,
 ) -> Result<String, String> {
     let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        service::save_note_image(&storage, &folder, &image_bytes, &extension).map_err(Into::into)
+    tauri_blocking!(move || {
+        service::save_note_image(&storage, &folder, &image_bytes, &extension)
+            .map_err(|e| e.to_string())
     })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -654,11 +656,10 @@ pub async fn resolve_note_asset_path(
     relative_path: String,
 ) -> Result<String, String> {
     let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        service::resolve_note_asset_path(&storage, &folder, &relative_path).map_err(Into::into)
+    tauri_blocking!(move || {
+        service::resolve_note_asset_path(&storage, &folder, &relative_path)
+            .map_err(|e| e.to_string())
     })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -670,7 +671,7 @@ pub async fn send_note_ai_chat(
 ) -> Result<crate::note_ai_chat::NoteAiResponse, String> {
     service::send_note_ai_chat(note_content, selected_text, conversation_history, prompt)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn merge_session_branch(
@@ -679,11 +680,11 @@ pub async fn merge_session_branch(
     project_id: String,
     session_id: String,
 ) -> Result<crate::models::MergeResponse, String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
+    let session_uuid = parse_uuid(&session_id)?;
     service::merge_session_branch(&state, project_uuid, session_uuid, true)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -693,13 +694,12 @@ pub async fn get_session_commits(
     session_id: String,
 ) -> Result<Vec<CommitInfo>, String> {
     let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-        let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-        service::get_session_commits(&storage, project_uuid, session_uuid).map_err(Into::into)
+    tauri_blocking!(move || {
+        let project_uuid = parse_uuid(&project_id)?;
+        let session_uuid = parse_uuid(&session_id)?;
+        service::get_session_commits(&storage, project_uuid, session_uuid)
+            .map_err(|e| e.to_string())
     })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -709,13 +709,12 @@ pub async fn get_session_token_usage(
     session_id: String,
 ) -> Result<Vec<TokenDataPoint>, String> {
     let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-        let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-        service::get_session_token_usage(&storage, project_uuid, session_uuid).map_err(Into::into)
+    tauri_blocking!(move || {
+        let project_uuid = parse_uuid(&project_id)?;
+        let session_uuid = parse_uuid(&session_id)?;
+        service::get_session_token_usage(&storage, project_uuid, session_uuid)
+            .map_err(|e| e.to_string())
     })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -727,9 +726,9 @@ pub async fn configure_maintainer(
     github_repo: Option<String>,
 ) -> Result<(), String> {
     tracing::debug!(project_id = %project_id, enabled, interval_minutes, "configuring maintainer");
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
     service::configure_maintainer(&state, project_uuid, enabled, interval_minutes, github_repo)
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -739,8 +738,8 @@ pub async fn configure_auto_worker(
     enabled: bool,
 ) -> Result<(), String> {
     tracing::debug!(project_id = %project_id, enabled, "configuring auto worker");
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    service::configure_auto_worker(&state, project_uuid, enabled).map_err(Into::into)
+    let project_uuid = parse_uuid(&project_id)?;
+    service::configure_auto_worker(&state, project_uuid, enabled).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -753,10 +752,10 @@ pub async fn get_auto_worker_queue(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Vec<AutoWorkerQueueIssue>, String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
     service::get_auto_worker_queue(&state, project_uuid)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -764,8 +763,8 @@ pub async fn get_maintainer_status(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Option<crate::models::MaintainerRunLog>, String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    service::get_maintainer_status(&state, project_uuid).map_err(Into::into)
+    let project_uuid = parse_uuid(&project_id)?;
+    service::get_maintainer_status(&state, project_uuid).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -773,8 +772,8 @@ pub async fn get_maintainer_history(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Vec<crate::models::MaintainerRunLog>, String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    service::get_maintainer_history(&state, project_uuid, 20).map_err(Into::into)
+    let project_uuid = parse_uuid(&project_id)?;
+    service::get_maintainer_history(&state, project_uuid, 20).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -789,9 +788,7 @@ where
         + Send
         + 'static,
 {
-    tokio::task::spawn_blocking(move || runner(repo_path, project_id, github_repo))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    tauri_blocking!(move || runner(repo_path, project_id, github_repo))
 }
 
 #[tauri::command]
@@ -801,10 +798,10 @@ pub async fn trigger_maintainer_check(
     project_id: String,
 ) -> Result<crate::models::MaintainerRunLog, String> {
     tracing::info!(project_id = %project_id, "triggering maintainer check");
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
     service::trigger_maintainer_check(&state, project_uuid)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -814,8 +811,8 @@ pub async fn clear_maintainer_reports(
     project_id: String,
 ) -> Result<(), String> {
     tracing::debug!(project_id = %project_id, "clearing maintainer reports");
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    service::clear_maintainer_reports(&state, project_uuid).map_err(Into::into)
+    let project_uuid = parse_uuid(&project_id)?;
+    service::clear_maintainer_reports(&state, project_uuid).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -823,10 +820,10 @@ pub async fn get_maintainer_issues(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Vec<crate::models::MaintainerIssue>, String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
     crate::service::get_maintainer_issues_for_project(&state, project_uuid)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -835,10 +832,10 @@ pub async fn get_maintainer_issue_detail(
     project_id: String,
     issue_number: u32,
 ) -> Result<crate::models::MaintainerIssueDetail, String> {
-    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    let project_uuid = parse_uuid(&project_id)?;
     crate::service::get_maintainer_issue_detail_for_project(&state, project_uuid, issue_number)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -850,28 +847,28 @@ pub fn log_frontend_error(message: String, state: tauri::State<'_, AppState>) {
 pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
     crate::service::start_voice_pipeline(&state)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn stop_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
     crate::service::stop_voice_pipeline(&state)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn toggle_voice_pause(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     crate::service::toggle_voice_pause(&state)
         .await
-        .map_err(Into::into)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn load_keybindings(
     state: tauri::State<'_, AppState>,
 ) -> Result<crate::keybindings::KeybindingsResult, String> {
-    crate::service::load_keybindings(&state).map_err(Into::into)
+    crate::service::load_keybindings(&state).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
