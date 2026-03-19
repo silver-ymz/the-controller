@@ -17,6 +17,7 @@ pub fn list_projects(state: &AppState) -> Result<ProjectInventory, AppError> {
     Ok(inventory)
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn check_onboarding(state: &AppState) -> Result<Option<crate::config::Config>, AppError> {
     let storage = state.storage.lock().map_err(AppError::internal)?;
     let base_dir = storage.base_dir();
@@ -80,6 +81,7 @@ pub fn create_project(state: &AppState, name: &str, repo_path: &str) -> Result<P
     Ok(project)
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn load_project(state: &AppState, name: &str, repo_path: &str) -> Result<Project, AppError> {
     tracing::info!(project_name = %name, repo_path = %repo_path, "loading project");
     super::validate_project_name(name).map_err(AppError::BadRequest)?;
@@ -149,8 +151,7 @@ pub fn load_project(state: &AppState, name: &str, repo_path: &str) -> Result<Pro
     Ok(project)
 }
 
-/// Delete a project. This is synchronous — callers that need non-blocking
-/// behaviour (e.g. the Tauri command) should wrap in `spawn_blocking`.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn delete_project(
     state: &AppState,
     project_id: Uuid,
@@ -199,6 +200,7 @@ pub fn get_agents_md(state: &AppState, project_id: Uuid) -> Result<String, AppEr
     storage.get_agents_md(&project).map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn update_agents_md(state: &AppState, project_id: Uuid, content: &str) -> Result<(), AppError> {
     let storage = state.storage.lock().map_err(AppError::internal)?;
     storage

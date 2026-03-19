@@ -3,6 +3,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::models::{AutoWorkerQueueIssue, GithubIssue, MaintainerRunLog, Project};
 use crate::state::AppState;
+use the_controller_macros::derive_handlers;
 
 /// Validate that a maintainer interval is at least 5 minutes.
 pub fn validate_maintainer_interval(minutes: u64) -> Result<(), AppError> {
@@ -14,7 +15,7 @@ pub fn validate_maintainer_interval(minutes: u64) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Configure the maintainer for a project.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn configure_maintainer(
     state: &AppState,
     project_id: Uuid,
@@ -34,7 +35,7 @@ pub fn configure_maintainer(
     Ok(())
 }
 
-/// Configure the auto-worker for a project.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn configure_auto_worker(
     state: &AppState,
     project_id: Uuid,
@@ -49,7 +50,7 @@ pub fn configure_auto_worker(
     Ok(())
 }
 
-/// Get the latest maintainer run log for a project.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn get_maintainer_status(
     state: &AppState,
     project_id: Uuid,
@@ -72,7 +73,7 @@ pub fn get_maintainer_history(
         .map_err(AppError::internal)
 }
 
-/// Trigger a maintainer check and save the result.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn trigger_maintainer_check(
     state: &AppState,
     project_id: Uuid,
@@ -124,7 +125,7 @@ pub async fn trigger_maintainer_check(
     Ok(log)
 }
 
-/// Clear all maintainer run logs for a project.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn clear_maintainer_reports(state: &AppState, project_id: Uuid) -> Result<(), AppError> {
     let storage = state.storage.lock().map_err(AppError::internal)?;
     storage
@@ -182,7 +183,7 @@ pub fn build_auto_worker_queue(
     queue
 }
 
-/// Get the auto-worker queue for a project.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn get_auto_worker_queue(
     state: &AppState,
     project_id: Uuid,

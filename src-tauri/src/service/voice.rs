@@ -1,8 +1,9 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::voice::VoicePipeline;
+use the_controller_macros::derive_handlers;
 
-/// Start the voice pipeline. If already running, re-emits the current state.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn start_voice_pipeline(state: &AppState) -> Result<(), AppError> {
     tracing::info!("starting voice pipeline");
     // Snapshot generation before init — if stop is called during init, this will change.
@@ -40,7 +41,7 @@ pub async fn start_voice_pipeline(state: &AppState) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Stop the voice pipeline.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn stop_voice_pipeline(state: &AppState) -> Result<(), AppError> {
     tracing::info!("stopping voice pipeline");
     // Bump generation so any in-flight start_voice_pipeline knows to discard its result.
@@ -60,7 +61,7 @@ pub async fn stop_voice_pipeline(state: &AppState) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Toggle voice pause state. Returns `true` if now paused.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn toggle_voice_pause(state: &AppState) -> Result<bool, AppError> {
     let pipeline = state.voice_pipeline.lock().await;
     match pipeline.as_ref() {

@@ -2,9 +2,9 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::state::AppState;
+use the_controller_macros::derive_handlers;
 
-/// Start a Claude login session by spawning a `claude login` PTY command.
-/// Should be called from a blocking context.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn start_claude_login(state: &AppState) -> Result<String, AppError> {
     tracing::info!("starting Claude login session");
     let session_id = Uuid::new_v4();
@@ -14,7 +14,7 @@ pub fn start_claude_login(state: &AppState) -> Result<String, AppError> {
     Ok(session_id.to_string())
 }
 
-/// Stop a Claude login session.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn stop_claude_login(state: &AppState, session_id: Uuid) -> Result<(), AppError> {
     let mut mgr = state.pty_manager.lock().map_err(AppError::internal)?;
     mgr.close_session(session_id).map_err(AppError::Internal)

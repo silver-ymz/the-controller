@@ -44,10 +44,14 @@ pub enum ParamKind {
     AppState,
     /// `&str` — becomes `String` in the wrapper, passed as `&arg` to service fn.
     StrRef,
+    /// `&[u8]` — becomes `String` in the wrapper, passed as `arg.as_bytes()` to service fn.
+    ByteSlice,
     /// `Uuid` — becomes `String` in the wrapper, parsed with `parse_uuid()`.
     UuidParam,
     /// `bool` — passed through as-is.
     Bool,
+    /// `Option<&str>` — becomes `Option<String>`, passed as `arg.as_deref()`.
+    OptionStrRef,
     /// Any other type — passed through as-is (e.g. `u16`, `Option<String>`).
     Passthrough(Box<Type>),
 }
@@ -69,12 +73,15 @@ pub struct ParsedService {
     pub params: Vec<ParsedParam>,
     /// The `T` in `Result<T, AppError>`.
     pub ok_type: Type,
+    /// Whether the service function is `async fn`.
+    pub is_async: bool,
 }
 
 impl ParsedService {
     pub fn from_item_fn(item: &ItemFn) -> syn::Result<Self> {
         let fn_name = item.sig.ident.clone();
         let vis = item.vis.clone();
+        let is_async = item.sig.asyncness.is_some();
 
         // Parse return type: must be Result<T, AppError>
         let ok_type = extract_result_ok_type(&item.sig.output)?;
@@ -91,6 +98,7 @@ impl ParsedService {
             vis,
             params,
             ok_type,
+            is_async,
         })
     }
 }
@@ -165,6 +173,10 @@ fn classify_type(ty: &Type) -> ParamKind {
     if is_ref_to(ty, "str") {
         return ParamKind::StrRef;
     }
+    // Check for &[u8]
+    if is_ref_to_byte_slice(ty) {
+        return ParamKind::ByteSlice;
+    }
     // Check for Uuid
     if is_path_ending_with(ty, "Uuid") {
         return ParamKind::UuidParam;
@@ -172,6 +184,10 @@ fn classify_type(ty: &Type) -> ParamKind {
     // Check for bool
     if is_path_ending_with(ty, "bool") {
         return ParamKind::Bool;
+    }
+    // Check for Option<&str>
+    if is_option_str_ref(ty) {
+        return ParamKind::OptionStrRef;
     }
     // Everything else: pass through
     ParamKind::Passthrough(Box::new(ty.clone()))
@@ -184,10 +200,35 @@ fn is_ref_to(ty: &Type, target: &str) -> bool {
     false
 }
 
+fn is_ref_to_byte_slice(ty: &Type) -> bool {
+    if let Type::Reference(TypeReference { elem, .. }) = ty {
+        if let Type::Slice(type_slice) = elem.as_ref() {
+            return is_path_ending_with(&type_slice.elem, "u8");
+        }
+    }
+    false
+}
+
 fn is_path_ending_with(ty: &Type, target: &str) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(seg) = type_path.path.segments.last() {
             return seg.ident == target;
+        }
+    }
+    false
+}
+
+/// Check for `Option<&str>` — matches `Option<&str>` specifically.
+fn is_option_str_ref(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(seg) = type_path.path.segments.last() {
+            if seg.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        return is_ref_to(inner, "str");
+                    }
+                }
+            }
         }
     }
     false

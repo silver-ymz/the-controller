@@ -4,6 +4,7 @@ use crate::error::AppError;
 use crate::note_ai_chat::{NoteAiChatMessage, NoteAiResponse};
 use crate::notes::{self, NoteEntry};
 use crate::state::AppState;
+use the_controller_macros::derive_handlers;
 
 /// Best-effort git commit for notes. Logs errors but never fails the caller.
 pub fn try_commit_notes(base_dir: &Path, message: &str) {
@@ -13,18 +14,21 @@ pub fn try_commit_notes(base_dir: &Path, message: &str) {
     }
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn list_notes(state: &AppState, folder: &str) -> Result<Vec<NoteEntry>, AppError> {
     tracing::debug!("listing notes");
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::list_notes(&base_dir, folder).map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn read_note(state: &AppState, folder: &str, filename: &str) -> Result<String, AppError> {
     tracing::debug!("reading note");
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::read_note(&base_dir, folder, filename).map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn write_note(
     state: &AppState,
     folder: &str,
@@ -37,6 +41,7 @@ pub fn write_note(
     // No git commit here — batched via commit_notes command
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn create_note(state: &AppState, folder: &str, title: &str) -> Result<String, AppError> {
     tracing::debug!("creating note");
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
@@ -45,6 +50,7 @@ pub fn create_note(state: &AppState, folder: &str, title: &str) -> Result<String
     Ok(filename)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn delete_note(state: &AppState, folder: &str, filename: &str) -> Result<(), AppError> {
     tracing::debug!("deleting note");
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
@@ -53,6 +59,7 @@ pub fn delete_note(state: &AppState, folder: &str, filename: &str) -> Result<(),
     Ok(())
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn rename_note(
     state: &AppState,
     folder: &str,
@@ -70,6 +77,7 @@ pub fn rename_note(
     Ok(new_filename)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn duplicate_note(state: &AppState, folder: &str, filename: &str) -> Result<String, AppError> {
     tracing::debug!("duplicating note");
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
@@ -81,12 +89,14 @@ pub fn duplicate_note(state: &AppState, folder: &str, filename: &str) -> Result<
     Ok(copy)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn list_note_folders(state: &AppState) -> Result<Vec<String>, AppError> {
     tracing::debug!("listing note folders");
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::list_folders(&base_dir).map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn create_note_folder(state: &AppState, name: &str) -> Result<(), AppError> {
     tracing::debug!("creating folder");
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
@@ -95,6 +105,7 @@ pub fn create_note_folder(state: &AppState, name: &str) -> Result<(), AppError> 
     Ok(())
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn rename_note_folder(
     state: &AppState,
     old_name: &str,
@@ -110,6 +121,7 @@ pub fn rename_note_folder(
     Ok(())
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn delete_note_folder(state: &AppState, name: &str, force: bool) -> Result<(), AppError> {
     tracing::debug!(force, "deleting folder");
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
@@ -118,14 +130,14 @@ pub fn delete_note_folder(state: &AppState, name: &str, force: bool) -> Result<(
     Ok(())
 }
 
-/// Commit any pending note changes (content edits).
-/// Called by the frontend when switching notes.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn commit_pending_notes(state: &AppState) -> Result<bool, AppError> {
     tracing::debug!("committing pending note changes");
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::commit_notes(&base_dir, "update notes").map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn save_note_image(
     state: &AppState,
     folder: &str,
@@ -136,6 +148,7 @@ pub fn save_note_image(
     notes::save_note_image(&base_dir, folder, image_bytes, extension).map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn resolve_note_asset_path(
     state: &AppState,
     folder: &str,
@@ -147,6 +160,7 @@ pub fn resolve_note_asset_path(
         .map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn send_note_ai_chat(
     note_content: String,
     selected_text: String,

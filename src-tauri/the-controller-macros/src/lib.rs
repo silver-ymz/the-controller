@@ -10,12 +10,20 @@ mod tauri_gen;
 ///
 /// - `tauri_command` — generate a `tauri_<fn_name>` function annotated with
 ///   `#[tauri::command]`. Parameters are mapped: `&AppState` → `State<'_, AppState>`,
-///   `&str` → `String`, `Uuid` → `String` + `parse_uuid()`.
+///   `&str` → `String`, `Uuid` → `String` + `parse_uuid()`, `&[u8]` → `String` + `.as_bytes()`.
 ///
 /// - `axum_handler` — generate an `axum_<fn_name>` async handler and a
 ///   `<PascalCase>Request` struct (both behind `#[cfg(feature = "server")]`).
 ///
-/// - `blocking` — wrap the service call with `spawn_blocking` (reserved for Phase B).
+/// - `blocking` — wrap the service call with `spawn_blocking` for functions that
+///   perform blocking I/O. Uses `tauri::async_runtime::spawn_blocking` for Tauri
+///   and `tokio::task::spawn_blocking` for Axum.
+///
+/// # Async support
+///
+/// If the service function is `async fn`, the generated Tauri wrapper will be
+/// `async fn` and `.await` the service call. Axum handlers always add `.await`
+/// for async service functions.
 ///
 /// # Supported parameter types
 ///
@@ -23,9 +31,13 @@ mod tauri_gen;
 /// |---|---|---|
 /// | `&AppState` | `State<'_, AppState>` | skipped |
 /// | `&str` | `String` | `String` |
+/// | `&[u8]` | `String` + `.as_bytes()` | `String` |
 /// | `Uuid` | `String` + parse | `String` |
 /// | `bool` | `bool` | `bool` |
 /// | other `T` | `T` | `T` |
+///
+/// Functions without an `&AppState` parameter will generate handlers that omit
+/// the state extractor entirely.
 ///
 /// # Example
 ///
@@ -59,25 +71,18 @@ fn derive_handlers_impl(
     args: parse::DeriveHandlersArgs,
     item_fn: syn::ItemFn,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    if args.blocking {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "the `blocking` flag is not yet implemented (planned for Phase B)",
-        ));
-    }
-
     let parsed = parse::ParsedService::from_item_fn(&item_fn)?;
 
     // Start with the original function, unchanged
     let mut output = quote::quote! { #item_fn };
 
     if args.tauri_command {
-        let tauri_tokens = tauri_gen::generate_tauri_command(&parsed)?;
+        let tauri_tokens = tauri_gen::generate_tauri_command(&parsed, args.blocking)?;
         output.extend(tauri_tokens);
     }
 
     if args.axum_handler {
-        let axum_tokens = axum_gen::generate_axum_handler(&parsed)?;
+        let axum_tokens = axum_gen::generate_axum_handler(&parsed, args.blocking)?;
         output.extend(axum_tokens);
     }
 

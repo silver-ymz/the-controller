@@ -5,11 +5,16 @@ use crate::parse::{ParamKind, ParsedParam, ParsedService};
 
 /// Generate an Axum HTTP handler + request struct for the given service function.
 /// Everything is gated behind `#[cfg(feature = "server")]`.
-pub fn generate_axum_handler(parsed: &ParsedService) -> syn::Result<TokenStream> {
+pub fn generate_axum_handler(parsed: &ParsedService, blocking: bool) -> syn::Result<TokenStream> {
     let service_fn_name = &parsed.fn_name;
     let axum_fn_name = format_ident!("axum_{}", service_fn_name);
     let request_struct_name = to_pascal_case_request(&service_fn_name.to_string());
     let request_struct_ident = format_ident!("{}", request_struct_name);
+
+    let has_state = parsed
+        .params
+        .iter()
+        .any(|p| matches!(p.kind, ParamKind::AppState));
 
     // Collect non-AppState params for the request struct
     let request_fields: Vec<&ParsedParam> = parsed
@@ -49,7 +54,11 @@ pub fn generate_axum_handler(parsed: &ParsedService) -> syn::Result<TokenStream>
     for param in &parsed.params {
         match &param.kind {
             ParamKind::AppState => {
-                call_args.push(quote! { &state.app });
+                if blocking {
+                    call_args.push(quote! { &app });
+                } else {
+                    call_args.push(quote! { &state.app });
+                }
             }
             ParamKind::StrRef => {
                 let name = &param.name;
@@ -67,6 +76,14 @@ pub fn generate_axum_handler(parsed: &ParsedService) -> syn::Result<TokenStream>
                 let name = &param.name;
                 call_args.push(quote! { req.#name });
             }
+            ParamKind::ByteSlice => {
+                let name = &param.name;
+                call_args.push(quote! { req.#name.as_bytes() });
+            }
+            ParamKind::OptionStrRef => {
+                let name = &param.name;
+                call_args.push(quote! { req.#name.as_deref() });
+            }
             ParamKind::Passthrough(_) => {
                 let name = &param.name;
                 call_args.push(quote! { req.#name });
@@ -74,32 +91,92 @@ pub fn generate_axum_handler(parsed: &ParsedService) -> syn::Result<TokenStream>
         }
     }
 
+    let service_call = quote! { #service_fn_name(#(#call_args),*) };
+    let await_suffix = if parsed.is_async && !blocking {
+        quote! { .await }
+    } else {
+        quote! {}
+    };
+
+    // State extractor (only if function uses AppState)
+    let state_extractor = if has_state {
+        quote! {
+            ::axum::extract::State(state): ::axum::extract::State<
+                ::std::sync::Arc<crate::server_helpers::ServerState>,
+            >,
+        }
+    } else {
+        quote! {}
+    };
+
     // Handler function — with or without Json extractor
-    let handler = if struct_fields.is_empty() {
+    let handler = if blocking {
+        // Blocking: spawn_blocking with cloned state
+        let state_clone = if has_state {
+            quote! { let app = state.app.clone(); }
+        } else {
+            quote! {}
+        };
+
+        if struct_fields.is_empty() {
+            quote! {
+                #[cfg(feature = "server")]
+                pub async fn #axum_fn_name(
+                    #state_extractor
+                ) -> Result<::axum::Json<::serde_json::Value>, (::axum::http::StatusCode, String)> {
+                    #state_clone
+                    ::tokio::task::spawn_blocking(move || {
+                        #(#uuid_parse_stmts)*
+                        #service_call
+                            .map_err(<(::axum::http::StatusCode, String)>::from)
+                    })
+                    .await
+                    .map_err(|e| (::axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {e}")))?
+                    .and_then(crate::server_helpers::ok_json)
+                }
+            }
+        } else {
+            quote! {
+                #[cfg(feature = "server")]
+                pub async fn #axum_fn_name(
+                    #state_extractor
+                    ::axum::Json(req): ::axum::Json<#request_struct_ident>,
+                ) -> Result<::axum::Json<::serde_json::Value>, (::axum::http::StatusCode, String)> {
+                    #state_clone
+                    ::tokio::task::spawn_blocking(move || {
+                        #(#uuid_parse_stmts)*
+                        #service_call
+                            .map_err(<(::axum::http::StatusCode, String)>::from)
+                    })
+                    .await
+                    .map_err(|e| (::axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {e}")))?
+                    .and_then(crate::server_helpers::ok_json)
+                }
+            }
+        }
+    } else if struct_fields.is_empty() {
+        // No request fields
         quote! {
             #[cfg(feature = "server")]
             pub async fn #axum_fn_name(
-                ::axum::extract::State(state): ::axum::extract::State<
-                    ::std::sync::Arc<crate::server_helpers::ServerState>,
-                >,
+                #state_extractor
             ) -> Result<::axum::Json<::serde_json::Value>, (::axum::http::StatusCode, String)> {
                 #(#uuid_parse_stmts)*
-                let result = #service_fn_name(#(#call_args),*)
+                let result = #service_call #await_suffix
                     .map_err(<(::axum::http::StatusCode, String)>::from)?;
                 crate::server_helpers::ok_json(result)
             }
         }
     } else {
+        // Has request fields, non-blocking
         quote! {
             #[cfg(feature = "server")]
             pub async fn #axum_fn_name(
-                ::axum::extract::State(state): ::axum::extract::State<
-                    ::std::sync::Arc<crate::server_helpers::ServerState>,
-                >,
+                #state_extractor
                 ::axum::Json(req): ::axum::Json<#request_struct_ident>,
             ) -> Result<::axum::Json<::serde_json::Value>, (::axum::http::StatusCode, String)> {
                 #(#uuid_parse_stmts)*
-                let result = #service_fn_name(#(#call_args),*)
+                let result = #service_call #await_suffix
                     .map_err(<(::axum::http::StatusCode, String)>::from)?;
                 crate::server_helpers::ok_json(result)
             }
@@ -116,8 +193,9 @@ pub fn generate_axum_handler(parsed: &ParsedService) -> syn::Result<TokenStream>
 fn request_field_type(kind: &ParamKind) -> TokenStream {
     match kind {
         ParamKind::AppState => unreachable!("AppState is filtered out before this point"),
-        ParamKind::StrRef | ParamKind::UuidParam => quote! { String },
+        ParamKind::StrRef | ParamKind::UuidParam | ParamKind::ByteSlice => quote! { String },
         ParamKind::Bool => quote! { bool },
+        ParamKind::OptionStrRef => quote! { Option<String> },
         ParamKind::Passthrough(ty) => quote! { #ty },
     }
 }

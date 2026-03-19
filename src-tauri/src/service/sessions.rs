@@ -9,6 +9,7 @@ use crate::state::AppState;
 use crate::storage::Storage;
 use crate::token_usage::{self, TokenDataPoint};
 use crate::worktree::WorktreeManager;
+use the_controller_macros::derive_handlers;
 
 // ---------------------------------------------------------------------------
 // Session management helpers (moved from commands.rs)
@@ -98,6 +99,7 @@ pub fn kill_process_group(pid: u32) {
 /// Run storage migrations on startup (worktree path format, etc.).
 /// PTY connections are deferred to `connect_session` so each terminal
 /// can attach at the correct size.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn restore_sessions(state: &AppState) -> Result<(), AppError> {
     tracing::info!("restoring sessions from storage");
     let storage = state.storage.lock().map_err(AppError::internal)?;
@@ -116,9 +118,7 @@ pub fn restore_sessions(state: &AppState) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Connect a terminal to its PTY session at the given size.
-/// This is synchronous — callers that need non-blocking behaviour should
-/// wrap in `spawn_blocking`.
+#[derive_handlers(axum_handler, blocking)]
 pub fn connect_session(
     state: &AppState,
     session_id: Uuid,
@@ -174,8 +174,7 @@ pub fn connect_session(
     .map_err(AppError::Internal)
 }
 
-/// Create a new session. This is synchronous (blocking) — callers that need
-/// non-blocking behaviour should wrap in `spawn_blocking`.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 #[allow(clippy::too_many_arguments)]
 pub fn create_session(
     state: &AppState,
@@ -311,8 +310,7 @@ pub fn create_session(
     Ok(session_id.to_string())
 }
 
-/// Close a session. Closes PTY, removes session from project, optionally
-/// removes worktree. This is synchronous.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn close_session(
     state: &AppState,
     project_id: Uuid,
@@ -354,7 +352,7 @@ pub fn close_session(
     Ok(())
 }
 
-/// Write data to a PTY session.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn write_to_pty(state: &AppState, session_id: Uuid, data: &[u8]) -> Result<(), AppError> {
     let mut pty_manager = state.pty_manager.lock().map_err(AppError::internal)?;
     pty_manager
@@ -362,7 +360,7 @@ pub fn write_to_pty(state: &AppState, session_id: Uuid, data: &[u8]) -> Result<(
         .map_err(AppError::Internal)
 }
 
-/// Send raw data to a PTY session.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn send_raw_to_pty(state: &AppState, session_id: Uuid, data: &[u8]) -> Result<(), AppError> {
     let mut pty_manager = state.pty_manager.lock().map_err(AppError::internal)?;
     pty_manager
@@ -370,7 +368,7 @@ pub fn send_raw_to_pty(state: &AppState, session_id: Uuid, data: &[u8]) -> Resul
         .map_err(AppError::Internal)
 }
 
-/// Resize a PTY session.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn resize_pty(
     state: &AppState,
     session_id: Uuid,
@@ -707,7 +705,7 @@ pub async fn stage_session_core(
     Ok(port)
 }
 
-/// Unstage a session: kill the staged process and remove the staged record.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn unstage_session(
     state: &AppState,
     project_id: Uuid,
@@ -743,7 +741,7 @@ pub fn unstage_session(
 // Git / repo helpers
 // ---------------------------------------------------------------------------
 
-/// Get the HEAD branch name and short commit hash for a repository.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn get_repo_head(repo_path: &str) -> Result<(String, String), AppError> {
     let repo = git2::Repository::open(repo_path)
         .map_err(|e| AppError::Internal(format!("Failed to open repo: {}", e)))?;
@@ -813,7 +811,7 @@ pub fn discover_branch_commits(worktree_path: &str) -> Result<Vec<CommitInfo>, S
 // Session data queries
 // ---------------------------------------------------------------------------
 
-/// Get commits for a session, merging stored done_commits with newly discovered ones.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn get_session_commits(
     state: &AppState,
     project_id: Uuid,
@@ -855,7 +853,7 @@ pub fn get_session_commits(
     Ok(all_commits)
 }
 
-/// Get token usage data for a session.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn get_session_token_usage(
     state: &AppState,
     project_id: Uuid,
@@ -883,7 +881,7 @@ pub fn get_session_token_usage(
 // Prompt management
 // ---------------------------------------------------------------------------
 
-/// Save the current session's prompt as a reusable project prompt.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn save_session_prompt(
     state: &AppState,
     project_id: Uuid,
@@ -936,7 +934,7 @@ pub fn save_session_prompt(
     Ok(())
 }
 
-/// List saved prompts for a project.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn list_project_prompts(
     state: &AppState,
     project_id: Uuid,
@@ -1077,7 +1075,7 @@ pub async fn merge_session_branch(
     )))
 }
 
-/// Set the initial prompt for a session (only if not already set).
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn set_initial_prompt(
     state: &AppState,
     project_id: Uuid,

@@ -4,9 +4,9 @@ use crate::deploy::commands::{DeployRequest, DeployResult, ProjectSignals};
 use crate::deploy::coolify::CoolifyClient;
 use crate::deploy::credentials::DeployCredentials;
 use crate::error::AppError;
+use the_controller_macros::derive_handlers;
 
-/// Detect the project type based on files present in the repo.
-/// Should be called from a blocking context.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn detect_project_type_blocking(repo_path: &str) -> Result<ProjectSignals, AppError> {
     tracing::debug!(repo_path = %repo_path, "detecting project type");
     let path = Path::new(repo_path);
@@ -33,28 +33,25 @@ pub fn detect_project_type_blocking(repo_path: &str) -> Result<ProjectSignals, A
     })
 }
 
-/// Load deploy credentials from the credential store.
-/// Should be called from a blocking context.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn get_deploy_credentials_blocking() -> Result<DeployCredentials, AppError> {
     tracing::debug!("loading deploy credentials");
     DeployCredentials::load().map_err(AppError::Internal)
 }
 
-/// Save deploy credentials to the credential store.
-/// Should be called from a blocking context.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn save_deploy_credentials_blocking(credentials: DeployCredentials) -> Result<(), AppError> {
     tracing::info!("saving deploy credentials");
     credentials.save().map_err(AppError::Internal)
 }
 
-/// Check if deploy is provisioned (credentials are complete).
-/// Should be called from a blocking context.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn is_deploy_provisioned_blocking() -> Result<bool, AppError> {
     let creds = DeployCredentials::load().map_err(AppError::Internal)?;
     Ok(creds.is_provisioned())
 }
 
-/// Deploy a project via the Coolify API.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn deploy_project(request: DeployRequest) -> Result<DeployResult, AppError> {
     tracing::info!(
         project = %request.project_name,
@@ -118,7 +115,7 @@ pub async fn deploy_project(request: DeployRequest) -> Result<DeployResult, AppE
     })
 }
 
-/// List deployed services via the Coolify API.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn list_deployed_services() -> Result<Vec<serde_json::Value>, AppError> {
     tracing::debug!("listing deployed services");
     let creds = tokio::task::spawn_blocking(DeployCredentials::load)

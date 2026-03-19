@@ -6,8 +6,9 @@ use crate::keybindings;
 use crate::state::AppState;
 use crate::storage::ProjectInventory;
 use crate::terminal_theme;
+use the_controller_macros::derive_handlers;
 
-/// Return the user's home directory path.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn home_dir() -> Result<String, AppError> {
     dirs::home_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -53,8 +54,7 @@ pub fn save_onboarding_config(
     config::save_config(&base_dir, &cfg).map_err(AppError::internal)
 }
 
-/// Load the terminal theme from the config directory.
-/// This reads files and should be called from a blocking context.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn load_terminal_theme_blocking(
     state: &AppState,
 ) -> Result<terminal_theme::TerminalTheme, AppError> {
@@ -62,8 +62,7 @@ pub fn load_terminal_theme_blocking(
     terminal_theme::load_terminal_theme(&base_dir).map_err(AppError::internal)
 }
 
-/// Generate an architecture document for the repository.
-/// This is CPU-bound and should be called from a blocking context.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn generate_architecture(
     state: &AppState,
     repo_path: &str,
@@ -75,7 +74,7 @@ pub fn generate_architecture(
     .map_err(AppError::Internal)
 }
 
-/// Load keybindings from the config directory.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn load_keybindings(state: &AppState) -> Result<keybindings::KeybindingsResult, AppError> {
     let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     Ok(keybindings::load_keybindings(&base_dir))
@@ -98,7 +97,7 @@ pub fn log_frontend_error(state: &AppState, message: &str) {
     tracing::error!(target: "frontend", "{}", sanitized);
 }
 
-/// List directories at a given path.
+#[derive_handlers(tauri_command)]
 pub fn list_directories_at(path: &str) -> Result<Vec<config::DirEntry>, AppError> {
     let p = Path::new(path);
     if !p.is_dir() {
@@ -107,7 +106,7 @@ pub fn list_directories_at(path: &str) -> Result<Vec<config::DirEntry>, AppError
     config::list_directories(p).map_err(AppError::internal)
 }
 
-/// List directories under the configured projects root.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn list_root_directories(state: &AppState) -> Result<Vec<config::DirEntry>, AppError> {
     let storage = state.storage.lock().map_err(AppError::internal)?;
     let base_dir = storage.base_dir();
@@ -117,12 +116,12 @@ pub fn list_root_directories(state: &AppState) -> Result<Vec<config::DirEntry>, 
     config::list_directories(Path::new(&cfg.projects_root)).map_err(AppError::internal)
 }
 
-/// Generate project name suggestions from a description.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn generate_project_names(description: &str) -> Result<Vec<String>, AppError> {
     config::generate_names_via_cli(description).map_err(AppError::Internal)
 }
 
-/// List archived projects (projects or sessions that are archived).
+#[derive_handlers(axum_handler)]
 pub fn list_archived_projects(state: &AppState) -> Result<ProjectInventory, AppError> {
     let storage = state.storage.lock().map_err(AppError::internal)?;
     let inventory = storage.list_projects().map_err(AppError::internal)?;
@@ -131,8 +130,7 @@ pub fn list_archived_projects(state: &AppState) -> Result<ProjectInventory, AppE
     }))
 }
 
-/// List directories at a given path, restricted to paths under `$HOME`.
-/// Used by the server to prevent arbitrary filesystem enumeration.
+#[derive_handlers(axum_handler)]
 pub fn list_directories_at_safe(path: &str) -> Result<Vec<config::DirEntry>, AppError> {
     let p = Path::new(path);
     let requested = std::fs::canonicalize(p)

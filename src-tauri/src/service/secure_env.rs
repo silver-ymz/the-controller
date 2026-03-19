@@ -1,8 +1,8 @@
 use crate::error::AppError;
 use crate::state::AppState;
+use the_controller_macros::derive_handlers;
 
-/// Submit a secure environment value: take the pending request, write the env
-/// file, and finish the submission. Returns "created" or "updated".
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn submit_secure_env_value(
     state: &AppState,
     request_id: &str,
@@ -28,7 +28,7 @@ pub async fn submit_secure_env_value(
     })
 }
 
-/// Cancel a pending secure environment request.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn cancel_secure_env_request(state: &AppState, request_id: &str) -> Result<(), AppError> {
     crate::secure_env::cancel_secure_env_request(state, request_id).map_err(AppError::Internal)
 }
