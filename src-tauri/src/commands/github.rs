@@ -95,25 +95,6 @@ pub(crate) async fn delete_github_issue(
         .map_err(Into::into)
 }
 
-pub(crate) async fn get_maintainer_issues(
-    repo_path: String,
-    github_repo: Option<String>,
-) -> Result<Vec<crate::models::MaintainerIssue>, String> {
-    service::get_maintainer_issues(&repo_path, github_repo.as_deref())
-        .await
-        .map_err(Into::into)
-}
-
-pub(crate) async fn get_maintainer_issue_detail(
-    repo_path: String,
-    github_repo: Option<String>,
-    issue_number: u32,
-) -> Result<crate::models::MaintainerIssueDetail, String> {
-    service::get_maintainer_issue_detail(&repo_path, github_repo.as_deref(), issue_number)
-        .await
-        .map_err(Into::into)
-}
-
 pub(crate) async fn list_assigned_issues(repo_path: String) -> Result<Vec<AssignedIssue>, String> {
     service::list_assigned_issues(&repo_path)
         .await

@@ -800,21 +800,16 @@ async fn toggle_voice_pause(
 async fn load_terminal_theme(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state.app.storage.clone();
-    let theme = tokio::task::spawn_blocking(move || {
-        let base_dir = storage.lock().map_err(|e| e.to_string())?;
-        let base_dir = base_dir.base_dir();
-        the_controller_lib::terminal_theme::load_terminal_theme(&base_dir)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let app = state.app.clone();
+    let theme = tokio::task::spawn_blocking(move || service::load_terminal_theme_blocking(&app))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Task failed: {}", e),
+            )
+        })?
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(theme).unwrap()))
 }
 
@@ -1302,22 +1297,8 @@ async fn get_maintainer_issues(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (repo_path, github_repo) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        (
-            project.repo_path.clone(),
-            project.maintainer.github_repo.clone(),
-        )
-    };
 
-    let issues = service::get_maintainer_issues(&repo_path, github_repo.as_deref())
+    let issues = service::get_maintainer_issues_for_project(&state.app, project_uuid)
         .await
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(issues).unwrap()))
@@ -1336,23 +1317,9 @@ async fn get_maintainer_issue_detail(
         as u32;
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (repo_path, github_repo) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        (
-            project.repo_path.clone(),
-            project.maintainer.github_repo.clone(),
-        )
-    };
 
     let detail =
-        service::get_maintainer_issue_detail(&repo_path, github_repo.as_deref(), issue_number)
+        service::get_maintainer_issue_detail_for_project(&state.app, project_uuid, issue_number)
             .await
             .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(detail).unwrap()))
@@ -1502,27 +1469,7 @@ async fn list_directories_at(Json(args): Json<Value>) -> Result<Json<Value>, (St
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing path".to_string()))?
         .to_string();
-    // Restrict to directories under $HOME to prevent arbitrary filesystem enumeration
-    let p = Path::new(&path);
-    let requested = std::fs::canonicalize(p).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("cannot resolve path: {}", e),
-        )
-    })?;
-    let home = dirs::home_dir().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "cannot determine home directory".to_string(),
-        )
-    })?;
-    if !requested.starts_with(&home) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "path must be under the home directory".to_string(),
-        ));
-    }
-    let entries = service::list_directories_at(&path).map_err(<(StatusCode, String)>::from)?;
+    let entries = service::list_directories_at_safe(&path).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(entries).unwrap()))
 }
 
@@ -1563,63 +1510,9 @@ async fn scaffold_project(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
         .to_string();
-    service::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let repo_path = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        if let Ok(inventory) = storage.list_projects() {
-            if inventory.projects.iter().any(|p| p.name == name) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("A project named '{}' already exists", name),
-                ));
-            }
-        }
-        let cfg = config::load_config(&storage.base_dir()).ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "No config found. Complete onboarding first.".to_string(),
-            )
-        })?;
-        PathBuf::from(&cfg.projects_root).join(&name)
-    };
-    if repo_path.exists() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Directory already exists: {}", name),
-        ));
-    }
-    let name_clone = name.clone();
-    let project = tokio::task::spawn_blocking(move || {
-        service::scaffold_project_blocking(name_clone, repo_path)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if let Ok(inventory) = storage.list_projects() {
-        if inventory.projects.iter().any(|p| p.name == project.name) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("A project named '{}' already exists", project.name),
-            ));
-        }
-    }
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let project = service::scaffold_project(&state.app, &name)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(project).unwrap()))
 }
 
@@ -1661,23 +1554,10 @@ async fn submit_secure_env_value(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing value".to_string()))?
         .to_string();
-    let (pending, response_tx) = secure_env::take_secure_env_submission(&state.app, &request_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let req_id = request_id.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        secure_env::update_env_file(&pending.env_path, &pending.key, &value)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {e}"),
-        )
-    })?;
-    let result = secure_env::finish_secure_env_submission(&req_id, response_tx, result)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let status = if result.created { "created" } else { "updated" };
-    Ok(Json(Value::String(status.to_string())))
+    let status = service::submit_secure_env_value(&state.app, &request_id, &value)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(Value::String(status)))
 }
 
 async fn cancel_secure_env_request(

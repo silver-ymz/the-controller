@@ -2846,6 +2846,154 @@ pub fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Pro
     })
 }
 
+/// Full scaffold orchestration: validate, check duplicates, resolve repo path,
+/// run blocking scaffold, and save the project to storage.
+pub async fn scaffold_project(state: &AppState, name: &str) -> Result<Project, AppError> {
+    tracing::info!(project_name = %name, "scaffolding new project");
+    validate_project_name(name).map_err(AppError::BadRequest)?;
+
+    let repo_path = {
+        let storage = state.storage.lock().map_err(AppError::internal)?;
+
+        // Reject duplicate project names.
+        if let Ok(inventory) = storage.list_projects() {
+            if inventory.projects.iter().any(|p| p.name == name) {
+                return Err(AppError::BadRequest(format!(
+                    "A project named '{}' already exists",
+                    name
+                )));
+            }
+        }
+
+        let cfg = config::load_config(&storage.base_dir()).ok_or_else(|| {
+            AppError::BadRequest("No config found. Complete onboarding first.".to_string())
+        })?;
+
+        Path::new(&cfg.projects_root).join(name)
+    };
+    if repo_path.exists() {
+        return Err(AppError::BadRequest(format!(
+            "Directory already exists: {}",
+            name
+        )));
+    }
+
+    let name_owned = name.to_string();
+    let project =
+        tokio::task::spawn_blocking(move || scaffold_project_blocking(name_owned, repo_path))
+            .await
+            .map_err(|e| AppError::Internal(format!("Task failed: {}", e)))?
+            .map_err(AppError::Internal)?;
+
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    if let Ok(inventory) = storage.list_projects() {
+        if inventory.projects.iter().any(|p| p.name == project.name) {
+            drop(storage);
+            return Err(AppError::Internal(rollback_scaffold_state(
+                Path::new(&project.repo_path),
+                format!("A project named '{}' already exists", project.name),
+            )));
+        }
+    }
+    storage.save_project(&project).map_err(AppError::internal)?;
+
+    Ok(project)
+}
+
+// ---------------------------------------------------------------------------
+// Secure env submission
+// ---------------------------------------------------------------------------
+
+/// Submit a secure environment value: take the pending request, write the env
+/// file, and finish the submission. Returns "created" or "updated".
+pub async fn submit_secure_env_value(
+    state: &AppState,
+    request_id: &str,
+    value: &str,
+) -> Result<String, AppError> {
+    tracing::debug!(request_id = %request_id, "submitting secure env value");
+    let (pending, response_tx) = crate::secure_env::take_secure_env_submission(state, request_id)
+        .map_err(AppError::Internal)?;
+    let request_id_owned = request_id.to_string();
+    let value_owned = value.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::secure_env::update_env_file(&pending.env_path, &pending.key, &value_owned)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Task failed: {e}")))?;
+    let result =
+        crate::secure_env::finish_secure_env_submission(&request_id_owned, response_tx, result)
+            .map_err(AppError::Internal)?;
+    Ok(if result.created {
+        "created".to_string()
+    } else {
+        "updated".to_string()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Maintainer issues (project-level wrappers)
+// ---------------------------------------------------------------------------
+
+/// Fetch maintainer issues for a project by looking up repo_path and github_repo
+/// from storage.
+pub async fn get_maintainer_issues_for_project(
+    state: &AppState,
+    project_id: Uuid,
+) -> Result<Vec<MaintainerIssue>, AppError> {
+    let (repo_path, github_repo) = {
+        let storage = state.storage.lock().map_err(AppError::internal)?;
+        let project = storage
+            .load_project(project_id)
+            .map_err(AppError::internal)?;
+        (
+            project.repo_path.clone(),
+            project.maintainer.github_repo.clone(),
+        )
+    };
+    get_maintainer_issues(&repo_path, github_repo.as_deref()).await
+}
+
+/// Fetch maintainer issue detail for a project by looking up repo_path and
+/// github_repo from storage.
+pub async fn get_maintainer_issue_detail_for_project(
+    state: &AppState,
+    project_id: Uuid,
+    issue_number: u32,
+) -> Result<MaintainerIssueDetail, AppError> {
+    let (repo_path, github_repo) = {
+        let storage = state.storage.lock().map_err(AppError::internal)?;
+        let project = storage
+            .load_project(project_id)
+            .map_err(AppError::internal)?;
+        (
+            project.repo_path.clone(),
+            project.maintainer.github_repo.clone(),
+        )
+    };
+    get_maintainer_issue_detail(&repo_path, github_repo.as_deref(), issue_number).await
+}
+
+// ---------------------------------------------------------------------------
+// Directory listing (with home-directory security check)
+// ---------------------------------------------------------------------------
+
+/// List directories at a given path, restricted to paths under `$HOME`.
+/// Used by the server to prevent arbitrary filesystem enumeration.
+pub fn list_directories_at_safe(path: &str) -> Result<Vec<config::DirEntry>, AppError> {
+    let p = Path::new(path);
+    let requested = std::fs::canonicalize(p)
+        .map_err(|e| AppError::BadRequest(format!("cannot resolve path: {}", e)))?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| AppError::Internal("cannot determine home directory".to_string()))?;
+    if !requested.starts_with(&home) {
+        return Err(AppError::Forbidden(
+            "path must be under the home directory".to_string(),
+        ));
+    }
+    list_directories_at(path)
+}
+
 // ---------------------------------------------------------------------------
 // Merge session branch
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ use std::fmt;
 #[derive(Debug)]
 pub enum AppError {
     BadRequest(String),
+    Forbidden(String),
     NotFound(String),
     Internal(String),
 }
@@ -10,7 +11,10 @@ pub enum AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BadRequest(msg) | Self::NotFound(msg) | Self::Internal(msg) => f.write_str(msg),
+            Self::BadRequest(msg)
+            | Self::Forbidden(msg)
+            | Self::NotFound(msg)
+            | Self::Internal(msg) => f.write_str(msg),
         }
     }
 }
@@ -28,6 +32,7 @@ impl From<AppError> for (axum::http::StatusCode, String) {
         use axum::http::StatusCode;
         match e {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         }

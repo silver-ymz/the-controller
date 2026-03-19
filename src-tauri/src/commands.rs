@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
@@ -106,6 +104,13 @@ pub async fn restore_sessions(state: State<'_, AppState>) -> Result<(), String> 
 /// This command is async because it may talk to the PTY broker daemon,
 /// which would block the main thread and prevent event delivery — including the
 /// alternate-screen escape sequence that xterm.js needs for correct scrolling.
+/// Connect a terminal to its PTY session at the given size.
+/// Called by each Terminal component after it measures its dimensions.
+/// No-op if the session is already connected.
+///
+/// This command is async because it may talk to the PTY broker daemon,
+/// which would block the main thread and prevent event delivery — including the
+/// alternate-screen escape sequence that xterm.js needs for correct scrolling.
 #[tauri::command]
 pub async fn connect_session(
     state: State<'_, AppState>,
@@ -116,43 +121,43 @@ pub async fn connect_session(
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
 
-    // Clone Arcs needed by the service function for spawn_blocking
+    // Clone Arcs for spawn_blocking (service::connect_session is synchronous
+    // and takes &AppState, but we need 'static ownership for the closure).
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
 
-    // Check if already connected
-    {
-        let mgr = pty_manager.lock().map_err(|e| e.to_string())?;
-        if mgr.sessions.contains_key(&id) {
-            tracing::debug!(session_id = %id, "session already connected, skipping");
-            return Ok(());
-        }
-    }
-    tracing::info!(session_id = %id, rows, cols, "connecting session to PTY");
-
-    // Find session config from storage
-    let (session_dir, kind) = {
-        let storage = storage.lock().map_err(|e| e.to_string())?;
-        let inventory = storage.list_projects().map_err(|e| e.to_string())?;
-        inventory.warn_if_corrupt("connect_session");
-        inventory
-            .projects
-            .iter()
-            .flat_map(|p| p.sessions.iter().map(move |s| (p, s)))
-            .find(|(_, s)| s.id == id)
-            .map(|(p, s)| {
-                let dir = s
-                    .worktree_path
-                    .clone()
-                    .unwrap_or_else(|| p.repo_path.clone());
-                (dir, s.kind.clone())
-            })
-            .ok_or_else(|| format!("session not found: {}", session_id))?
-    };
-
-    // Run on a background thread to avoid blocking the main thread.
     tokio::task::spawn_blocking(move || {
+        // Check if already connected
+        {
+            let mgr = pty_manager.lock().map_err(|e| e.to_string())?;
+            if mgr.sessions.contains_key(&id) {
+                tracing::debug!(session_id = %id, "session already connected, skipping");
+                return Ok(());
+            }
+        }
+        tracing::info!(session_id = %id, rows, cols, "connecting session to PTY");
+
+        // Find session config from storage
+        let (session_dir, kind) = {
+            let storage = storage.lock().map_err(|e| e.to_string())?;
+            let inventory = storage.list_projects().map_err(|e| e.to_string())?;
+            inventory.warn_if_corrupt("connect_session");
+            inventory
+                .projects
+                .iter()
+                .flat_map(|p| p.sessions.iter().map(move |s| (p, s)))
+                .find(|(_, s)| s.id == id)
+                .map(|(p, s)| {
+                    let dir = s
+                        .worktree_path
+                        .clone()
+                        .unwrap_or_else(|| p.repo_path.clone());
+                    (dir, s.kind.clone())
+                })
+                .ok_or_else(|| format!("session not found: {}", id))?
+        };
+
         let mut mgr = pty_manager.lock().map_err(|e| e.to_string())?;
         mgr.spawn_session(id, &session_dir, &kind, emitter, true, None, rows, cols)
     })
@@ -306,26 +311,9 @@ pub async fn submit_secure_env_value(
     request_id: String,
     value: String,
 ) -> Result<String, String> {
-    tracing::debug!(request_id = %request_id, "submitting secure env value");
-    let (pending, response_tx) =
-        crate::secure_env::take_secure_env_submission(&state, &request_id)?;
-    let request_id_for_blocking = request_id.clone();
-    let value_for_blocking = value;
-    let result = tokio::task::spawn_blocking(move || {
-        crate::secure_env::update_env_file(&pending.env_path, &pending.key, &value_for_blocking)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {e}"))?;
-    let result = crate::secure_env::finish_secure_env_submission(
-        &request_id_for_blocking,
-        response_tx,
-        result,
-    )?;
-    Ok(if result.created {
-        "created".to_string()
-    } else {
-        "updated".to_string()
-    })
+    crate::service::submit_secure_env_value(&state, &request_id, &value)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -491,47 +479,9 @@ pub async fn generate_architecture(
 
 #[tauri::command]
 pub async fn scaffold_project(state: State<'_, AppState>, name: String) -> Result<Project, String> {
-    tracing::info!(project_name = %name, "scaffolding new project");
-    validate_project_name(&name)?;
-
-    let repo_path = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-
-        // Reject duplicate project names.
-        if let Ok(inventory) = storage.list_projects() {
-            let existing = inventory.projects;
-            if existing.iter().any(|p| p.name == name) {
-                return Err(format!("A project named '{}' already exists", name));
-            }
-        }
-
-        let cfg = config::load_config(&storage.base_dir())
-            .ok_or_else(|| "No config found. Complete onboarding first.".to_string())?;
-
-        std::path::Path::new(&cfg.projects_root).join(&name)
-    };
-    if repo_path.exists() {
-        return Err(format!("Directory already exists: {}", name));
-    }
-
-    let project = tokio::task::spawn_blocking(move || scaffold_project_blocking(name, repo_path))
+    crate::service::scaffold_project(&state, &name)
         .await
-        .map_err(|e| format!("Task failed: {}", e))??;
-
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    if let Ok(inventory) = storage.list_projects() {
-        let existing = inventory.projects;
-        if existing.iter().any(|p| p.name == project.name) {
-            drop(storage);
-            return Err(service::rollback_scaffold_state(
-                Path::new(&project.repo_path),
-                format!("A project named '{}' already exists", project.name),
-            ));
-        }
-    }
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-
-    Ok(project)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -912,18 +862,10 @@ pub async fn get_maintainer_issues(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Vec<crate::models::MaintainerIssue>, String> {
-    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let (repo_path, github_repo) = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-        let project = storage
-            .load_project(project_id)
-            .map_err(|e| e.to_string())?;
-        (
-            project.repo_path.clone(),
-            project.maintainer.github_repo.clone(),
-        )
-    };
-    github::get_maintainer_issues(repo_path, github_repo).await
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    crate::service::get_maintainer_issues_for_project(&state, project_uuid)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -932,18 +874,10 @@ pub async fn get_maintainer_issue_detail(
     project_id: String,
     issue_number: u32,
 ) -> Result<crate::models::MaintainerIssueDetail, String> {
-    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let (repo_path, github_repo) = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-        let project = storage
-            .load_project(project_id)
-            .map_err(|e| e.to_string())?;
-        (
-            project.repo_path.clone(),
-            project.maintainer.github_repo.clone(),
-        )
-    };
-    github::get_maintainer_issue_detail(repo_path, github_repo, issue_number).await
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    crate::service::get_maintainer_issue_detail_for_project(&state, project_uuid, issue_number)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
