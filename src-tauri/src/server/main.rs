@@ -14,7 +14,6 @@ use axum::{
 };
 use serde_json::Value;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 use the_controller_lib::{
     architecture, config, deploy, emitter::WsBroadcastEmitter, models, note_ai_chat, secure_env,

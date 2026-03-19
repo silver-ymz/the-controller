@@ -2020,9 +2020,10 @@ selection_background #444444
     #[test]
     fn test_trigger_maintainer_check_uses_spawn_blocking() {
         // The blocking work now lives in service::trigger_maintainer_check
-        let source =
-            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs"))
-                .expect("read service source");
+        let source = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service/maintainer.rs"),
+        )
+        .expect("read service source");
         let start = source
             .find("pub async fn trigger_maintainer_check")
             .expect("find trigger_maintainer_check");
