@@ -57,12 +57,14 @@ pub struct ParsedParam {
     pub name: Ident,
     pub kind: ParamKind,
     /// The original type from the signature (used in error messages).
+    #[allow(dead_code)] // reserved for future diagnostics
     pub original_ty: Type,
 }
 
 /// Fully parsed service function, ready for code generation.
 pub struct ParsedService {
     pub fn_name: Ident,
+    #[allow(dead_code)] // reserved for visibility-aware generation
     pub vis: syn::Visibility,
     pub params: Vec<ParsedParam>,
     /// The `T` in `Result<T, AppError>`.
