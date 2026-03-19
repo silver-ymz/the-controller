@@ -1,13 +1,11 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
 
-use crate::emitter::EventEmitter;
 use crate::error::AppError;
 use crate::models::{CommitInfo, GithubIssue, SavedPrompt, SessionConfig, StagedSession};
-use crate::pty_manager::PtyManager;
 use crate::state::AppState;
+#[allow(unused_imports)]
 use crate::storage::Storage;
 use crate::token_usage::{self, TokenDataPoint};
 use crate::worktree::WorktreeManager;
@@ -100,11 +98,9 @@ pub fn kill_process_group(pid: u32) {
 /// Run storage migrations on startup (worktree path format, etc.).
 /// PTY connections are deferred to `connect_session` so each terminal
 /// can attach at the correct size.
-///
-/// Takes `&Arc<Mutex<Storage>>` so callers can clone it for `spawn_blocking`.
-pub fn restore_sessions(storage: &Arc<Mutex<Storage>>) -> Result<(), AppError> {
+pub fn restore_sessions(state: &AppState) -> Result<(), AppError> {
     tracing::info!("restoring sessions from storage");
-    let storage = storage.lock().map_err(AppError::internal)?;
+    let storage = state.storage.lock().map_err(AppError::internal)?;
     let inventory = storage.list_projects().map_err(AppError::internal)?;
     inventory.warn_if_corrupt("restore_sessions");
     // Migrate worktree paths from UUID-based to name-based directories
@@ -123,20 +119,15 @@ pub fn restore_sessions(storage: &Arc<Mutex<Storage>>) -> Result<(), AppError> {
 /// Connect a terminal to its PTY session at the given size.
 /// This is synchronous — callers that need non-blocking behaviour should
 /// wrap in `spawn_blocking`.
-///
-/// Takes individual `Arc` fields instead of `&AppState` so that callers can
-/// clone them before entering a `spawn_blocking` closure.
 pub fn connect_session(
-    storage: &Arc<Mutex<Storage>>,
-    pty_manager: &Arc<Mutex<PtyManager>>,
-    emitter: &Arc<dyn EventEmitter>,
+    state: &AppState,
     session_id: Uuid,
     rows: u16,
     cols: u16,
 ) -> Result<(), AppError> {
     // Check if already connected
     {
-        let pty_manager = pty_manager.lock().map_err(AppError::internal)?;
+        let pty_manager = state.pty_manager.lock().map_err(AppError::internal)?;
         if pty_manager.sessions.contains_key(&session_id) {
             tracing::debug!(session_id = %session_id, "session already connected, skipping");
             return Ok(());
@@ -146,7 +137,7 @@ pub fn connect_session(
 
     // Find session config from storage
     let (session_dir, kind) = {
-        let storage = storage.lock().map_err(AppError::internal)?;
+        let storage = state.storage.lock().map_err(AppError::internal)?;
         let inventory = storage.list_projects().map_err(AppError::internal)?;
         inventory.warn_if_corrupt("connect_session");
         inventory
@@ -164,7 +155,7 @@ pub fn connect_session(
             .ok_or_else(|| AppError::NotFound(format!("session not found: {}", session_id)))?
     };
 
-    let mut mgr = pty_manager.lock().map_err(AppError::internal)?;
+    let mut mgr = state.pty_manager.lock().map_err(AppError::internal)?;
     // Definitive check under lock to prevent double-spawn race (TOCTOU)
     if mgr.sessions.contains_key(&session_id) {
         tracing::debug!(session_id = %session_id, "session connected by concurrent request, skipping");
@@ -174,7 +165,7 @@ pub fn connect_session(
         session_id,
         &session_dir,
         &kind,
-        emitter.clone(),
+        state.emitter.clone(),
         true,
         None,
         rows,
@@ -185,14 +176,9 @@ pub fn connect_session(
 
 /// Create a new session. This is synchronous (blocking) — callers that need
 /// non-blocking behaviour should wrap in `spawn_blocking`.
-///
-/// Takes individual `Arc` fields instead of `&AppState` so that callers can
-/// clone them before entering a `spawn_blocking` closure.
 #[allow(clippy::too_many_arguments)]
 pub fn create_session(
-    storage: &Arc<Mutex<Storage>>,
-    pty_manager: &Arc<Mutex<PtyManager>>,
-    emitter: &Arc<dyn EventEmitter>,
+    state: &AppState,
     project_id: Uuid,
     session_id: Uuid,
     kind: &str,
@@ -212,7 +198,7 @@ pub fn create_session(
 
     // Load the project and generate session label
     let (repo_path, label, base_dir, project_name) = {
-        let storage = storage.lock().map_err(AppError::internal)?;
+        let storage = state.storage.lock().map_err(AppError::internal)?;
         let project = storage
             .load_project(project_id)
             .map_err(AppError::internal)?;
@@ -275,7 +261,7 @@ pub fn create_session(
 
     // Save session config to storage, then spawn PTY (with rollback on failure)
     {
-        let storage = storage.lock().map_err(AppError::internal)?;
+        let storage = state.storage.lock().map_err(AppError::internal)?;
         let mut project = storage
             .load_project(project_id)
             .map_err(AppError::internal)?;
@@ -284,12 +270,12 @@ pub fn create_session(
     }
 
     let spawn_result = {
-        let mut mgr = pty_manager.lock().map_err(AppError::internal)?;
+        let mut mgr = state.pty_manager.lock().map_err(AppError::internal)?;
         mgr.spawn_session(
             session_id,
             &session_dir,
             kind,
-            emitter.clone(),
+            state.emitter.clone(),
             false,
             initial_prompt.as_deref(),
             24,
@@ -300,7 +286,7 @@ pub fn create_session(
     if let Err(ref spawn_err) = spawn_result {
         tracing::error!(session_id = %session_id, error = %spawn_err, "session PTY spawn failed, rolling back");
         // Rollback: remove session from storage
-        if let Ok(storage) = storage.lock() {
+        if let Ok(storage) = state.storage.lock() {
             if let Ok(mut project) = storage.load_project(project_id) {
                 project.sessions.retain(|session| session.id != session_id);
                 let _ = storage.save_project(&project);
@@ -829,11 +815,11 @@ pub fn discover_branch_commits(worktree_path: &str) -> Result<Vec<CommitInfo>, S
 
 /// Get commits for a session, merging stored done_commits with newly discovered ones.
 pub fn get_session_commits(
-    storage: &Arc<Mutex<Storage>>,
+    state: &AppState,
     project_id: Uuid,
     session_id: Uuid,
 ) -> Result<Vec<CommitInfo>, AppError> {
-    let storage = storage.lock().map_err(AppError::internal)?;
+    let storage = state.storage.lock().map_err(AppError::internal)?;
     let project = storage
         .load_project(project_id)
         .map_err(AppError::internal)?;
@@ -871,11 +857,11 @@ pub fn get_session_commits(
 
 /// Get token usage data for a session.
 pub fn get_session_token_usage(
-    storage: &Arc<Mutex<Storage>>,
+    state: &AppState,
     project_id: Uuid,
     session_id: Uuid,
 ) -> Result<Vec<TokenDataPoint>, AppError> {
-    let storage = storage.lock().map_err(AppError::internal)?;
+    let storage = state.storage.lock().map_err(AppError::internal)?;
     let project = storage
         .load_project(project_id)
         .map_err(AppError::internal)?;

@@ -113,9 +113,8 @@ pub(crate) use crate::service::wait_for_merge_rebase_resolution;
 /// PTY connections are deferred to `connect_session` so each terminal
 /// can attach at the correct size.
 #[tauri::command]
-pub async fn restore_sessions(state: State<'_, AppState>) -> Result<(), String> {
-    let storage = state.storage.clone();
-    tauri_blocking!(move || crate::service::restore_sessions(&storage).map_err(|e| e.to_string()))
+pub fn restore_sessions(state: State<AppState>) -> Result<(), String> {
+    crate::service::restore_sessions(&state).map_err(|e| e.to_string())
 }
 
 /// Connect a terminal to its PTY session at the given size.
@@ -135,17 +134,15 @@ pub async fn connect_session(
 ) -> Result<(), String> {
     let id = parse_uuid(&session_id)?;
 
-    // Clone Arcs for spawn_blocking (service::connect_session is synchronous
-    // and takes individual Arc fields for 'static ownership in the closure).
-    // Not using tauri_blocking! here — the join-error path logs the session
-    // ID for structured debugging, which the macro cannot express.
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
 
     tokio::task::spawn_blocking(move || {
-        service::connect_session(&storage, &pty_manager, &emitter, id, rows, cols)
-            .map_err(|e| e.to_string())
+        // Reconstruct an AppState-like struct for the service call inside spawn_blocking.
+        // We clone the Arc fields so they can be moved into the 'static closure.
+        let inner_state = crate::state::AppState::from_arcs(storage, pty_manager, emitter);
+        service::connect_session(&inner_state, id, rows, cols).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| {
@@ -178,19 +175,13 @@ pub fn list_projects(state: State<AppState>) -> Result<ProjectInventory, String>
 }
 
 #[tauri::command]
-pub async fn delete_project(
-    state: State<'_, AppState>,
+pub fn delete_project(
+    state: State<AppState>,
     project_id: String,
     delete_repo: bool,
 ) -> Result<(), String> {
     let id = parse_uuid(&project_id)?;
-    let storage = state.storage.clone();
-    let pty_manager = state.pty_manager.clone();
-
-    tauri_blocking!(move || {
-        crate::service::delete_project(&storage, &pty_manager, id, delete_repo)
-            .map_err(|e| e.to_string())
-    })
+    crate::service::delete_project(&state, id, delete_repo).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -229,10 +220,9 @@ pub async fn create_session(
     let emitter = state.emitter.clone();
 
     tauri_blocking!(move || {
+        let inner_state = crate::state::AppState::from_arcs(storage, pty_manager, emitter);
         crate::service::create_session(
-            &storage,
-            &pty_manager,
-            &emitter,
+            &inner_state,
             project_uuid,
             session_id,
             &kind,
@@ -367,22 +357,14 @@ pub fn close_session(
 }
 
 #[tauri::command]
-pub async fn start_claude_login(
-    state: State<'_, AppState>,
-    _app_handle: AppHandle,
-) -> Result<String, String> {
-    let pty_manager = state.pty_manager.clone();
-    let emitter = state.emitter.clone();
-
-    tauri_blocking!(move || {
-        crate::service::start_claude_login(&pty_manager, emitter).map_err(|e| e.to_string())
-    })
+pub fn start_claude_login(state: State<AppState>) -> Result<String, String> {
+    crate::service::start_claude_login(&state).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn stop_claude_login(state: State<AppState>, session_id: String) -> Result<(), String> {
     let id = parse_uuid(&session_id)?;
-    crate::service::stop_claude_login(&state.pty_manager, id).map_err(|e| e.to_string())
+    crate::service::stop_claude_login(&state, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -401,13 +383,10 @@ pub fn save_onboarding_config(state: State<AppState>, projects_root: String) -> 
 }
 
 #[tauri::command]
-pub async fn load_terminal_theme(
-    state: State<'_, AppState>,
+pub fn load_terminal_theme(
+    state: State<AppState>,
 ) -> Result<terminal_theme::TerminalTheme, String> {
-    let storage = state.storage.clone();
-    tauri_blocking!(
-        move || service::load_terminal_theme_blocking(&storage).map_err(|e| e.to_string())
-    )
+    service::load_terminal_theme_blocking(&state).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -431,14 +410,11 @@ pub async fn generate_project_names(description: String) -> Result<Vec<String>, 
 }
 
 #[tauri::command]
-pub async fn generate_architecture(
-    state: State<'_, AppState>,
+pub fn generate_architecture(
+    state: State<AppState>,
     repo_path: String,
 ) -> Result<ArchitectureResult, String> {
-    let emitter = state.emitter.clone();
-    tauri_blocking!(
-        move || service::generate_architecture(&repo_path, &emitter).map_err(|e| e.to_string())
-    )
+    service::generate_architecture(&state, &repo_path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -539,127 +515,115 @@ pub async fn capture_app_screenshot(app: AppHandle, cropped: bool) -> Result<Str
 }
 
 #[tauri::command]
-pub async fn list_notes(
+pub fn list_notes(
     state: State<'_, AppState>,
     folder: String,
 ) -> Result<Vec<crate::notes::NoteEntry>, String> {
-    notes::list_notes(state, folder).await
+    notes::list_notes(state, folder)
 }
 
 #[tauri::command]
-pub async fn read_note(
+pub fn read_note(
     state: State<'_, AppState>,
     folder: String,
     filename: String,
 ) -> Result<String, String> {
-    notes::read_note(state, folder, filename).await
+    notes::read_note(state, folder, filename)
 }
 
 #[tauri::command]
-pub async fn write_note(
+pub fn write_note(
     state: State<'_, AppState>,
     folder: String,
     filename: String,
     content: String,
 ) -> Result<(), String> {
-    notes::write_note(state, folder, filename, content).await
+    notes::write_note(state, folder, filename, content)
 }
 
 #[tauri::command]
-pub async fn create_note(
+pub fn create_note(
     state: State<'_, AppState>,
     folder: String,
     title: String,
 ) -> Result<String, String> {
-    notes::create_note(state, folder, title).await
+    notes::create_note(state, folder, title)
 }
 
 #[tauri::command]
-pub async fn rename_note(
+pub fn rename_note(
     state: State<'_, AppState>,
     folder: String,
     old_name: String,
     new_name: String,
 ) -> Result<String, String> {
-    notes::rename_note(state, folder, old_name, new_name).await
+    notes::rename_note(state, folder, old_name, new_name)
 }
 
 #[tauri::command]
-pub async fn duplicate_note(
+pub fn duplicate_note(
     state: State<'_, AppState>,
     folder: String,
     filename: String,
 ) -> Result<String, String> {
-    notes::duplicate_note(state, folder, filename).await
+    notes::duplicate_note(state, folder, filename)
 }
 
 #[tauri::command]
-pub async fn delete_note(
+pub fn delete_note(
     state: State<'_, AppState>,
     folder: String,
     filename: String,
 ) -> Result<(), String> {
-    notes::delete_note(state, folder, filename).await
+    notes::delete_note(state, folder, filename)
 }
 
 #[tauri::command]
-pub async fn list_folders(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    notes::list_folders(state).await
+pub fn list_folders(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    notes::list_folders(state)
 }
 
 #[tauri::command]
-pub async fn create_folder(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    notes::create_folder(state, name).await
+pub fn create_folder(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    notes::create_folder(state, name)
 }
 
 #[tauri::command]
-pub async fn rename_folder(
+pub fn rename_folder(
     state: State<'_, AppState>,
     old_name: String,
     new_name: String,
 ) -> Result<(), String> {
-    notes::rename_folder(state, old_name, new_name).await
+    notes::rename_folder(state, old_name, new_name)
 }
 
 #[tauri::command]
-pub async fn delete_folder(
-    state: State<'_, AppState>,
-    name: String,
-    force: bool,
-) -> Result<(), String> {
-    notes::delete_folder(state, name, force).await
+pub fn delete_folder(state: State<'_, AppState>, name: String, force: bool) -> Result<(), String> {
+    notes::delete_folder(state, name, force)
 }
 
 #[tauri::command]
-pub async fn commit_notes(state: State<'_, AppState>) -> Result<bool, String> {
-    notes::commit_notes(state).await
+pub fn commit_notes(state: State<'_, AppState>) -> Result<bool, String> {
+    notes::commit_notes(state)
 }
 
 #[tauri::command]
-pub async fn save_note_image(
+pub fn save_note_image(
     state: State<'_, AppState>,
     folder: String,
     image_bytes: Vec<u8>,
     extension: String,
 ) -> Result<String, String> {
-    let storage = state.storage.clone();
-    tauri_blocking!(move || {
-        service::save_note_image(&storage, &folder, &image_bytes, &extension)
-            .map_err(|e| e.to_string())
-    })
+    service::save_note_image(&state, &folder, &image_bytes, &extension).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn resolve_note_asset_path(
+pub fn resolve_note_asset_path(
     state: State<'_, AppState>,
     folder: String,
     relative_path: String,
 ) -> Result<String, String> {
-    let storage = state.storage.clone();
-    tauri_blocking!(move || {
-        service::resolve_note_asset_path(&storage, &folder, &relative_path)
-            .map_err(|e| e.to_string())
-    })
+    service::resolve_note_asset_path(&state, &folder, &relative_path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -694,10 +658,13 @@ pub async fn get_session_commits(
     session_id: String,
 ) -> Result<Vec<CommitInfo>, String> {
     let storage = state.storage.clone();
+    let pty_manager = state.pty_manager.clone();
+    let emitter = state.emitter.clone();
     tauri_blocking!(move || {
         let project_uuid = parse_uuid(&project_id)?;
         let session_uuid = parse_uuid(&session_id)?;
-        service::get_session_commits(&storage, project_uuid, session_uuid)
+        let inner_state = crate::state::AppState::from_arcs(storage, pty_manager, emitter);
+        service::get_session_commits(&inner_state, project_uuid, session_uuid)
             .map_err(|e| e.to_string())
     })
 }
@@ -709,10 +676,13 @@ pub async fn get_session_token_usage(
     session_id: String,
 ) -> Result<Vec<TokenDataPoint>, String> {
     let storage = state.storage.clone();
+    let pty_manager = state.pty_manager.clone();
+    let emitter = state.emitter.clone();
     tauri_blocking!(move || {
         let project_uuid = parse_uuid(&project_id)?;
         let session_uuid = parse_uuid(&session_id)?;
-        service::get_session_token_usage(&storage, project_uuid, session_uuid)
+        let inner_state = crate::state::AppState::from_arcs(storage, pty_manager, emitter);
+        service::get_session_token_usage(&inner_state, project_uuid, session_uuid)
             .map_err(|e| e.to_string())
     })
 }
@@ -1029,8 +999,8 @@ mod tests {
         fs::create_dir_all(&projects_root).expect("create projects root");
         let state = make_test_state(tmp.path(), &projects_root);
 
-        let theme = run_async_test(load_terminal_theme(state_from_ref(&state)))
-            .expect("theme command should succeed");
+        let theme =
+            load_terminal_theme(state_from_ref(&state)).expect("theme command should succeed");
 
         assert_eq!(theme.background, "#000000");
         assert_eq!(theme.foreground, "#e0e0e0");
@@ -1055,8 +1025,8 @@ selection_background #444444
         .expect("write theme file");
         let state = make_test_state(tmp.path(), &projects_root);
 
-        let theme = run_async_test(load_terminal_theme(state_from_ref(&state)))
-            .expect("theme command should succeed");
+        let theme =
+            load_terminal_theme(state_from_ref(&state)).expect("theme command should succeed");
 
         assert_eq!(theme.background, "#121212");
         assert_eq!(theme.foreground, "#f0f0f0");

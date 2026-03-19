@@ -137,6 +137,32 @@ impl AppState {
     pub fn new(emitter: Arc<dyn EventEmitter>) -> std::io::Result<Self> {
         Self::from_storage(Storage::with_default_path()?, emitter)
     }
+
+    /// Build a lightweight `AppState` from pre-existing `Arc` fields.
+    ///
+    /// Intended for `spawn_blocking` closures that need to call service
+    /// functions taking `&AppState` but cannot borrow the original state
+    /// across the `'static` boundary. Only the three core fields (storage,
+    /// pty_manager, emitter) are shared; the remaining fields are
+    /// default-initialised stubs that the called service functions never
+    /// touch.
+    pub fn from_arcs(
+        storage: Arc<Mutex<Storage>>,
+        pty_manager: Arc<Mutex<PtyManager>>,
+        emitter: Arc<dyn EventEmitter>,
+    ) -> Self {
+        Self {
+            storage,
+            pty_manager,
+            emitter,
+            issue_cache: Arc::new(Mutex::new(IssueCache::new())),
+            secure_env_request: Mutex::new(None),
+            staging_lock: TokioMutex::new(()),
+            voice_pipeline: Arc::new(TokioMutex::new(None)),
+            frontend_log: Mutex::new(None),
+            voice_generation: AtomicU64::new(0),
+        }
+    }
 }
 
 #[cfg(test)]

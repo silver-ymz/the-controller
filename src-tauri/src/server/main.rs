@@ -781,7 +781,7 @@ async fn check_onboarding(
 async fn restore_sessions(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    service::restore_sessions(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
+    service::restore_sessions(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -791,15 +791,8 @@ async fn connect_session(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let id = parse_uuid(&req.session_id)?;
 
-    service::connect_session(
-        &state.app.storage,
-        &state.app.pty_manager,
-        &state.app.emitter,
-        id,
-        req.rows,
-        req.cols,
-    )
-    .map_err(<(StatusCode, String)>::from)?;
+    service::connect_session(&state.app, id, req.rows, req.cols)
+        .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
@@ -863,9 +856,7 @@ async fn create_session(
     let project_uuid = parse_uuid(&req.project_id)?;
     let session_id = uuid::Uuid::new_v4();
 
-    let storage = state.app.storage.clone();
-    let pty_manager = state.app.pty_manager.clone();
-    let emitter = state.app.emitter.clone();
+    let app = state.app.clone();
     let kind = req.kind;
     let github_issue = req.github_issue;
     let background = req.background;
@@ -873,9 +864,7 @@ async fn create_session(
 
     let result = spawn_blocking_handler!(move || {
         service::create_session(
-            &storage,
-            &pty_manager,
-            &emitter,
+            &app,
             project_uuid,
             session_id,
             &kind,
@@ -892,10 +881,9 @@ async fn generate_architecture(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<RepoPathRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let emitter = state.app.emitter.clone();
-    let result = spawn_blocking_handler!(move || {
-        service::generate_architecture(&req.repo_path, &emitter)
-    })?;
+    let app = state.app.clone();
+    let result =
+        spawn_blocking_handler!(move || { service::generate_architecture(&app, &req.repo_path) })?;
     ok_json(result)
 }
 
@@ -914,13 +902,8 @@ async fn delete_project(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let id = parse_uuid(&req.project_id)?;
 
-    service::delete_project(
-        &state.app.storage,
-        &state.app.pty_manager,
-        id,
-        req.delete_repo,
-    )
-    .map_err(<(StatusCode, String)>::from)?;
+    service::delete_project(&state.app, id, req.delete_repo)
+        .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
@@ -1083,8 +1066,8 @@ async fn toggle_voice_pause(
 async fn load_terminal_theme(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state.app.storage.clone();
-    let theme = spawn_blocking_handler!(move || service::load_terminal_theme_blocking(&storage))?;
+    let app = state.app.clone();
+    let theme = spawn_blocking_handler!(move || service::load_terminal_theme_blocking(&app))?;
     ok_json(theme)
 }
 
@@ -1142,8 +1125,8 @@ async fn api_list_notes(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<FolderRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let entries = service::list_notes(&state.app.storage, &req.folder)
-        .map_err(<(StatusCode, String)>::from)?;
+    let entries =
+        service::list_notes(&state.app, &req.folder).map_err(<(StatusCode, String)>::from)?;
     ok_json(entries)
 }
 
@@ -1151,7 +1134,7 @@ async fn api_read_note(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<FolderFilenameRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let content = service::read_note(&state.app.storage, &req.folder, &req.filename)
+    let content = service::read_note(&state.app, &req.folder, &req.filename)
         .map_err(<(StatusCode, String)>::from)?;
     ok_json(content)
 }
@@ -1160,7 +1143,7 @@ async fn api_write_note(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<WriteNoteRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    service::write_note(&state.app.storage, &req.folder, &req.filename, &req.content)
+    service::write_note(&state.app, &req.folder, &req.filename, &req.content)
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
@@ -1169,7 +1152,7 @@ async fn api_create_note(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<CreateNoteRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let filename = service::create_note(&state.app.storage, &req.folder, &req.title)
+    let filename = service::create_note(&state.app, &req.folder, &req.title)
         .map_err(<(StatusCode, String)>::from)?;
     ok_json(filename)
 }
@@ -1178,7 +1161,7 @@ async fn api_delete_note(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<FolderFilenameRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    service::delete_note(&state.app.storage, &req.folder, &req.filename)
+    service::delete_note(&state.app, &req.folder, &req.filename)
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
@@ -1187,21 +1170,15 @@ async fn api_rename_note(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<RenameNoteRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let filename = service::rename_note(
-        &state.app.storage,
-        &req.folder,
-        &req.old_name,
-        &req.new_name,
-    )
-    .map_err(<(StatusCode, String)>::from)?;
+    let filename = service::rename_note(&state.app, &req.folder, &req.old_name, &req.new_name)
+        .map_err(<(StatusCode, String)>::from)?;
     ok_json(filename)
 }
 
 async fn api_list_folders(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let folders =
-        service::list_note_folders(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
+    let folders = service::list_note_folders(&state.app).map_err(<(StatusCode, String)>::from)?;
     ok_json(folders)
 }
 
@@ -1209,8 +1186,7 @@ async fn api_create_folder(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<NameRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    service::create_note_folder(&state.app.storage, &req.name)
-        .map_err(<(StatusCode, String)>::from)?;
+    service::create_note_folder(&state.app, &req.name).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1218,7 +1194,7 @@ async fn api_rename_folder(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<RenameFolderRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    service::rename_note_folder(&state.app.storage, &req.old_name, &req.new_name)
+    service::rename_note_folder(&state.app, &req.old_name, &req.new_name)
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
@@ -1227,7 +1203,7 @@ async fn api_delete_folder(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<DeleteFolderRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    service::delete_note_folder(&state.app.storage, &req.name, req.force)
+    service::delete_note_folder(&state.app, &req.name, req.force)
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
@@ -1236,7 +1212,7 @@ async fn api_commit_notes(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let committed =
-        service::commit_pending_notes(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
+        service::commit_pending_notes(&state.app).map_err(<(StatusCode, String)>::from)?;
     ok_json(committed)
 }
 
@@ -1459,9 +1435,9 @@ async fn get_session_commits(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let project_uuid = parse_uuid(&req.project_id)?;
     let session_uuid = parse_uuid(&req.session_id)?;
-    let storage = state.app.storage.clone();
+    let app = state.app.clone();
     let commits = spawn_blocking_handler!(move || {
-        service::get_session_commits(&storage, project_uuid, session_uuid)
+        service::get_session_commits(&app, project_uuid, session_uuid)
     })?;
     ok_json(commits)
 }
@@ -1501,9 +1477,9 @@ async fn get_session_token_usage(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let project_uuid = parse_uuid(&req.project_id)?;
     let session_uuid = parse_uuid(&req.session_id)?;
-    let storage = state.app.storage.clone();
+    let app = state.app.clone();
     let data = spawn_blocking_handler!(move || {
-        service::get_session_token_usage(&storage, project_uuid, session_uuid)
+        service::get_session_token_usage(&app, project_uuid, session_uuid)
     })?;
     ok_json(data)
 }
@@ -1593,13 +1569,9 @@ async fn api_save_note_image(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<SaveNoteImageRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let filename = service::save_note_image(
-        &state.app.storage,
-        &req.folder,
-        &req.image_bytes,
-        &req.extension,
-    )
-    .map_err(<(StatusCode, String)>::from)?;
+    let filename =
+        service::save_note_image(&state.app, &req.folder, &req.image_bytes, &req.extension)
+            .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(filename)))
 }
 
@@ -1607,9 +1579,8 @@ async fn api_resolve_note_asset_path(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ResolveNoteAssetPathRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let resolved =
-        service::resolve_note_asset_path(&state.app.storage, &req.folder, &req.relative_path)
-            .map_err(<(StatusCode, String)>::from)?;
+    let resolved = service::resolve_note_asset_path(&state.app, &req.folder, &req.relative_path)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(resolved)))
 }
 
@@ -1617,7 +1588,7 @@ async fn api_duplicate_note(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<FolderFilenameRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let copy = service::duplicate_note(&state.app.storage, &req.folder, &req.filename)
+    let copy = service::duplicate_note(&state.app, &req.folder, &req.filename)
         .map_err(<(StatusCode, String)>::from)?;
     ok_json(copy)
 }
@@ -1627,8 +1598,8 @@ async fn api_duplicate_note(
 async fn start_claude_login(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let session_id = service::start_claude_login(&state.app.pty_manager, state.app.emitter.clone())
-        .map_err(<(StatusCode, String)>::from)?;
+    let session_id =
+        service::start_claude_login(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(session_id)))
 }
 
@@ -1637,7 +1608,7 @@ async fn stop_claude_login(
     Json(req): Json<SessionIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let id = parse_uuid(&req.session_id)?;
-    service::stop_claude_login(&state.app.pty_manager, id).map_err(<(StatusCode, String)>::from)?;
+    service::stop_claude_login(&state.app, id).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 

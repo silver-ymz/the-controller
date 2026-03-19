@@ -1,13 +1,11 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::models::Project;
-use crate::pty_manager::PtyManager;
 use crate::state::AppState;
-use crate::storage::{ProjectInventory, Storage};
+use crate::storage::ProjectInventory;
 use crate::worktree::WorktreeManager;
 use the_controller_macros::derive_handlers;
 
@@ -153,25 +151,21 @@ pub fn load_project(state: &AppState, name: &str, repo_path: &str) -> Result<Pro
 
 /// Delete a project. This is synchronous — callers that need non-blocking
 /// behaviour (e.g. the Tauri command) should wrap in `spawn_blocking`.
-///
-/// Takes the individual `Arc` fields instead of `&AppState` so that callers
-/// can clone them before entering a `spawn_blocking` closure.
 pub fn delete_project(
-    storage: &Arc<Mutex<Storage>>,
-    pty_manager: &Arc<Mutex<PtyManager>>,
+    state: &AppState,
     project_id: Uuid,
     delete_repo: bool,
 ) -> Result<(), AppError> {
     tracing::info!(project_id = %project_id, delete_repo, "deleting project");
 
-    let storage = storage.lock().map_err(AppError::internal)?;
+    let storage = state.storage.lock().map_err(AppError::internal)?;
     let project = storage
         .load_project(project_id)
         .map_err(AppError::internal)?;
 
     // Close all PTY sessions and clean up worktrees
     {
-        let mut pty_manager = pty_manager.lock().map_err(AppError::internal)?;
+        let mut pty_manager = state.pty_manager.lock().map_err(AppError::internal)?;
         for session in &project.sessions {
             let _ = pty_manager.close_session(session.id);
             if let (Some(wt_path), Some(branch)) =

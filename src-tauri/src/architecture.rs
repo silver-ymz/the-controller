@@ -2449,11 +2449,12 @@ That should be enough to render the view."#;
     }
 
     #[test]
-    fn generate_architecture_command_uses_spawn_blocking() {
+    fn generate_architecture_command_delegates_to_service() {
         let commands_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands.rs");
         let source = fs::read_to_string(commands_path).expect("read commands source");
         let start = source
-            .find("pub async fn generate_architecture")
+            .find("pub fn generate_architecture")
+            .or_else(|| source.find("pub async fn generate_architecture"))
             .expect("find generate_architecture");
         let rest = &source[start..];
         let end = rest
@@ -2462,8 +2463,8 @@ That should be enough to render the view."#;
         let function_body = &rest[..end];
 
         assert!(
-            function_body.contains("spawn_blocking") || function_body.contains("tauri_blocking!"),
-            "generate_architecture must offload repo scanning and codex exec with spawn_blocking"
+            function_body.contains("service::generate_architecture"),
+            "generate_architecture must delegate to the service layer"
         );
     }
 
