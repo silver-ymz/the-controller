@@ -27,3 +27,8 @@ pub async fn submit_secure_env_value(
         "updated".to_string()
     })
 }
+
+/// Cancel a pending secure environment request.
+pub fn cancel_secure_env_request(state: &AppState, request_id: &str) -> Result<(), AppError> {
+    crate::secure_env::cancel_secure_env_request(state, request_id).map_err(AppError::Internal)
+}

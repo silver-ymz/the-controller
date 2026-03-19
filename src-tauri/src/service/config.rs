@@ -56,10 +56,23 @@ pub fn save_onboarding_config(
 /// Load the terminal theme from the config directory.
 /// This reads files and should be called from a blocking context.
 pub fn load_terminal_theme_blocking(
-    state: &AppState,
+    storage: &std::sync::Arc<std::sync::Mutex<crate::storage::Storage>>,
 ) -> Result<terminal_theme::TerminalTheme, AppError> {
-    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
     terminal_theme::load_terminal_theme(&base_dir).map_err(AppError::internal)
+}
+
+/// Generate an architecture document for the repository.
+/// This is CPU-bound and should be called from a blocking context.
+pub fn generate_architecture(
+    repo_path: &str,
+    emitter: &std::sync::Arc<dyn crate::emitter::EventEmitter>,
+) -> Result<crate::architecture::ArchitectureResult, AppError> {
+    crate::architecture::generate_architecture_blocking_with_emitter(
+        std::path::Path::new(repo_path),
+        emitter,
+    )
+    .map_err(AppError::Internal)
 }
 
 /// Load keybindings from the config directory.

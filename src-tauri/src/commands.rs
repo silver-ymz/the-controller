@@ -1,7 +1,7 @@
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use crate::architecture::{generate_architecture_blocking_with_emitter, ArchitectureResult};
+use crate::architecture::ArchitectureResult;
 use crate::config;
 use crate::models::{AutoWorkerQueueIssue, CommitInfo, Project};
 use crate::service;
@@ -104,13 +104,6 @@ pub async fn restore_sessions(state: State<'_, AppState>) -> Result<(), String> 
 /// This command is async because it may talk to the PTY broker daemon,
 /// which would block the main thread and prevent event delivery — including the
 /// alternate-screen escape sequence that xterm.js needs for correct scrolling.
-/// Connect a terminal to its PTY session at the given size.
-/// Called by each Terminal component after it measures its dimensions.
-/// No-op if the session is already connected.
-///
-/// This command is async because it may talk to the PTY broker daemon,
-/// which would block the main thread and prevent event delivery — including the
-/// alternate-screen escape sequence that xterm.js needs for correct scrolling.
 #[tauri::command]
 pub async fn connect_session(
     state: State<'_, AppState>,
@@ -122,44 +115,14 @@ pub async fn connect_session(
     let id = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
 
     // Clone Arcs for spawn_blocking (service::connect_session is synchronous
-    // and takes &AppState, but we need 'static ownership for the closure).
+    // and takes individual Arc fields for 'static ownership in the closure).
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
 
     tokio::task::spawn_blocking(move || {
-        // Check if already connected
-        {
-            let mgr = pty_manager.lock().map_err(|e| e.to_string())?;
-            if mgr.sessions.contains_key(&id) {
-                tracing::debug!(session_id = %id, "session already connected, skipping");
-                return Ok(());
-            }
-        }
-        tracing::info!(session_id = %id, rows, cols, "connecting session to PTY");
-
-        // Find session config from storage
-        let (session_dir, kind) = {
-            let storage = storage.lock().map_err(|e| e.to_string())?;
-            let inventory = storage.list_projects().map_err(|e| e.to_string())?;
-            inventory.warn_if_corrupt("connect_session");
-            inventory
-                .projects
-                .iter()
-                .flat_map(|p| p.sessions.iter().map(move |s| (p, s)))
-                .find(|(_, s)| s.id == id)
-                .map(|(p, s)| {
-                    let dir = s
-                        .worktree_path
-                        .clone()
-                        .unwrap_or_else(|| p.repo_path.clone());
-                    (dir, s.kind.clone())
-                })
-                .ok_or_else(|| format!("session not found: {}", id))?
-        };
-
-        let mut mgr = pty_manager.lock().map_err(|e| e.to_string())?;
-        mgr.spawn_session(id, &session_dir, &kind, emitter, true, None, rows, cols)
+        service::connect_session(&storage, &pty_manager, &emitter, id, rows, cols)
+            .map_err(Into::into)
     })
     .await
     .map_err(|e| {
@@ -318,7 +281,7 @@ pub async fn submit_secure_env_value(
 
 #[tauri::command]
 pub fn cancel_secure_env_request(state: State<AppState>, request_id: String) -> Result<(), String> {
-    crate::secure_env::cancel_secure_env_request(&state, &request_id)
+    crate::service::cancel_secure_env_request(&state, &request_id).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -428,10 +391,8 @@ pub async fn load_terminal_theme(
     state: State<'_, AppState>,
 ) -> Result<terminal_theme::TerminalTheme, String> {
     let storage = state.storage.clone();
-
     tokio::task::spawn_blocking(move || {
-        let base_dir = storage.lock().map_err(|e| e.to_string())?.base_dir();
-        terminal_theme::load_terminal_theme(&base_dir).map_err(|e| e.to_string())
+        service::load_terminal_theme_blocking(&storage).map_err(Into::into)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -471,7 +432,7 @@ pub async fn generate_architecture(
 ) -> Result<ArchitectureResult, String> {
     let emitter = state.emitter.clone();
     tokio::task::spawn_blocking(move || {
-        generate_architecture_blocking_with_emitter(std::path::Path::new(&repo_path), &emitter)
+        service::generate_architecture(&repo_path, &emitter).map_err(Into::into)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?

@@ -17,8 +17,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use the_controller_lib::{
-    architecture, config, deploy, emitter::WsBroadcastEmitter, models, note_ai_chat, secure_env,
-    service, state::AppState, status_socket,
+    config, deploy, emitter::WsBroadcastEmitter, models, note_ai_chat, service, state::AppState,
+    status_socket,
 };
 
 use tokio::sync::broadcast;
@@ -766,8 +766,15 @@ async fn connect_session(
     let id = uuid::Uuid::parse_str(&req.session_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    service::connect_session(&state.app, id, req.rows, req.cols)
-        .map_err(<(StatusCode, String)>::from)?;
+    service::connect_session(
+        &state.app.storage,
+        &state.app.pty_manager,
+        &state.app.emitter,
+        id,
+        req.rows,
+        req.cols,
+    )
+    .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(Value::Null))
 }
@@ -874,13 +881,9 @@ async fn generate_architecture(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<RepoPathRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = req.repo_path;
     let emitter = state.app.emitter.clone();
     let result = tokio::task::spawn_blocking(move || {
-        architecture::generate_architecture_blocking_with_emitter(
-            std::path::Path::new(&repo_path),
-            &emitter,
-        )
+        service::generate_architecture(&req.repo_path, &emitter)
     })
     .await
     .map_err(|e| {
@@ -889,7 +892,7 @@ async fn generate_architecture(
             format!("Task failed: {}", e),
         )
     })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(<(StatusCode, String)>::from)?;
 
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
@@ -1100,16 +1103,17 @@ async fn toggle_voice_pause(
 async fn load_terminal_theme(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let app = state.app.clone();
-    let theme = tokio::task::spawn_blocking(move || service::load_terminal_theme_blocking(&app))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Task failed: {}", e),
-            )
-        })?
-        .map_err(<(StatusCode, String)>::from)?;
+    let storage = state.app.storage.clone();
+    let theme =
+        tokio::task::spawn_blocking(move || service::load_terminal_theme_blocking(&storage))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Task failed: {}", e),
+                )
+            })?
+            .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(theme).unwrap()))
 }
 
@@ -1661,8 +1665,8 @@ async fn cancel_secure_env_request(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<CancelSecureEnvRequestRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    secure_env::cancel_secure_env_request(&state.app, &req.request_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    service::cancel_secure_env_request(&state.app, &req.request_id)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 

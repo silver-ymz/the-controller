@@ -119,15 +119,20 @@ pub fn restore_sessions(storage: &Arc<Mutex<Storage>>) -> Result<(), AppError> {
 /// Connect a terminal to its PTY session at the given size.
 /// This is synchronous — callers that need non-blocking behaviour should
 /// wrap in `spawn_blocking`.
+///
+/// Takes individual `Arc` fields instead of `&AppState` so that callers can
+/// clone them before entering a `spawn_blocking` closure.
 pub fn connect_session(
-    state: &AppState,
+    storage: &Arc<Mutex<Storage>>,
+    pty_manager: &Arc<Mutex<PtyManager>>,
+    emitter: &Arc<dyn EventEmitter>,
     session_id: Uuid,
     rows: u16,
     cols: u16,
 ) -> Result<(), AppError> {
     // Check if already connected
     {
-        let pty_manager = state.pty_manager.lock().map_err(AppError::internal)?;
+        let pty_manager = pty_manager.lock().map_err(AppError::internal)?;
         if pty_manager.sessions.contains_key(&session_id) {
             tracing::debug!(session_id = %session_id, "session already connected, skipping");
             return Ok(());
@@ -137,7 +142,7 @@ pub fn connect_session(
 
     // Find session config from storage
     let (session_dir, kind) = {
-        let storage = state.storage.lock().map_err(AppError::internal)?;
+        let storage = storage.lock().map_err(AppError::internal)?;
         let inventory = storage.list_projects().map_err(AppError::internal)?;
         inventory.warn_if_corrupt("connect_session");
         inventory
@@ -155,12 +160,12 @@ pub fn connect_session(
             .ok_or_else(|| AppError::NotFound(format!("session not found: {}", session_id)))?
     };
 
-    let mut mgr = state.pty_manager.lock().map_err(AppError::internal)?;
+    let mut mgr = pty_manager.lock().map_err(AppError::internal)?;
     mgr.spawn_session(
         session_id,
         &session_dir,
         &kind,
-        state.emitter.clone(),
+        emitter.clone(),
         true,
         None,
         rows,
@@ -400,7 +405,7 @@ pub async fn stage_session_core(
     project_id: Uuid,
     session_id: Uuid,
     allow_pty_prompts: bool,
-) -> Result<u16, String> {
+) -> Result<u16, AppError> {
     use std::process::Stdio;
 
     tracing::info!(session_id = %session_id, project_id = %project_id, "staging session");
@@ -409,14 +414,16 @@ pub async fn stage_session_core(
 
     // Extract data under a short-lived storage lock to avoid deadlock with pty_manager
     let (repo_path, branch, worktree_path) = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
+        let storage = state.storage.lock().map_err(AppError::internal)?;
         let project = storage
             .load_project(project_id)
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::internal)?;
 
         if project.name != "the-controller" {
             tracing::warn!(project_name = %project.name, "staging rejected: only supported for the-controller");
-            return Err("Staging is only supported for the-controller".to_string());
+            return Err(AppError::BadRequest(
+                "Staging is only supported for the-controller".to_string(),
+            ));
         }
 
         // Check if this specific session is already staged
@@ -436,7 +443,9 @@ pub async fn stage_session_core(
                     pid = existing.pid,
                     "stage_session: session already staged and alive"
                 );
-                return Err("This session is already staged — unstage it first".to_string());
+                return Err(AppError::BadRequest(
+                    "This session is already staged — unstage it first".to_string(),
+                ));
             }
             // Stale record — clean up
             kill_process_group(existing.pid);
@@ -444,25 +453,25 @@ pub async fn stage_session_core(
             let _ = std::fs::remove_file(&stale_socket);
             let mut p = project.clone();
             p.staged_sessions.retain(|s| s.session_id != session_id);
-            storage.save_project(&p).map_err(|e| e.to_string())?;
+            storage.save_project(&p).map_err(AppError::internal)?;
         }
 
         let session = project
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .ok_or("Session not found")?;
+            .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
         let branch = session
             .worktree_branch
             .as_deref()
-            .ok_or("Session has no worktree branch")?
+            .ok_or_else(|| AppError::BadRequest("Session has no worktree branch".to_string()))?
             .to_string();
 
         let worktree_path = session
             .worktree_path
             .as_deref()
-            .ok_or("Session has no worktree path")?
+            .ok_or_else(|| AppError::BadRequest("Session has no worktree path".to_string()))?
             .to_string();
 
         (project.repo_path.clone(), branch, worktree_path)
@@ -473,16 +482,19 @@ pub async fn stage_session_core(
         let wt = worktree_path.clone();
         let is_clean = tokio::task::spawn_blocking(move || WorktreeManager::is_worktree_clean(&wt))
             .await
-            .map_err(|e| format!("Task failed: {}", e))??;
+            .map_err(|e| AppError::Internal(format!("Task failed: {}", e)))?
+            .map_err(AppError::Internal)?;
 
         if !is_clean {
             if !allow_pty_prompts {
-                return Err("Worktree has uncommitted changes — commit before staging".to_string());
+                return Err(AppError::BadRequest(
+                    "Worktree has uncommitted changes — commit before staging".to_string(),
+                ));
             }
 
             let prompt = "\nYou have uncommitted changes. Please commit all your work now.\r";
             {
-                let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
+                let mut pty_manager = state.pty_manager.lock().map_err(AppError::internal)?;
                 let _ = pty_manager.write_to_session(session_id, prompt.as_bytes());
             }
 
@@ -499,7 +511,8 @@ pub async fn stage_session_core(
                     WorktreeManager::is_worktree_clean(&wt_check)
                 })
                 .await
-                .map_err(|e| format!("Task failed: {}", e))??;
+                .map_err(|e| AppError::Internal(format!("Task failed: {}", e)))?
+                .map_err(AppError::Internal)?;
                 if clean {
                     committed = true;
                     break;
@@ -507,9 +520,9 @@ pub async fn stage_session_core(
             }
             if !committed {
                 tracing::error!(session_id = %session_id, "stage_session: timed out waiting for commit");
-                return Err(
+                return Err(AppError::Internal(
                     "Timed out waiting for commit. Please commit manually and retry.".to_string(),
-                );
+                ));
             }
         }
     }
@@ -520,7 +533,8 @@ pub async fn stage_session_core(
         let main_branch =
             tokio::task::spawn_blocking(move || WorktreeManager::detect_main_branch(&rp))
                 .await
-                .map_err(|e| format!("Task failed: {}", e))??;
+                .map_err(|e| AppError::Internal(format!("Task failed: {}", e)))?
+                .map_err(AppError::Internal)?;
 
         let rp = repo_path.clone();
         let mb2 = main_branch.clone();
@@ -532,7 +546,8 @@ pub async fn stage_session_core(
         let is_behind =
             tokio::task::spawn_blocking(move || WorktreeManager::is_branch_behind(&rp, &br, &mb))
                 .await
-                .map_err(|e| format!("Task failed: {}", e))??;
+                .map_err(|e| AppError::Internal(format!("Task failed: {}", e)))?
+                .map_err(AppError::Internal)?;
 
         if is_behind {
             let wt = worktree_path.clone();
@@ -540,17 +555,20 @@ pub async fn stage_session_core(
             let rebase_clean =
                 tokio::task::spawn_blocking(move || WorktreeManager::rebase_onto(&wt, &mb))
                     .await
-                    .map_err(|e| format!("Task failed: {}", e))??;
+                    .map_err(|e| AppError::Internal(format!("Task failed: {}", e)))?
+                    .map_err(AppError::Internal)?;
 
             if !rebase_clean {
                 if !allow_pty_prompts {
-                    return Err("Rebase has conflicts — resolve before staging".to_string());
+                    return Err(AppError::BadRequest(
+                        "Rebase has conflicts — resolve before staging".to_string(),
+                    ));
                 }
 
                 // Rebase has conflicts — ask Claude to resolve
                 let prompt = "\nThere are rebase conflicts. Please resolve all conflicts, then run `git rebase --continue`.\r";
                 {
-                    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
+                    let mut pty_manager = state.pty_manager.lock().map_err(AppError::internal)?;
                     let _ = pty_manager.write_to_session(session_id, prompt.as_bytes());
                 }
 
@@ -569,7 +587,7 @@ pub async fn stage_session_core(
                         WorktreeManager::is_rebase_in_progress(&wt_check)
                     })
                     .await
-                    .map_err(|e| format!("Task failed: {}", e))?;
+                    .map_err(|e| AppError::Internal(format!("Task failed: {}", e)))?;
                     if !still_rebasing {
                         resolved = true;
                         break;
@@ -577,7 +595,9 @@ pub async fn stage_session_core(
                 }
                 if !resolved {
                     tracing::error!(session_id = %session_id, "stage_session: timed out waiting for rebase conflict resolution");
-                    return Err("Timed out waiting for rebase conflict resolution.".to_string());
+                    return Err(AppError::Internal(
+                        "Timed out waiting for rebase conflict resolution.".to_string(),
+                    ));
                 }
             }
         }
@@ -604,15 +624,17 @@ pub async fn stage_session_core(
                 .status()
         })
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
-        .map_err(|e| format!("pnpm install failed: {}", e))?;
+        .map_err(|e| AppError::Internal(format!("Task failed: {}", e)))?
+        .map_err(|e| AppError::Internal(format!("pnpm install failed: {}", e)))?;
 
         if !install_status.success() {
-            return Err("pnpm install failed in worktree".to_string());
+            return Err(AppError::Internal(
+                "pnpm install failed in worktree".to_string(),
+            ));
         }
     }
 
-    let port = find_staging_port(1420)?;
+    let port = find_staging_port(1420).map_err(AppError::Internal)?;
 
     let _ = state
         .emitter
@@ -621,10 +643,10 @@ pub async fn stage_session_core(
     let wt = worktree_path.clone();
     let log_path = PathBuf::from(&wt).join("staging.log");
     let log_file = std::fs::File::create(&log_path)
-        .map_err(|e| format!("Failed to create staging log: {}", e))?;
+        .map_err(|e| AppError::Internal(format!("Failed to create staging log: {}", e)))?;
     let log_stderr = log_file
         .try_clone()
-        .map_err(|e| format!("Failed to clone log file: {}", e))?;
+        .map_err(|e| AppError::Internal(format!("Failed to clone log file: {}", e)))?;
 
     #[cfg(unix)]
     let mut child = {
@@ -640,7 +662,7 @@ pub async fn stage_session_core(
             .stderr(Stdio::from(log_stderr))
             .process_group(0)
             .spawn()
-            .map_err(|e| format!("Failed to spawn staged instance: {}", e))?
+            .map_err(|e| AppError::Internal(format!("Failed to spawn staged instance: {}", e)))?
     };
 
     #[cfg(not(unix))]
@@ -654,7 +676,7 @@ pub async fn stage_session_core(
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_stderr))
         .spawn()
-        .map_err(|e| format!("Failed to spawn staged instance: {}", e))?;
+        .map_err(|e| AppError::Internal(format!("Failed to spawn staged instance: {}", e)))?;
 
     let pid = child.id();
     tracing::info!(session_id = %session_id, pid, port, "staged instance spawned");
@@ -666,11 +688,11 @@ pub async fn stage_session_core(
     });
 
     // Save staged session info — if save fails, kill the orphan process
-    let save_result = (|| -> Result<(), String> {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
+    let save_result = (|| -> Result<(), AppError> {
+        let storage = state.storage.lock().map_err(AppError::internal)?;
         let mut project = storage
             .load_project(project_id)
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::internal)?;
 
         project.staged_sessions.push(StagedSession {
             session_id,
@@ -678,7 +700,7 @@ pub async fn stage_session_core(
             port,
         });
 
-        storage.save_project(&project).map_err(|e| e.to_string())
+        storage.save_project(&project).map_err(AppError::internal)
     })();
 
     if let Err(e) = save_result {
