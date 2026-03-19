@@ -144,7 +144,10 @@ impl BrokerClient {
         let start = std::time::Instant::now();
         let poll_interval = std::time::Duration::from_millis(50);
         while start.elapsed() < timeout {
-            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            let ret = unsafe { libc::kill(pid, 0) };
+            let alive = ret == 0
+                || (ret == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
             if !alive {
                 tracing::debug!(
                     pid,
@@ -168,7 +171,10 @@ impl BrokerClient {
         let pid_path = self.pid_file_path();
         if let Ok(contents) = std::fs::read_to_string(&pid_path) {
             if let Ok(pid) = contents.trim().parse::<i32>() {
-                let alive = unsafe { libc::kill(pid, 0) } == 0;
+                let ret = unsafe { libc::kill(pid, 0) };
+                let alive = ret == 0
+                    || (ret == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
                 if !alive {
                     tracing::debug!(pid, "cleaning up stale PID file and control socket");
                     let _ = std::fs::remove_file(&pid_path);

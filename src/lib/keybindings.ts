@@ -39,8 +39,8 @@ export async function initKeybindings(): Promise<() => void> {
   try {
     const result = await command<KeybindingsResult>("load_keybindings");
     applyResult(result);
-  } catch {
-    // Silently use defaults if backend call fails
+  } catch (err) {
+    console.warn("Failed to load custom keybindings, using defaults:", err);
   }
 
   return unlisten;

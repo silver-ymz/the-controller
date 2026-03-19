@@ -193,6 +193,7 @@ export const selectedSessionProvider = writable<SessionProvider>("claude");
 export function sessionProviderFromConfig(
   provider: ConfigDefaultProvider | undefined,
 ): SessionProvider {
+  if (provider === "claude-code") return "claude";
   if (provider === "codex") return "codex";
   if (provider === "cursor-agent") return "cursor-agent";
   return "claude";
