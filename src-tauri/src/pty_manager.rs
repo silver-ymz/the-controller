@@ -102,6 +102,7 @@ impl PtyManager {
             working_dir,
             command,
             emitter,
+            continue_session,
             initial_prompt,
             rows,
             cols,
@@ -224,6 +225,7 @@ impl PtyManager {
         working_dir: &str,
         command: &str,
         emitter: Arc<dyn EventEmitter>,
+        continue_session: bool,
         initial_prompt: Option<&str>,
         rows: u16,
         cols: u16,
@@ -250,9 +252,12 @@ impl PtyManager {
         if let Some(path_val) = crate::cli_install::path_with_controller_bin() {
             cmd.env("PATH", path_val);
         }
-        for arg in
-            crate::session_args::build_session_args(command, session_id, false, initial_prompt)
-        {
+        for arg in crate::session_args::build_session_args(
+            command,
+            session_id,
+            continue_session,
+            initial_prompt,
+        ) {
             cmd.arg(arg);
         }
 

@@ -67,6 +67,10 @@ pub(crate) fn find_staging_port(base_port: u16) -> Result<u16, String> {
 /// Kill a process group by PID. Sends SIGTERM to the group, then SIGKILL after 2s
 /// if the group is still alive.
 pub fn kill_process_group(pid: u32) {
+    if pid == 0 {
+        tracing::warn!("refusing to kill process group 0 (would kill own process group)");
+        return;
+    }
     tracing::debug!(pid, "killing process group");
     #[cfg(unix)]
     {
@@ -161,6 +165,11 @@ pub fn connect_session(
     };
 
     let mut mgr = pty_manager.lock().map_err(AppError::internal)?;
+    // Definitive check under lock to prevent double-spawn race (TOCTOU)
+    if mgr.sessions.contains_key(&session_id) {
+        tracing::debug!(session_id = %session_id, "session connected by concurrent request, skipping");
+        return Ok(());
+    }
     mgr.spawn_session(
         session_id,
         &session_dir,

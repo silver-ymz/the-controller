@@ -455,7 +455,11 @@
     });
 
     let cleanupKeybindings: (() => void) | undefined;
-    initKeybindings().then((fn) => { cleanupKeybindings = fn; });
+    let keybindingsCleanedUp = false;
+    initKeybindings().then((fn) => {
+      if (keybindingsCleanedUp) fn();
+      else cleanupKeybindings = fn;
+    });
 
     void (async () => {
       updateWindowTitle(__BUILD_BRANCH__, __BUILD_COMMIT__);
@@ -478,6 +482,7 @@
 
     return () => {
       unlistenSecureEnv();
+      keybindingsCleanedUp = true;
       cleanupKeybindings?.();
     };
   });

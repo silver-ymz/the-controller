@@ -19,6 +19,7 @@ impl DeployCredentials {
     pub fn is_provisioned(&self) -> bool {
         let provisioned = self.hetzner_api_key.is_some()
             && self.cloudflare_api_key.is_some()
+            && self.cloudflare_zone_id.is_some()
             && self.root_domain.is_some()
             && self.coolify_url.is_some()
             && self.coolify_api_key.is_some()
@@ -27,6 +28,7 @@ impl DeployCredentials {
             let missing: Vec<&str> = [
                 ("hetzner_api_key", &self.hetzner_api_key),
                 ("cloudflare_api_key", &self.cloudflare_api_key),
+                ("cloudflare_zone_id", &self.cloudflare_zone_id),
                 ("root_domain", &self.root_domain),
                 ("coolify_url", &self.coolify_url),
                 ("coolify_api_key", &self.coolify_api_key),

@@ -1,4 +1,4 @@
-type SessionKind = "claude" | "codex" | "cursor-agent" | undefined;
+import type { SessionProvider } from './stores';
 
 type InvokeFn = (
   command: string,
@@ -8,7 +8,7 @@ type InvokeFn = (
 export async function sendFinishBranchPrompt(
   invoke: InvokeFn,
   sessionId: string,
-  kind: SessionKind,
+  kind: SessionProvider | undefined,
 ) {
   const isCodex = kind === "codex";
   const prompt = isCodex

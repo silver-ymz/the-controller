@@ -74,8 +74,14 @@ pub async fn deploy_project(request: DeployRequest) -> Result<DeployResult, AppE
     }
 
     let coolify = CoolifyClient::new(
-        creds.coolify_url.as_ref().unwrap(),
-        creds.coolify_api_key.as_ref().unwrap(),
+        creds
+            .coolify_url
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("Coolify URL not configured".to_string()))?,
+        creds
+            .coolify_api_key
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("Coolify API key not configured".to_string()))?,
     );
 
     let apps = coolify
@@ -98,7 +104,11 @@ pub async fn deploy_project(request: DeployRequest) -> Result<DeployResult, AppE
         ));
     };
 
-    let domain = format!("{}.{}", request.subdomain, creds.root_domain.unwrap());
+    let root_domain = creds
+        .root_domain
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Root domain not configured".to_string()))?;
+    let domain = format!("{}.{}", request.subdomain, root_domain);
     let url = format!("https://{domain}");
 
     tracing::info!(url = %url, uuid = %uuid, "deployment complete");
@@ -121,8 +131,14 @@ pub async fn list_deployed_services() -> Result<Vec<serde_json::Value>, AppError
     }
 
     let coolify = CoolifyClient::new(
-        creds.coolify_url.as_ref().unwrap(),
-        creds.coolify_api_key.as_ref().unwrap(),
+        creds
+            .coolify_url
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("Coolify URL not configured".to_string()))?,
+        creds
+            .coolify_api_key
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("Coolify API key not configured".to_string()))?,
     );
 
     let apps = coolify

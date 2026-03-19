@@ -179,7 +179,8 @@ impl MaintainerScheduler {
                         continue;
                     }
 
-                    let interval = Duration::from_secs(project.maintainer.interval_minutes * 60);
+                    let interval_mins = project.maintainer.interval_minutes.max(1);
+                    let interval = Duration::from_secs(interval_mins * 60);
                     let should_run = last_run
                         .get(&project.id)
                         .is_none_or(|t| t.elapsed() >= interval);
@@ -336,11 +337,10 @@ fn parse_findings_output(output: &str) -> Result<FindingsOutput, String> {
 
     let mut findings = Vec::with_capacity(raw.findings.len());
     for (idx, finding) in raw.findings.into_iter().enumerate() {
-        let sanitized = sanitize_finding(finding).ok_or_else(|| {
-            tracing::warn!(index = idx, "invalid finding dropped during sanitization");
-            format!("Invalid finding at index {}", idx)
-        })?;
-        findings.push(sanitized);
+        match sanitize_finding(finding) {
+            Some(sanitized) => findings.push(sanitized),
+            None => tracing::warn!(index = idx, "invalid finding dropped during sanitization"),
+        }
     }
 
     Ok(FindingsOutput {
@@ -1364,6 +1364,7 @@ mod tests {
 
     #[test]
     fn test_parse_findings_output_invalid_finding_returns_error() {
+        // An empty-title finding is dropped silently rather than aborting the whole batch
         let output = r#"{
           "findings": [
             {
@@ -1380,7 +1381,8 @@ mod tests {
         }"#;
 
         let parsed = parse_findings_output(output);
-        assert!(parsed.is_err());
+        assert!(parsed.is_ok());
+        assert!(parsed.unwrap().findings.is_empty());
     }
 
     #[test]
