@@ -1,5 +1,9 @@
+#[allow(dead_code)] // Will be wired up when derive_handlers is fully implemented
+mod axum_gen;
 #[allow(dead_code)] // Used by tauri_gen and axum_gen modules (not yet wired up)
 mod parse;
+#[allow(dead_code)] // Will be wired up when derive_handlers is fully implemented
+mod tauri_gen;
 
 use proc_macro::TokenStream;
 
