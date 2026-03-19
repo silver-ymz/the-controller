@@ -972,6 +972,8 @@ async fn set_initial_prompt(
 }
 
 async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
+    // service::check_claude_cli is infallible (returns String, not Result).
+    // Wrap in Ok::<_, AppError> so spawn_blocking_handler! gets a Result<T, AppError>.
     let result = spawn_blocking_handler!(|| Ok::<_, the_controller_lib::error::AppError>(
         service::check_claude_cli()
     ))?;

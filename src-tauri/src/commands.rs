@@ -28,7 +28,8 @@ fn parse_uuid(s: &str) -> Result<Uuid, String> {
 /// let result = tauri_blocking!({
 ///     let foo = state.foo.clone();
 ///     move || service::do_thing(&foo, arg)
-/// })?;
+/// });
+/// // Note: the macro already applies `?` internally; do not add `?` at the callsite.
 /// ```
 macro_rules! tauri_blocking {
     ($closure:expr) => {
@@ -136,6 +137,8 @@ pub async fn connect_session(
 
     // Clone Arcs for spawn_blocking (service::connect_session is synchronous
     // and takes individual Arc fields for 'static ownership in the closure).
+    // Not using tauri_blocking! here — the join-error path logs the session
+    // ID for structured debugging, which the macro cannot express.
     let storage = state.storage.clone();
     let pty_manager = state.pty_manager.clone();
     let emitter = state.emitter.clone();
