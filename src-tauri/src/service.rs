@@ -20,8 +20,8 @@ use crate::emitter::EventEmitter;
 use crate::error::AppError;
 use crate::keybindings;
 use crate::models::{
-    AssignedIssue, GithubIssue, MaintainerIssue, MaintainerIssueDetail, Project, SessionConfig,
-    StagedSession,
+    AssignedIssue, AutoWorkerQueueIssue, CommitInfo, GithubIssue, MaintainerIssue,
+    MaintainerIssueDetail, MaintainerRunLog, Project, SavedPrompt, SessionConfig, StagedSession,
 };
 use crate::note_ai_chat::{NoteAiChatMessage, NoteAiResponse};
 use crate::notes::{self, NoteEntry};
@@ -29,6 +29,7 @@ use crate::pty_manager::PtyManager;
 use crate::state::AppState;
 use crate::storage::{ProjectInventory, Storage};
 use crate::terminal_theme;
+use crate::token_usage::{self, TokenDataPoint};
 use crate::voice::VoicePipeline;
 use crate::worktree::WorktreeManager;
 
@@ -2235,6 +2236,743 @@ pub fn stop_claude_login(
 ) -> Result<(), AppError> {
     let mut mgr = pty_manager.lock().map_err(AppError::internal)?;
     mgr.close_session(session_id).map_err(AppError::Internal)
+}
+
+// ---------------------------------------------------------------------------
+// Git / repo helpers
+// ---------------------------------------------------------------------------
+
+/// Get the HEAD branch name and short commit hash for a repository.
+pub fn get_repo_head(repo_path: &str) -> Result<(String, String), AppError> {
+    let repo = git2::Repository::open(repo_path)
+        .map_err(|e| AppError::Internal(format!("Failed to open repo: {}", e)))?;
+    let head = repo
+        .head()
+        .map_err(|e| AppError::Internal(format!("Failed to get HEAD: {}", e)))?;
+    let branch = head.shorthand().unwrap_or("HEAD").to_string();
+    let commit = head
+        .peel_to_commit()
+        .map_err(|e| AppError::Internal(format!("Failed to peel to commit: {}", e)))?;
+    let short_hash = commit.id().to_string()[..7].to_string();
+    Ok((branch, short_hash))
+}
+
+/// Find the OID of the main (or master) branch in a repository.
+pub fn find_main_branch_oid(repo: &git2::Repository) -> Option<git2::Oid> {
+    for name in &["refs/heads/main", "refs/heads/master"] {
+        if let Ok(reference) = repo.find_reference(name) {
+            if let Ok(commit) = reference.peel_to_commit() {
+                return Some(commit.id());
+            }
+        }
+    }
+    None
+}
+
+/// Walk commits on the worktree branch that aren't on the main branch.
+pub fn discover_branch_commits(worktree_path: &str) -> Result<Vec<CommitInfo>, String> {
+    let repo = git2::Repository::discover(worktree_path)
+        .map_err(|e| format!("Failed to open repo: {e}"))?;
+    let head = repo.head().map_err(|e| format!("No HEAD: {e}"))?;
+    let head_commit = head.peel_to_commit().map_err(|e| e.to_string())?;
+    let main_oid = find_main_branch_oid(&repo);
+    let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
+    revwalk.push(head_commit.id()).map_err(|e| e.to_string())?;
+    revwalk
+        .set_sorting(git2::Sort::TOPOLOGICAL)
+        .map_err(|e| e.to_string())?;
+    let mut commits = Vec::new();
+    for oid in revwalk {
+        let oid = oid.map_err(|e| e.to_string())?;
+        if let Some(main) = main_oid {
+            if oid == main {
+                break;
+            }
+            if let Ok(base) = repo.merge_base(oid, main) {
+                if base == oid {
+                    break;
+                }
+            }
+        }
+        let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
+        let message = commit.summary().unwrap_or("").to_string();
+        if message.starts_with("Initial commit") {
+            continue;
+        }
+        let hash = oid.to_string()[..7].to_string();
+        commits.push(CommitInfo { hash, message });
+        if commits.len() >= 20 {
+            break;
+        }
+    }
+    Ok(commits)
+}
+
+// ---------------------------------------------------------------------------
+// Session data queries
+// ---------------------------------------------------------------------------
+
+/// Get commits for a session, merging stored done_commits with newly discovered ones.
+pub fn get_session_commits(
+    storage: &Arc<Mutex<Storage>>,
+    project_id: Uuid,
+    session_id: Uuid,
+) -> Result<Vec<CommitInfo>, AppError> {
+    let storage = storage.lock().map_err(AppError::internal)?;
+    let project = storage
+        .load_project(project_id)
+        .map_err(AppError::internal)?;
+    let session = project
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
+
+    let worktree_path = match &session.worktree_path {
+        Some(p) => p.clone(),
+        None => return Ok(session.done_commits.clone()),
+    };
+
+    let new_commits = discover_branch_commits(&worktree_path).unwrap_or_default();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut all_commits = Vec::new();
+    for c in new_commits.iter().chain(session.done_commits.iter()) {
+        if seen.insert(c.hash.clone()) {
+            all_commits.push(c.clone());
+        }
+    }
+
+    if all_commits.len() > session.done_commits.len() {
+        let mut project = project.clone();
+        if let Some(s) = project.sessions.iter_mut().find(|s| s.id == session_id) {
+            s.done_commits = all_commits.clone();
+        }
+        let _ = storage.save_project(&project);
+    }
+
+    Ok(all_commits)
+}
+
+/// Get token usage data for a session.
+pub fn get_session_token_usage(
+    storage: &Arc<Mutex<Storage>>,
+    project_id: Uuid,
+    session_id: Uuid,
+) -> Result<Vec<TokenDataPoint>, AppError> {
+    let storage = storage.lock().map_err(AppError::internal)?;
+    let project = storage
+        .load_project(project_id)
+        .map_err(AppError::internal)?;
+    let session = project
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
+
+    let working_dir = session
+        .worktree_path
+        .as_deref()
+        .unwrap_or(&project.repo_path);
+
+    token_usage::get_token_usage(working_dir, &session.kind).map_err(AppError::Internal)
+}
+
+// ---------------------------------------------------------------------------
+// Prompt management
+// ---------------------------------------------------------------------------
+
+/// Save the current session's prompt as a reusable project prompt.
+pub fn save_session_prompt(
+    state: &AppState,
+    project_id: Uuid,
+    session_id: Uuid,
+) -> Result<(), AppError> {
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    let mut project = storage
+        .load_project(project_id)
+        .map_err(AppError::internal)?;
+    let session = project
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
+
+    let prompt_text = session
+        .initial_prompt
+        .clone()
+        .or_else(|| {
+            session.github_issue.as_ref().map(|issue| {
+                crate::session_args::build_issue_prompt(
+                    issue.number,
+                    &issue.title,
+                    &issue.url,
+                    false,
+                )
+            })
+        })
+        .ok_or_else(|| AppError::BadRequest("Session has no prompt to save".to_string()))?;
+
+    let name = {
+        let truncated: String = prompt_text.chars().take(60).collect();
+        if truncated.chars().count() < prompt_text.chars().count() {
+            format!("{}...", truncated)
+        } else {
+            truncated
+        }
+    };
+
+    let saved = SavedPrompt {
+        id: Uuid::new_v4(),
+        name,
+        text: prompt_text,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        source_session_label: session.label.clone(),
+    };
+
+    project.prompts.push(saved);
+    storage.save_project(&project).map_err(AppError::internal)?;
+    Ok(())
+}
+
+/// List saved prompts for a project.
+pub fn list_project_prompts(
+    state: &AppState,
+    project_id: Uuid,
+) -> Result<Vec<SavedPrompt>, AppError> {
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    let project = storage
+        .load_project(project_id)
+        .map_err(AppError::internal)?;
+    Ok(project.prompts)
+}
+
+// ---------------------------------------------------------------------------
+// Maintainer & auto-worker configuration
+// ---------------------------------------------------------------------------
+
+/// Validate that a maintainer interval is at least 5 minutes.
+pub fn validate_maintainer_interval(minutes: u64) -> Result<(), AppError> {
+    if minutes < 5 {
+        return Err(AppError::BadRequest(
+            "Interval must be at least 5 minutes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Configure the maintainer for a project.
+pub fn configure_maintainer(
+    state: &AppState,
+    project_id: Uuid,
+    enabled: bool,
+    interval_minutes: u64,
+    github_repo: Option<String>,
+) -> Result<(), AppError> {
+    validate_maintainer_interval(interval_minutes)?;
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    let mut project = storage
+        .load_project(project_id)
+        .map_err(AppError::internal)?;
+    project.maintainer.enabled = enabled;
+    project.maintainer.interval_minutes = interval_minutes;
+    project.maintainer.github_repo = github_repo;
+    storage.save_project(&project).map_err(AppError::internal)?;
+    Ok(())
+}
+
+/// Configure the auto-worker for a project.
+pub fn configure_auto_worker(
+    state: &AppState,
+    project_id: Uuid,
+    enabled: bool,
+) -> Result<(), AppError> {
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    let mut project = storage
+        .load_project(project_id)
+        .map_err(AppError::internal)?;
+    project.auto_worker.enabled = enabled;
+    storage.save_project(&project).map_err(AppError::internal)?;
+    Ok(())
+}
+
+/// Get the latest maintainer run log for a project.
+pub fn get_maintainer_status(
+    state: &AppState,
+    project_id: Uuid,
+) -> Result<Option<MaintainerRunLog>, AppError> {
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    storage
+        .latest_maintainer_run_log(project_id)
+        .map_err(AppError::internal)
+}
+
+/// Get the maintainer run log history for a project.
+pub fn get_maintainer_history(
+    state: &AppState,
+    project_id: Uuid,
+    limit: usize,
+) -> Result<Vec<MaintainerRunLog>, AppError> {
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    storage
+        .maintainer_run_log_history(project_id, limit)
+        .map_err(AppError::internal)
+}
+
+/// Trigger a maintainer check and save the result.
+pub async fn trigger_maintainer_check(
+    state: &AppState,
+    project_id: Uuid,
+) -> Result<MaintainerRunLog, AppError> {
+    let (repo_path, github_repo) = {
+        let storage = state.storage.lock().map_err(AppError::internal)?;
+        let project = storage
+            .load_project(project_id)
+            .map_err(AppError::internal)?;
+        (
+            project.repo_path.clone(),
+            project.maintainer.github_repo.clone(),
+        )
+    };
+
+    let _ = state
+        .emitter
+        .emit(&format!("maintainer-status:{}", project_id), "running");
+
+    let log = match tokio::task::spawn_blocking(move || {
+        crate::maintainer::run_maintainer_check(&repo_path, project_id, github_repo.as_deref())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Task failed: {e}")))?
+    {
+        Ok(log) => log,
+        Err(e) => {
+            let _ = state
+                .emitter
+                .emit(&format!("maintainer-status:{}", project_id), "error");
+            let _ = state
+                .emitter
+                .emit(&format!("maintainer-error:{}", project_id), &e);
+            return Err(AppError::Internal(e));
+        }
+    };
+
+    {
+        let storage = state.storage.lock().map_err(AppError::internal)?;
+        storage
+            .save_maintainer_run_log(&log)
+            .map_err(AppError::internal)?;
+    }
+
+    let _ = state
+        .emitter
+        .emit(&format!("maintainer-status:{}", project_id), "idle");
+
+    Ok(log)
+}
+
+/// Clear all maintainer run logs for a project.
+pub fn clear_maintainer_reports(state: &AppState, project_id: Uuid) -> Result<(), AppError> {
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    storage
+        .clear_maintainer_run_logs(project_id)
+        .map_err(AppError::internal)?;
+    let _ = state
+        .emitter
+        .emit(&format!("maintainer-status:{}", project_id), "idle");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Auto-worker queue
+// ---------------------------------------------------------------------------
+
+fn queue_issue_from_github(issue: GithubIssue, is_active: bool) -> AutoWorkerQueueIssue {
+    AutoWorkerQueueIssue {
+        number: issue.number,
+        title: issue.title,
+        url: issue.url,
+        body: issue.body,
+        labels: issue.labels.into_iter().map(|label| label.name).collect(),
+        is_active,
+    }
+}
+
+fn active_auto_worker_issue(project: &Project) -> Option<GithubIssue> {
+    project
+        .sessions
+        .iter()
+        .find(|session| session.auto_worker_session)
+        .and_then(|session| session.github_issue.clone())
+}
+
+/// Build the auto-worker queue from a list of issues and the active issue.
+pub fn build_auto_worker_queue(
+    issues: Vec<GithubIssue>,
+    active_issue: Option<GithubIssue>,
+) -> Vec<AutoWorkerQueueIssue> {
+    let active_issue_number = active_issue.as_ref().map(|issue| issue.number);
+    let mut queue = Vec::new();
+
+    if let Some(issue) = active_issue {
+        queue.push(queue_issue_from_github(issue, true));
+    }
+
+    queue.extend(
+        issues
+            .into_iter()
+            .filter(crate::auto_worker::is_eligible)
+            .filter(|issue| Some(issue.number) != active_issue_number)
+            .map(|issue| queue_issue_from_github(issue, false)),
+    );
+
+    queue
+}
+
+/// Get the auto-worker queue for a project.
+pub async fn get_auto_worker_queue(
+    state: &AppState,
+    project_id: Uuid,
+) -> Result<Vec<AutoWorkerQueueIssue>, AppError> {
+    let project = {
+        let storage = state.storage.lock().map_err(AppError::internal)?;
+        storage
+            .load_project(project_id)
+            .map_err(AppError::internal)?
+    };
+
+    let active_issue = active_auto_worker_issue(&project);
+    let issues = list_github_issues(state, &project.repo_path).await?;
+    Ok(build_auto_worker_queue(issues, active_issue))
+}
+
+// ---------------------------------------------------------------------------
+// Directory listing
+// ---------------------------------------------------------------------------
+
+/// List directories at a given path.
+pub fn list_directories_at(path: &str) -> Result<Vec<config::DirEntry>, AppError> {
+    let p = Path::new(path);
+    if !p.is_dir() {
+        return Err(AppError::BadRequest(format!("Not a directory: {}", path)));
+    }
+    config::list_directories(p).map_err(AppError::internal)
+}
+
+/// List directories under the configured projects root.
+pub fn list_root_directories(state: &AppState) -> Result<Vec<config::DirEntry>, AppError> {
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    let base_dir = storage.base_dir();
+    let cfg = config::load_config(&base_dir).ok_or_else(|| {
+        AppError::BadRequest("No config found. Complete onboarding first.".to_string())
+    })?;
+    config::list_directories(Path::new(&cfg.projects_root)).map_err(AppError::internal)
+}
+
+/// Generate project name suggestions from a description.
+pub fn generate_project_names(description: &str) -> Result<Vec<String>, AppError> {
+    config::generate_names_via_cli(description).map_err(AppError::Internal)
+}
+
+/// List archived projects (projects or sessions that are archived).
+pub fn list_archived_projects(state: &AppState) -> Result<ProjectInventory, AppError> {
+    let storage = state.storage.lock().map_err(AppError::internal)?;
+    let inventory = storage.list_projects().map_err(AppError::internal)?;
+    Ok(inventory.filter_projects(|project| {
+        project.archived || project.sessions.iter().any(|session| session.archived)
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Scaffold project
+// ---------------------------------------------------------------------------
+
+fn github_cli_command() -> std::process::Command {
+    std::process::Command::new(
+        std::env::var("THE_CONTROLLER_GH_BIN").unwrap_or_else(|_| "gh".to_string()),
+    )
+}
+
+fn git_cli_command() -> std::process::Command {
+    std::process::Command::new(
+        std::env::var("THE_CONTROLLER_GIT_BIN").unwrap_or_else(|_| "git".to_string()),
+    )
+}
+
+fn rollback_scaffold_dir(repo_path: &Path, error: String) -> String {
+    match std::fs::remove_dir_all(repo_path) {
+        Ok(_) => error,
+        Err(cleanup_error) => format!("{} (cleanup failed: {})", error, cleanup_error),
+    }
+}
+
+pub(crate) fn rollback_scaffold_state(repo_path: &Path, error: String) -> String {
+    let mut cleanup_errors = Vec::new();
+
+    if let Ok(repo) = git2::Repository::open(repo_path) {
+        if let Ok(remote) = repo.find_remote("origin") {
+            if let Some(url) = remote.url() {
+                if let Ok(nwo) = parse_github_nwo(url) {
+                    match github_cli_command()
+                        .args(["repo", "delete", &nwo, "--yes"])
+                        .output()
+                    {
+                        Ok(output) if output.status.success() => {}
+                        Ok(output) => cleanup_errors.push(format!(
+                            "remote cleanup failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        )),
+                        Err(e) => cleanup_errors.push(format!("remote cleanup failed: {}", e)),
+                    }
+                }
+            }
+        }
+    }
+
+    if let Err(cleanup_error) = std::fs::remove_dir_all(repo_path) {
+        cleanup_errors.push(format!("local cleanup failed: {}", cleanup_error));
+    }
+
+    if cleanup_errors.is_empty() {
+        error
+    } else {
+        format!("{} ({})", error, cleanup_errors.join("; "))
+    }
+}
+
+/// Scaffold a new project on disk: create repo, init git, create GitHub remote, push.
+/// This is blocking — callers should wrap in `spawn_blocking`.
+pub fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Project, String> {
+    tracing::info!(project_name = %name, repo_path = %repo_path.display(), "scaffolding project on disk");
+    let parent_dir = repo_path
+        .parent()
+        .ok_or_else(|| format!("Invalid repo path: {}", repo_path.display()))?;
+    std::fs::create_dir_all(parent_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir(&repo_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("Directory already exists: {}", name)
+        } else {
+            e.to_string()
+        }
+    })?;
+    let rollback_dir = |error: String| rollback_scaffold_dir(&repo_path, error);
+
+    let repo = git2::Repository::init(&repo_path).map_err(|e| rollback_dir(e.to_string()))?;
+    let sig = repo
+        .signature()
+        .unwrap_or_else(|_| git2::Signature::now("The Controller", "noreply@controller").unwrap());
+
+    let agents_content = render_agents_md(&name);
+    std::fs::write(repo_path.join("agents.md"), &agents_content)
+        .map_err(|e| rollback_dir(format!("failed to write agents.md: {}", e)))?;
+    ensure_claude_md_symlink(&repo_path).map_err(rollback_dir)?;
+    let plans_dir = repo_path.join("docs").join("plans");
+    std::fs::create_dir_all(&plans_dir)
+        .map_err(|e| rollback_dir(format!("failed to create docs/plans: {}", e)))?;
+    std::fs::write(plans_dir.join(".gitkeep"), "")
+        .map_err(|e| rollback_dir(format!("failed to write .gitkeep: {}", e)))?;
+
+    let mut index = repo
+        .index()
+        .map_err(|e| rollback_dir(format!("failed to get index: {}", e)))?;
+    index
+        .add_path(std::path::Path::new("agents.md"))
+        .map_err(|e| rollback_dir(format!("failed to add agents.md to index: {}", e)))?;
+    index
+        .add_path(std::path::Path::new("CLAUDE.md"))
+        .map_err(|e| rollback_dir(format!("failed to add CLAUDE.md to index: {}", e)))?;
+    index
+        .add_path(std::path::Path::new("docs/plans/.gitkeep"))
+        .map_err(|e| rollback_dir(format!("failed to add .gitkeep to index: {}", e)))?;
+    index
+        .write()
+        .map_err(|e| rollback_dir(format!("failed to write index: {}", e)))?;
+    let tree_id = index
+        .write_tree()
+        .map_err(|e| rollback_dir(format!("failed to write tree: {}", e)))?;
+    let tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| rollback_dir(format!("failed to find tree: {}", e)))?;
+
+    repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
+        .map_err(|e| rollback_dir(format!("failed to create initial commit: {}", e)))?;
+
+    let gh_output = github_cli_command()
+        .args([
+            "repo",
+            "create",
+            &name,
+            "--private",
+            "--source=.",
+            "--remote=origin",
+        ])
+        .current_dir(&repo_path)
+        .output()
+        .map_err(|e| rollback_dir(format!("Failed to run gh CLI: {}. Is gh installed?", e)))?;
+    if !gh_output.status.success() {
+        let stderr = String::from_utf8_lossy(&gh_output.stderr);
+        return Err(rollback_dir(format!(
+            "Failed to create GitHub repo: {}",
+            stderr.trim()
+        )));
+    }
+
+    let push_output = git_cli_command()
+        .args(["push", "--set-upstream", "origin", "HEAD"])
+        .current_dir(&repo_path)
+        .output()
+        .map_err(|e| {
+            rollback_scaffold_state(&repo_path, format!("Failed to run git push: {}", e))
+        })?;
+    if !push_output.status.success() {
+        let stderr = String::from_utf8_lossy(&push_output.stderr);
+        return Err(rollback_scaffold_state(
+            &repo_path,
+            format!("Failed to push initial commit: {}", stderr.trim()),
+        ));
+    }
+
+    Ok(Project {
+        id: Uuid::new_v4(),
+        name,
+        repo_path: repo_path.to_string_lossy().to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        archived: false,
+        maintainer: crate::models::MaintainerConfig::default(),
+        auto_worker: crate::models::AutoWorkerConfig::default(),
+        prompts: vec![],
+        sessions: vec![],
+        staged_sessions: vec![],
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Merge session branch
+// ---------------------------------------------------------------------------
+
+/// Wait for a rebase to finish by polling a closure.
+pub async fn wait_for_merge_rebase_resolution<F, Fut>(
+    mut is_rebase_in_progress: F,
+    max_polls: u64,
+    poll_interval: std::time::Duration,
+) -> Result<(), String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<bool, String>>,
+{
+    for _ in 0..max_polls {
+        tokio::time::sleep(poll_interval).await;
+        if !is_rebase_in_progress().await? {
+            return Ok(());
+        }
+    }
+    Err("Timed out waiting for merge conflict resolution.".to_string())
+}
+
+const MAX_MERGE_RETRIES: u32 = 5;
+const MERGE_REBASE_POLL_INTERVAL_SECS: u64 = 3;
+const MAX_MERGE_REBASE_WAIT_SECS: u64 = 600; // 10 minutes
+
+/// Merge a session branch back to main via PR, with retry logic for rebase conflicts.
+/// When `allow_pty_prompts` is true, sends prompts to Claude to resolve conflicts.
+pub async fn merge_session_branch(
+    state: &AppState,
+    project_id: Uuid,
+    session_id: Uuid,
+    allow_pty_prompts: bool,
+) -> Result<crate::models::MergeResponse, AppError> {
+    tracing::info!(session_id = %session_id, project_id = %project_id, "merging session branch");
+
+    let (repo_path, worktree_path, branch_name) = {
+        let storage = state.storage.lock().map_err(AppError::internal)?;
+        let project = storage
+            .load_project(project_id)
+            .map_err(AppError::internal)?;
+        let session = project
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
+        let wt_path = session
+            .worktree_path
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("Session has no worktree".to_string()))?;
+        let branch = session
+            .worktree_branch
+            .clone()
+            .ok_or_else(|| AppError::BadRequest("Session has no branch".to_string()))?;
+        (project.repo_path.clone(), wt_path, branch)
+    };
+
+    for attempt in 0..MAX_MERGE_RETRIES {
+        let rp = repo_path.clone();
+        let wt = worktree_path.clone();
+        let br = branch_name.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            if WorktreeManager::is_rebase_in_progress(&wt) {
+                Ok(crate::worktree::MergeResult::RebaseConflicts)
+            } else {
+                WorktreeManager::merge_via_pr(&rp, &wt, &br)
+            }
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Task failed: {}", e)))?
+        .map_err(AppError::Internal)?;
+
+        match result {
+            crate::worktree::MergeResult::PrCreated(url) => {
+                tracing::info!(session_id = %session_id, url = %url, "PR created");
+                return Ok(crate::models::MergeResponse::PrCreated { url });
+            }
+            crate::worktree::MergeResult::RebaseConflicts => {
+                tracing::warn!(session_id = %session_id, attempt = attempt + 1, max = MAX_MERGE_RETRIES, "rebase conflicts during merge");
+
+                if allow_pty_prompts {
+                    let prompt = "merge\r";
+                    {
+                        let mut pty_manager =
+                            state.pty_manager.lock().map_err(AppError::internal)?;
+                        let _ = pty_manager.write_to_session(session_id, prompt.as_bytes());
+                    }
+                }
+
+                let _ = state.emitter.emit(
+                    "merge-status",
+                    &format!(
+                        "Rebase conflicts (attempt {}/{}). Claude is resolving...",
+                        attempt + 1,
+                        MAX_MERGE_RETRIES
+                    ),
+                );
+
+                let wt_poll = worktree_path.clone();
+                wait_for_merge_rebase_resolution(
+                    move || {
+                        let wt_check = wt_poll.clone();
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                WorktreeManager::is_rebase_in_progress(&wt_check)
+                            })
+                            .await
+                            .map_err(|e| format!("Task failed: {}", e))
+                        }
+                    },
+                    MAX_MERGE_REBASE_WAIT_SECS / MERGE_REBASE_POLL_INTERVAL_SECS,
+                    std::time::Duration::from_secs(MERGE_REBASE_POLL_INTERVAL_SECS),
+                )
+                .await
+                .map_err(AppError::Internal)?;
+
+                continue;
+            }
+        }
+    }
+
+    Err(AppError::Internal(format!(
+        "Merge failed after {} attempts due to recurring conflicts",
+        MAX_MERGE_RETRIES
+    )))
 }
 
 #[cfg(test)]

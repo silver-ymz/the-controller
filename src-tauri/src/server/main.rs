@@ -13,14 +13,12 @@ use axum::{
     Json, Router,
 };
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use the_controller_lib::{
-    architecture, auto_worker, commands, config, deploy, emitter::WsBroadcastEmitter, maintainer,
-    models, note_ai_chat, secure_env, service, session_args, state::AppState, status_socket,
-    token_usage,
+    architecture, config, deploy, emitter::WsBroadcastEmitter, models, note_ai_chat, secure_env,
+    service, state::AppState, status_socket,
 };
 
 use tokio::sync::broadcast;
@@ -823,17 +821,8 @@ async fn load_terminal_theme(
 async fn list_archived_projects(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let inventory = storage
-        .list_projects()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let filtered = inventory.filter_projects(|project| {
-        project.archived || project.sessions.iter().any(|session| session.archived)
-    });
+    let filtered =
+        service::list_archived_projects(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(filtered).unwrap()))
 }
 async fn merge_session_branch(
@@ -847,151 +836,24 @@ async fn merge_session_branch(
     let session_uuid =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let (repo_path, worktree_path, branch_name) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".to_string()))?;
-        let wt_path = session.worktree_path.clone().ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Session has no worktree".to_string(),
-            )
-        })?;
-        let branch = session
-            .worktree_branch
-            .clone()
-            .ok_or_else(|| (StatusCode::BAD_REQUEST, "Session has no branch".to_string()))?;
-        (project.repo_path.clone(), wt_path, branch)
-    };
-
     const OVERALL_TIMEOUT_SECS: u64 = 600; // 10 minutes
 
     let merge_result = tokio::time::timeout(
         std::time::Duration::from_secs(OVERALL_TIMEOUT_SECS),
-        do_merge_with_retries(
-            &state,
-            &repo_path,
-            &worktree_path,
-            &branch_name,
-            session_uuid,
-        ),
+        service::merge_session_branch(&state.app, project_uuid, session_uuid, true),
     )
     .await;
 
     match merge_result {
-        Ok(inner) => inner,
+        Ok(inner) => {
+            let resp = inner.map_err(<(StatusCode, String)>::from)?;
+            Ok(Json(serde_json::to_value(resp).unwrap()))
+        }
         Err(_) => Err((
             StatusCode::GATEWAY_TIMEOUT,
             format!("Merge timed out after {} seconds", OVERALL_TIMEOUT_SECS),
         )),
     }
-}
-
-async fn do_merge_with_retries(
-    state: &Arc<ServerState>,
-    repo_path: &str,
-    worktree_path: &str,
-    branch_name: &str,
-    session_uuid: uuid::Uuid,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    use the_controller_lib::models::MergeResponse;
-    use the_controller_lib::worktree::{MergeResult, WorktreeManager};
-
-    const MAX_RETRIES: u32 = 5;
-    const POLL_INTERVAL_SECS: u64 = 3;
-
-    for attempt in 0..MAX_RETRIES {
-        let rp = repo_path.to_string();
-        let wt = worktree_path.to_string();
-        let br = branch_name.to_string();
-
-        let result = tokio::task::spawn_blocking(move || {
-            if WorktreeManager::is_rebase_in_progress(&wt) {
-                Ok(MergeResult::RebaseConflicts)
-            } else {
-                WorktreeManager::merge_via_pr(&rp, &wt, &br)
-            }
-        })
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Task failed: {}", e),
-            )
-        })?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-        match result {
-            MergeResult::PrCreated(url) => {
-                let resp = MergeResponse::PrCreated { url };
-                return Ok(Json(serde_json::to_value(resp).unwrap()));
-            }
-            MergeResult::RebaseConflicts => {
-                let prompt = "merge\r";
-                {
-                    let mut pty_manager = state
-                        .app
-                        .pty_manager
-                        .lock()
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                    let _ = pty_manager.write_to_session(session_uuid, prompt.as_bytes());
-                }
-
-                let _ = state.app.emitter.emit(
-                    "merge-status",
-                    &format!(
-                        "Rebase conflicts (attempt {}/{}). Claude is resolving...",
-                        attempt + 1,
-                        MAX_RETRIES
-                    ),
-                );
-
-                let wt_poll = worktree_path.to_string();
-                let max_polls = 200; // 600s / 3s
-                let mut poll_count = 0;
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
-                    poll_count += 1;
-                    if poll_count >= max_polls {
-                        break;
-                    }
-                    let wt_check = wt_poll.clone();
-                    let still_rebasing = tokio::task::spawn_blocking(move || {
-                        WorktreeManager::is_rebase_in_progress(&wt_check)
-                    })
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Task failed: {}", e),
-                        )
-                    })?;
-                    if !still_rebasing {
-                        break;
-                    }
-                }
-                continue;
-            }
-        }
-    }
-
-    Err((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!(
-            "Merge failed after {} attempts due to recurring conflicts",
-            MAX_RETRIES
-        ),
-    ))
 }
 
 async fn send_note_ai_chat(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
@@ -1361,24 +1223,16 @@ async fn configure_maintainer(
     let enabled = args["enabled"].as_bool().unwrap_or(false);
     let interval_minutes = args["intervalMinutes"].as_u64().unwrap_or(30);
     let github_repo = args["githubRepo"].as_str().map(|s| s.to_string());
-    commands::validate_maintainer_interval(interval_minutes)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    project.maintainer.enabled = enabled;
-    project.maintainer.interval_minutes = interval_minutes;
-    project.maintainer.github_repo = github_repo;
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    service::configure_maintainer(
+        &state.app,
+        project_uuid,
+        enabled,
+        interval_minutes,
+        github_repo,
+    )
+    .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1391,14 +1245,8 @@ async fn get_maintainer_status(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let log = storage
-        .latest_maintainer_run_log(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let log = service::get_maintainer_status(&state.app, project_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(log).unwrap()))
 }
 
@@ -1411,14 +1259,8 @@ async fn get_maintainer_history(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let logs = storage
-        .maintainer_run_log_history(project_uuid, 20)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let logs = service::get_maintainer_history(&state.app, project_uuid, 20)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(logs).unwrap()))
 }
 
@@ -1431,59 +1273,9 @@ async fn trigger_maintainer_check(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (repo_path, github_repo) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        (
-            project.repo_path.clone(),
-            project.maintainer.github_repo.clone(),
-        )
-    };
-    let _ = state
-        .app
-        .emitter
-        .emit(&format!("maintainer-status:{}", project_uuid), "running");
-    let log = tokio::task::spawn_blocking(move || {
-        maintainer::run_maintainer_check(&repo_path, project_uuid, github_repo.as_deref())
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(|e| {
-        let _ = state
-            .app
-            .emitter
-            .emit(&format!("maintainer-status:{}", project_uuid), "error");
-        let _ = state
-            .app
-            .emitter
-            .emit(&format!("maintainer-error:{}", project_uuid), &e);
-        (StatusCode::INTERNAL_SERVER_ERROR, e)
-    })?;
-    {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        storage
-            .save_maintainer_run_log(&log)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-    let _ = state
-        .app
-        .emitter
-        .emit(&format!("maintainer-status:{}", project_uuid), "idle");
+    let log = service::trigger_maintainer_check(&state.app, project_uuid)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(log).unwrap()))
 }
 
@@ -1496,18 +1288,8 @@ async fn clear_maintainer_reports(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    storage
-        .clear_maintainer_run_logs(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let _ = state
-        .app
-        .emitter
-        .emit(&format!("maintainer-status:{}", project_uuid), "idle");
+    service::clear_maintainer_reports(&state.app, project_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1586,18 +1368,8 @@ async fn configure_auto_worker(
     let enabled = args["enabled"].as_bool().unwrap_or(false);
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    project.auto_worker.enabled = enabled;
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    service::configure_auto_worker(&state.app, project_uuid, enabled)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1610,54 +1382,9 @@ async fn get_auto_worker_queue(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing projectId".to_string()))?;
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let project = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    };
-    let active_issue = project
-        .sessions
-        .iter()
-        .find(|s| s.auto_worker_session)
-        .and_then(|s| s.github_issue.clone());
-    let issues = service::fetch_github_issues(&project.repo_path)
+    let queue = service::get_auto_worker_queue(&state.app, project_uuid)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    // Update cache
-    if let Ok(mut cache) = state.app.issue_cache.lock() {
-        cache.insert(project.repo_path.clone(), issues.clone());
-    }
-    let active_number = active_issue.as_ref().map(|i| i.number);
-    let mut queue = Vec::new();
-    if let Some(issue) = active_issue {
-        queue.push(models::AutoWorkerQueueIssue {
-            number: issue.number,
-            title: issue.title,
-            url: issue.url,
-            body: issue.body,
-            labels: issue.labels.into_iter().map(|l| l.name).collect(),
-            is_active: true,
-        });
-    }
-    queue.extend(
-        issues
-            .into_iter()
-            .filter(auto_worker::is_eligible)
-            .filter(|i| Some(i.number) != active_number)
-            .map(|i| models::AutoWorkerQueueIssue {
-                number: i.number,
-                title: i.title,
-                url: i.url,
-                body: i.body,
-                labels: i.labels.into_iter().map(|l| l.name).collect(),
-                is_active: false,
-            }),
-    );
     Ok(Json(serde_json::to_value(queue).unwrap()))
 }
 
@@ -1684,30 +1411,9 @@ async fn get_session_commits(
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let session_uuid =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (worktree_path, done_commits) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".to_string()))?;
-        match &session.worktree_path {
-            Some(p) => (p.clone(), session.done_commits.clone()),
-            None => {
-                return Ok(Json(serde_json::to_value(&session.done_commits).unwrap()));
-            }
-        }
-    };
-    let wt = worktree_path.clone();
-    let new_commits = tokio::task::spawn_blocking(move || {
-        discover_branch_commits_server(&wt).unwrap_or_default()
+    let storage = state.app.storage.clone();
+    let commits = tokio::task::spawn_blocking(move || {
+        service::get_session_commits(&storage, project_uuid, session_uuid)
     })
     .await
     .map_err(|e| {
@@ -1715,74 +1421,9 @@ async fn get_session_commits(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Task failed: {}", e),
         )
-    })?;
-    let mut seen = HashSet::new();
-    let mut all_commits = Vec::new();
-    for c in new_commits.iter().chain(done_commits.iter()) {
-        if seen.insert(c.hash.clone()) {
-            all_commits.push(c.clone());
-        }
-    }
-    if all_commits.len() > done_commits.len() {
-        if let Ok(storage) = state.app.storage.lock() {
-            if let Ok(mut project) = storage.load_project(project_uuid) {
-                if let Some(s) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
-                    s.done_commits = all_commits.clone();
-                }
-                let _ = storage.save_project(&project);
-            }
-        }
-    }
-    Ok(Json(serde_json::to_value(all_commits).unwrap()))
-}
-
-fn discover_branch_commits_server(worktree_path: &str) -> Result<Vec<models::CommitInfo>, String> {
-    let repo = git2::Repository::discover(worktree_path)
-        .map_err(|e| format!("Failed to open repo: {e}"))?;
-    let head = repo.head().map_err(|e| format!("No HEAD: {e}"))?;
-    let head_commit = head.peel_to_commit().map_err(|e| e.to_string())?;
-    let main_oid = find_main_branch_oid_server(&repo);
-    let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
-    revwalk.push(head_commit.id()).map_err(|e| e.to_string())?;
-    revwalk
-        .set_sorting(git2::Sort::TOPOLOGICAL)
-        .map_err(|e| e.to_string())?;
-    let mut commits = Vec::new();
-    for oid in revwalk {
-        let oid = oid.map_err(|e| e.to_string())?;
-        if let Some(main) = main_oid {
-            if oid == main {
-                break;
-            }
-            if let Ok(base) = repo.merge_base(oid, main) {
-                if base == oid {
-                    break;
-                }
-            }
-        }
-        let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
-        let message = commit.summary().unwrap_or("").to_string();
-        if message.starts_with("Initial commit") {
-            continue;
-        }
-        let hash = oid.to_string()[..7].to_string();
-        commits.push(models::CommitInfo { hash, message });
-        if commits.len() >= 20 {
-            break;
-        }
-    }
-    Ok(commits)
-}
-
-fn find_main_branch_oid_server(repo: &git2::Repository) -> Option<git2::Oid> {
-    for name in &["refs/heads/main", "refs/heads/master"] {
-        if let Ok(reference) = repo.find_reference(name) {
-            if let Ok(commit) = reference.peel_to_commit() {
-                return Some(commit.id());
-            }
-        }
-    }
-    None
+    })?
+    .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(commits).unwrap()))
 }
 
 async fn save_session_prompt(
@@ -1795,52 +1436,8 @@ async fn save_session_prompt(
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let session_uuid =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let session = project
-        .sessions
-        .iter()
-        .find(|s| s.id == session_uuid)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".to_string()))?;
-    let prompt_text = session
-        .initial_prompt
-        .clone()
-        .or_else(|| {
-            session.github_issue.as_ref().map(|issue| {
-                session_args::build_issue_prompt(issue.number, &issue.title, &issue.url, false)
-            })
-        })
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Session has no prompt to save".to_string(),
-            )
-        })?;
-    let name = {
-        let truncated: String = prompt_text.chars().take(60).collect();
-        if truncated.len() < prompt_text.len() {
-            format!("{}...", truncated)
-        } else {
-            truncated
-        }
-    };
-    let saved = models::SavedPrompt {
-        id: uuid::Uuid::new_v4(),
-        name,
-        text: prompt_text,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        source_session_label: session.label.clone(),
-    };
-    project.prompts.push(saved);
-    storage
-        .save_project(&project)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    service::save_session_prompt(&state.app, project_uuid, session_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
 
@@ -1851,15 +1448,9 @@ async fn list_project_prompts(
     let project_id = args["projectId"].as_str().unwrap_or_default();
     let project_uuid =
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let project = storage
-        .load_project(project_uuid)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::to_value(project.prompts).unwrap()))
+    let prompts = service::list_project_prompts(&state.app, project_uuid)
+        .map_err(<(StatusCode, String)>::from)?;
+    Ok(Json(serde_json::to_value(prompts).unwrap()))
 }
 
 async fn get_repo_head(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCode, String)> {
@@ -1867,27 +1458,15 @@ async fn get_repo_head(Json(args): Json<Value>) -> Result<Json<Value>, (StatusCo
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing repoPath".to_string()))?
         .to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        let repo = git2::Repository::open(&repo_path)
-            .map_err(|e| format!("Failed to open repo: {}", e))?;
-        let head = repo
-            .head()
-            .map_err(|e| format!("Failed to get HEAD: {}", e))?;
-        let branch = head.shorthand().unwrap_or("HEAD").to_string();
-        let commit = head
-            .peel_to_commit()
-            .map_err(|e| format!("Failed to peel to commit: {}", e))?;
-        let short_hash = commit.id().to_string()[..7].to_string();
-        Ok::<_, String>((branch, short_hash))
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let result = tokio::task::spawn_blocking(move || service::get_repo_head(&repo_path))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Task failed: {}", e),
+            )
+        })?
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(result).unwrap()))
 }
 
@@ -1901,37 +1480,18 @@ async fn get_session_token_usage(
         uuid::Uuid::parse_str(project_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let session_uuid =
         uuid::Uuid::parse_str(session_id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let (working_dir, kind) = {
-        let storage = state
-            .app
-            .storage
-            .lock()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".to_string()))?;
-        let dir = session
-            .worktree_path
-            .as_deref()
-            .unwrap_or(&project.repo_path)
-            .to_string();
-        (dir, session.kind.clone())
-    };
-    let data =
-        tokio::task::spawn_blocking(move || token_usage::get_token_usage(&working_dir, &kind))
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Task failed: {}", e),
-                )
-            })?
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let storage = state.app.storage.clone();
+    let data = tokio::task::spawn_blocking(move || {
+        service::get_session_token_usage(&storage, project_uuid, session_uuid)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Task failed: {}", e),
+        )
+    })?
+    .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(data).unwrap()))
 }
 
@@ -1942,14 +1502,8 @@ async fn list_directories_at(Json(args): Json<Value>) -> Result<Json<Value>, (St
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing path".to_string()))?
         .to_string();
-    let p = Path::new(&path);
-    if !p.is_dir() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Not a directory: {}", path),
-        ));
-    }
     // Restrict to directories under $HOME to prevent arbitrary filesystem enumeration
+    let p = Path::new(&path);
     let requested = std::fs::canonicalize(p).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -1968,28 +1522,15 @@ async fn list_directories_at(Json(args): Json<Value>) -> Result<Json<Value>, (St
             "path must be under the home directory".to_string(),
         ));
     }
-    let entries = config::list_directories(p)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let entries = service::list_directories_at(&path).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(entries).unwrap()))
 }
 
 async fn list_root_directories(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let storage = state
-        .app
-        .storage
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let base_dir = storage.base_dir();
-    let cfg = config::load_config(&base_dir).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "No config found. Complete onboarding first.".to_string(),
-        )
-    })?;
-    let entries = config::list_directories(Path::new(&cfg.projects_root))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let entries =
+        service::list_root_directories(&state.app).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(entries).unwrap()))
 }
 
@@ -2000,7 +1541,7 @@ async fn generate_project_names(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing description".to_string()))?
         .to_string();
-    let names = tokio::task::spawn_blocking(move || config::generate_names_via_cli(&description))
+    let names = tokio::task::spawn_blocking(move || service::generate_project_names(&description))
         .await
         .map_err(|e| {
             (
@@ -2008,7 +1549,7 @@ async fn generate_project_names(
                 format!("Task failed: {}", e),
             )
         })?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(serde_json::to_value(names).unwrap()))
 }
 
@@ -2022,7 +1563,7 @@ async fn scaffold_project(
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing name".to_string()))?
         .to_string();
-    commands::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    service::validate_project_name(&name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let repo_path = {
         let storage = state
             .app
@@ -2053,7 +1594,7 @@ async fn scaffold_project(
     }
     let name_clone = name.clone();
     let project = tokio::task::spawn_blocking(move || {
-        commands::scaffold_project_blocking(name_clone, repo_path)
+        service::scaffold_project_blocking(name_clone, repo_path)
     })
     .await
     .map_err(|e| {

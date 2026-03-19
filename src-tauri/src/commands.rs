@@ -1,17 +1,16 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::architecture::{generate_architecture_blocking_with_emitter, ArchitectureResult};
 use crate::config;
-use crate::models::{AutoWorkerQueueIssue, CommitInfo, GithubIssue, Project};
+use crate::models::{AutoWorkerQueueIssue, CommitInfo, Project};
 use crate::service;
 use crate::state::AppState;
 use crate::storage::ProjectInventory;
 use crate::terminal_theme;
-use crate::token_usage::{self, TokenDataPoint};
-use crate::worktree::WorktreeManager;
+use crate::token_usage::TokenDataPoint;
 
 mod github;
 mod media;
@@ -24,6 +23,12 @@ pub use crate::service::{ensure_claude_md_symlink, render_agents_md, validate_pr
 // Re-export session helpers that moved to the service layer so external callers
 // (e.g. auto_worker.rs, lib.rs, status_socket.rs, server/main.rs) keep working.
 pub use crate::service::{kill_process_group, next_session_label, stage_session_core};
+
+// Re-export scaffold and git helpers that moved to the service layer.
+pub use crate::service::{
+    build_auto_worker_queue, discover_branch_commits, find_main_branch_oid,
+    scaffold_project_blocking, validate_maintainer_interval,
+};
 
 // Re-export test-only helpers that moved to the service layer.
 #[cfg(test)]
@@ -77,181 +82,9 @@ where
     }
 }
 
-async fn wait_for_merge_rebase_resolution<F, Fut>(
-    mut is_rebase_in_progress: F,
-    max_polls: u64,
-    poll_interval: std::time::Duration,
-) -> Result<(), String>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<bool, String>>,
-{
-    for _ in 0..max_polls {
-        tokio::time::sleep(poll_interval).await;
-        if !is_rebase_in_progress().await? {
-            return Ok(());
-        }
-    }
-
-    Err("Timed out waiting for merge conflict resolution.".to_string())
-}
-
-fn rollback_scaffold_dir(repo_path: &Path, error: String) -> String {
-    match std::fs::remove_dir_all(repo_path) {
-        Ok(_) => error,
-        Err(cleanup_error) => format!("{} (cleanup failed: {})", error, cleanup_error),
-    }
-}
-
-fn github_cli_command() -> std::process::Command {
-    std::process::Command::new(
-        std::env::var("THE_CONTROLLER_GH_BIN").unwrap_or_else(|_| "gh".to_string()),
-    )
-}
-
-fn git_cli_command() -> std::process::Command {
-    std::process::Command::new(
-        std::env::var("THE_CONTROLLER_GIT_BIN").unwrap_or_else(|_| "git".to_string()),
-    )
-}
-
-fn rollback_scaffold_state(repo_path: &Path, error: String) -> String {
-    let mut cleanup_errors = Vec::new();
-
-    if let Ok(repo) = git2::Repository::open(repo_path) {
-        if let Ok(remote) = repo.find_remote("origin") {
-            if let Some(url) = remote.url() {
-                if let Ok(nwo) = crate::service::parse_github_nwo(url) {
-                    match github_cli_command()
-                        .args(["repo", "delete", &nwo, "--yes"])
-                        .output()
-                    {
-                        Ok(output) if output.status.success() => {}
-                        Ok(output) => cleanup_errors.push(format!(
-                            "remote cleanup failed: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        )),
-                        Err(e) => cleanup_errors.push(format!("remote cleanup failed: {}", e)),
-                    }
-                }
-            }
-        }
-    }
-
-    if let Err(cleanup_error) = std::fs::remove_dir_all(repo_path) {
-        cleanup_errors.push(format!("local cleanup failed: {}", cleanup_error));
-    }
-
-    if cleanup_errors.is_empty() {
-        error
-    } else {
-        format!("{} ({})", error, cleanup_errors.join("; "))
-    }
-}
-
-pub fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Project, String> {
-    tracing::info!(project_name = %name, repo_path = %repo_path.display(), "scaffolding project on disk");
-    let parent_dir = repo_path
-        .parent()
-        .ok_or_else(|| format!("Invalid repo path: {}", repo_path.display()))?;
-    std::fs::create_dir_all(parent_dir).map_err(|e| e.to_string())?;
-    std::fs::create_dir(&repo_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            format!("Directory already exists: {}", name)
-        } else {
-            e.to_string()
-        }
-    })?;
-    let rollback_dir = |error: String| rollback_scaffold_dir(&repo_path, error);
-
-    let repo = git2::Repository::init(&repo_path).map_err(|e| rollback_dir(e.to_string()))?;
-    let sig = repo
-        .signature()
-        .unwrap_or_else(|_| git2::Signature::now("The Controller", "noreply@controller").unwrap());
-
-    let agents_content = render_agents_md(&name);
-    std::fs::write(repo_path.join("agents.md"), &agents_content)
-        .map_err(|e| rollback_dir(format!("failed to write agents.md: {}", e)))?;
-    ensure_claude_md_symlink(&repo_path).map_err(rollback_dir)?;
-    let plans_dir = repo_path.join("docs").join("plans");
-    std::fs::create_dir_all(&plans_dir)
-        .map_err(|e| rollback_dir(format!("failed to create docs/plans: {}", e)))?;
-    std::fs::write(plans_dir.join(".gitkeep"), "")
-        .map_err(|e| rollback_dir(format!("failed to write .gitkeep: {}", e)))?;
-
-    let mut index = repo
-        .index()
-        .map_err(|e| rollback_dir(format!("failed to get index: {}", e)))?;
-    index
-        .add_path(std::path::Path::new("agents.md"))
-        .map_err(|e| rollback_dir(format!("failed to add agents.md to index: {}", e)))?;
-    index
-        .add_path(std::path::Path::new("CLAUDE.md"))
-        .map_err(|e| rollback_dir(format!("failed to add CLAUDE.md to index: {}", e)))?;
-    index
-        .add_path(std::path::Path::new("docs/plans/.gitkeep"))
-        .map_err(|e| rollback_dir(format!("failed to add .gitkeep to index: {}", e)))?;
-    index
-        .write()
-        .map_err(|e| rollback_dir(format!("failed to write index: {}", e)))?;
-    let tree_id = index
-        .write_tree()
-        .map_err(|e| rollback_dir(format!("failed to write tree: {}", e)))?;
-    let tree = repo
-        .find_tree(tree_id)
-        .map_err(|e| rollback_dir(format!("failed to find tree: {}", e)))?;
-
-    repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
-        .map_err(|e| rollback_dir(format!("failed to create initial commit: {}", e)))?;
-
-    let gh_output = github_cli_command()
-        .args([
-            "repo",
-            "create",
-            &name,
-            "--private",
-            "--source=.",
-            "--remote=origin",
-        ])
-        .current_dir(&repo_path)
-        .output()
-        .map_err(|e| rollback_dir(format!("Failed to run gh CLI: {}. Is gh installed?", e)))?;
-    if !gh_output.status.success() {
-        let stderr = String::from_utf8_lossy(&gh_output.stderr);
-        return Err(rollback_dir(format!(
-            "Failed to create GitHub repo: {}",
-            stderr.trim()
-        )));
-    }
-
-    let push_output = git_cli_command()
-        .args(["push", "--set-upstream", "origin", "HEAD"])
-        .current_dir(&repo_path)
-        .output()
-        .map_err(|e| {
-            rollback_scaffold_state(&repo_path, format!("Failed to run git push: {}", e))
-        })?;
-    if !push_output.status.success() {
-        let stderr = String::from_utf8_lossy(&push_output.stderr);
-        return Err(rollback_scaffold_state(
-            &repo_path,
-            format!("Failed to push initial commit: {}", stderr.trim()),
-        ));
-    }
-
-    Ok(Project {
-        id: Uuid::new_v4(),
-        name,
-        repo_path: repo_path.to_string_lossy().to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        archived: false,
-        maintainer: crate::models::MaintainerConfig::default(),
-        auto_worker: crate::models::AutoWorkerConfig::default(),
-        prompts: vec![],
-        sessions: vec![],
-        staged_sessions: vec![],
-    })
-}
+// Re-export wait_for_merge_rebase_resolution for tests
+#[cfg(test)]
+pub(crate) use crate::service::wait_for_merge_rebase_resolution;
 
 /// Run storage migrations on startup (worktree path format, etc.).
 /// PTY connections are deferred to `connect_session` so each terminal
@@ -527,23 +360,10 @@ pub fn unstage_session(
 #[tauri::command]
 pub async fn get_repo_head(repo_path: String) -> Result<(String, String), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let repo = git2::Repository::open(&repo_path)
-            .map_err(|e| format!("Failed to open repo: {}", e))?;
-
-        let head = repo
-            .head()
-            .map_err(|e| format!("Failed to get HEAD: {}", e))?;
-        let branch = head.shorthand().unwrap_or("HEAD").to_string();
-
-        let commit = head
-            .peel_to_commit()
-            .map_err(|e| format!("Failed to peel to commit: {}", e))?;
-        let short_hash = commit.id().to_string()[..7].to_string();
-
-        Ok((branch, short_hash))
+        service::get_repo_head(&repo_path).map_err(Into::into)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -554,56 +374,7 @@ pub fn save_session_prompt(
 ) -> Result<(), String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage
-        .load_project(project_uuid)
-        .map_err(|e| e.to_string())?;
-
-    let session = project
-        .sessions
-        .iter()
-        .find(|s| s.id == session_uuid)
-        .ok_or_else(|| "Session not found".to_string())?;
-
-    // Build prompt text: use initial_prompt, or derive from github_issue
-    let prompt_text = session
-        .initial_prompt
-        .clone()
-        .or_else(|| {
-            session.github_issue.as_ref().map(|issue| {
-                crate::session_args::build_issue_prompt(
-                    issue.number,
-                    &issue.title,
-                    &issue.url,
-                    false,
-                )
-            })
-        })
-        .ok_or_else(|| "Session has no prompt to save".to_string())?;
-
-    // Auto-generate name: first ~60 chars (safe for multi-byte UTF-8)
-    let name = {
-        let truncated: String = prompt_text.chars().take(60).collect();
-        if truncated.chars().count() < prompt_text.chars().count() {
-            format!("{}...", truncated)
-        } else {
-            truncated
-        }
-    };
-
-    let saved = crate::models::SavedPrompt {
-        id: Uuid::new_v4(),
-        name,
-        text: prompt_text,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        source_session_label: session.label.clone(),
-    };
-
-    project.prompts.push(saved);
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-
-    Ok(())
+    service::save_session_prompt(&state, project_uuid, session_uuid).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -612,11 +383,7 @@ pub fn list_project_prompts(
     project_id: String,
 ) -> Result<Vec<crate::models::SavedPrompt>, String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let project = storage
-        .load_project(project_uuid)
-        .map_err(|e| e.to_string())?;
-    Ok(project.prompts)
+    service::list_project_prompts(&state, project_uuid).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -692,27 +459,21 @@ pub async fn check_claude_cli() -> Result<String, String> {
 
 #[tauri::command]
 pub fn list_directories_at(path: String) -> Result<Vec<config::DirEntry>, String> {
-    let p = Path::new(&path);
-    if !p.is_dir() {
-        return Err(format!("Not a directory: {}", path));
-    }
-    config::list_directories(p).map_err(|e| e.to_string())
+    service::list_directories_at(&path).map_err(Into::into)
 }
 
 #[tauri::command]
 pub fn list_root_directories(state: State<AppState>) -> Result<Vec<config::DirEntry>, String> {
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let base_dir = storage.base_dir();
-    let cfg = config::load_config(&base_dir)
-        .ok_or_else(|| "No config found. Complete onboarding first.".to_string())?;
-    config::list_directories(Path::new(&cfg.projects_root)).map_err(|e| e.to_string())
+    service::list_root_directories(&state).map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn generate_project_names(description: String) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || config::generate_names_via_cli(&description))
-        .await
-        .map_err(|e| format!("Task failed: {}", e))?
+    tauri::async_runtime::spawn_blocking(move || {
+        service::generate_project_names(&description).map_err(Into::into)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -762,7 +523,7 @@ pub async fn scaffold_project(state: State<'_, AppState>, name: String) -> Resul
         let existing = inventory.projects;
         if existing.iter().any(|p| p.name == project.name) {
             drop(storage);
-            return Err(rollback_scaffold_state(
+            return Err(service::rollback_scaffold_state(
                 Path::new(&project.repo_path),
                 format!("A project named '{}' already exists", project.name),
             ));
@@ -1000,10 +761,6 @@ pub async fn send_note_ai_chat(
         .await
         .map_err(Into::into)
 }
-const MAX_MERGE_RETRIES: u32 = 5;
-const REBASE_POLL_INTERVAL_SECS: u64 = 3;
-const MAX_MERGE_REBASE_WAIT_SECS: u64 = 600; // 10 minutes
-
 #[tauri::command]
 pub async fn merge_session_branch(
     state: State<'_, AppState>,
@@ -1013,99 +770,9 @@ pub async fn merge_session_branch(
 ) -> Result<crate::models::MergeResponse, String> {
     let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
     let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-    tracing::info!(session_id = %session_uuid, project_id = %project_uuid, "merging session branch");
-
-    let (repo_path, worktree_path, branch_name) = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| e.to_string())?;
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .ok_or_else(|| "Session not found".to_string())?;
-        let wt_path = session
-            .worktree_path
-            .clone()
-            .ok_or_else(|| "Session has no worktree".to_string())?;
-        let branch = session
-            .worktree_branch
-            .clone()
-            .ok_or_else(|| "Session has no branch".to_string())?;
-        (project.repo_path.clone(), wt_path, branch)
-    };
-
-    for attempt in 0..MAX_MERGE_RETRIES {
-        let rp = repo_path.clone();
-        let wt = worktree_path.clone();
-        let br = branch_name.clone();
-
-        let result = tokio::task::spawn_blocking(move || {
-            if WorktreeManager::is_rebase_in_progress(&wt) {
-                // Rebase still in progress from a previous attempt — wait
-                Ok(crate::worktree::MergeResult::RebaseConflicts)
-            } else {
-                WorktreeManager::merge_via_pr(&rp, &wt, &br)
-            }
-        })
+    service::merge_session_branch(&state, project_uuid, session_uuid, true)
         .await
-        .map_err(|e| format!("Task failed: {}", e))??;
-
-        match result {
-            crate::worktree::MergeResult::PrCreated(url) => {
-                tracing::info!(session_id = %session_uuid, url = %url, "PR created");
-                return Ok(crate::models::MergeResponse::PrCreated { url });
-            }
-            crate::worktree::MergeResult::RebaseConflicts => {
-                tracing::warn!(session_id = %session_uuid, attempt = attempt + 1, max = MAX_MERGE_RETRIES, "rebase conflicts during merge, asking Claude to resolve");
-                // Send a prompt to Claude to resolve conflicts
-                let prompt = "merge\r";
-                {
-                    let mut pty_manager = state.pty_manager.lock().map_err(|e| e.to_string())?;
-                    let _ = pty_manager.write_to_session(session_uuid, prompt.as_bytes());
-                }
-
-                // Emit status event so frontend can show progress
-                let _ = state.emitter.emit(
-                    "merge-status",
-                    &format!(
-                        "Rebase conflicts (attempt {}/{}). Claude is resolving...",
-                        attempt + 1,
-                        MAX_MERGE_RETRIES
-                    ),
-                );
-
-                // Poll until rebase is no longer in progress, but stop waiting
-                // eventually so the frontend can recover if Claude never resolves it.
-                let wt_poll = worktree_path.clone();
-                wait_for_merge_rebase_resolution(
-                    move || {
-                        let wt_check = wt_poll.clone();
-                        async move {
-                            tokio::task::spawn_blocking(move || {
-                                WorktreeManager::is_rebase_in_progress(&wt_check)
-                            })
-                            .await
-                            .map_err(|e| format!("Task failed: {}", e))
-                        }
-                    },
-                    MAX_MERGE_REBASE_WAIT_SECS / REBASE_POLL_INTERVAL_SECS,
-                    std::time::Duration::from_secs(REBASE_POLL_INTERVAL_SECS),
-                )
-                .await?;
-
-                // Loop back — will sync main and rebase again
-                continue;
-            }
-        }
-    }
-
-    tracing::error!(session_id = %session_uuid, attempts = MAX_MERGE_RETRIES, "merge failed after max retries due to recurring conflicts");
-    Err(format!(
-        "Merge failed after {} attempts due to recurring conflicts",
-        MAX_MERGE_RETRIES
-    ))
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1118,45 +785,7 @@ pub async fn get_session_commits(
     tauri::async_runtime::spawn_blocking(move || {
         let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
         let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-
-        let storage = storage.lock().map_err(|e| e.to_string())?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| e.to_string())?;
-
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .ok_or_else(|| "Session not found".to_string())?;
-
-        let worktree_path = match &session.worktree_path {
-            Some(p) => p.clone(),
-            None => return Ok(session.done_commits.clone()),
-        };
-
-        // Discover new commits on the branch that aren't on main
-        let new_commits = discover_branch_commits(&worktree_path).unwrap_or_default();
-
-        // Merge with previously stored commits (new first, then stored, dedup by hash)
-        let mut seen = std::collections::HashSet::new();
-        let mut all_commits = Vec::new();
-        for c in new_commits.iter().chain(session.done_commits.iter()) {
-            if seen.insert(c.hash.clone()) {
-                all_commits.push(c.clone());
-            }
-        }
-
-        // Persist if we found new commits
-        if all_commits.len() > session.done_commits.len() {
-            let mut project = project.clone();
-            if let Some(s) = project.sessions.iter_mut().find(|s| s.id == session_uuid) {
-                s.done_commits = all_commits.clone();
-            }
-            let _ = storage.save_project(&project);
-        }
-
-        Ok(all_commits)
+        service::get_session_commits(&storage, project_uuid, session_uuid).map_err(Into::into)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1172,78 +801,10 @@ pub async fn get_session_token_usage(
     tauri::async_runtime::spawn_blocking(move || {
         let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
         let session_uuid = Uuid::parse_str(&session_id).map_err(|e| e.to_string())?;
-
-        let storage = storage.lock().map_err(|e| e.to_string())?;
-        let project = storage
-            .load_project(project_uuid)
-            .map_err(|e| e.to_string())?;
-
-        let session = project
-            .sessions
-            .iter()
-            .find(|s| s.id == session_uuid)
-            .ok_or_else(|| "Session not found".to_string())?;
-
-        let working_dir = session
-            .worktree_path
-            .as_deref()
-            .unwrap_or(&project.repo_path);
-
-        token_usage::get_token_usage(working_dir, &session.kind)
+        service::get_session_token_usage(&storage, project_uuid, session_uuid).map_err(Into::into)
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-/// Walk commits on the worktree branch that aren't on the main branch.
-fn discover_branch_commits(worktree_path: &str) -> Result<Vec<CommitInfo>, String> {
-    let repo = git2::Repository::discover(worktree_path)
-        .map_err(|e| format!("Failed to open repo: {e}"))?;
-
-    let head = repo.head().map_err(|e| format!("No HEAD: {e}"))?;
-    let head_commit = head.peel_to_commit().map_err(|e| e.to_string())?;
-
-    let main_oid = find_main_branch_oid(&repo);
-
-    let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
-    revwalk.push(head_commit.id()).map_err(|e| e.to_string())?;
-    revwalk
-        .set_sorting(git2::Sort::TOPOLOGICAL)
-        .map_err(|e| e.to_string())?;
-
-    let mut commits = Vec::new();
-    for oid in revwalk {
-        let oid = oid.map_err(|e| e.to_string())?;
-        if let Some(main) = main_oid {
-            if oid == main {
-                break;
-            }
-            if let Ok(base) = repo.merge_base(oid, main) {
-                if base == oid {
-                    break;
-                }
-            }
-        }
-        let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
-        let message = commit.summary().unwrap_or("").to_string();
-        if message.starts_with("Initial commit") {
-            continue;
-        }
-        let hash = oid.to_string()[..7].to_string();
-        commits.push(CommitInfo { hash, message });
-        if commits.len() >= 20 {
-            break;
-        }
-    }
-
-    Ok(commits)
-}
-
-pub fn validate_maintainer_interval(minutes: u64) -> Result<(), String> {
-    if minutes < 5 {
-        return Err("Interval must be at least 5 minutes".to_string());
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -1255,17 +816,9 @@ pub async fn configure_maintainer(
     github_repo: Option<String>,
 ) -> Result<(), String> {
     tracing::debug!(project_id = %project_id, enabled, interval_minutes, "configuring maintainer");
-    validate_maintainer_interval(interval_minutes)?;
-    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage
-        .load_project(project_id)
-        .map_err(|e| e.to_string())?;
-    project.maintainer.enabled = enabled;
-    project.maintainer.interval_minutes = interval_minutes;
-    project.maintainer.github_repo = github_repo;
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-    Ok(())
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    service::configure_maintainer(&state, project_uuid, enabled, interval_minutes, github_repo)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1275,14 +828,8 @@ pub async fn configure_auto_worker(
     enabled: bool,
 ) -> Result<(), String> {
     tracing::debug!(project_id = %project_id, enabled, "configuring auto worker");
-    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    let mut project = storage
-        .load_project(project_id)
-        .map_err(|e| e.to_string())?;
-    project.auto_worker.enabled = enabled;
-    storage.save_project(&project).map_err(|e| e.to_string())?;
-    Ok(())
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    service::configure_auto_worker(&state, project_uuid, enabled).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1290,63 +837,15 @@ pub async fn get_worker_reports(repo_path: String) -> Result<Vec<github::WorkerR
     github::get_worker_reports(repo_path).await
 }
 
-fn queue_issue_from_github(issue: GithubIssue, is_active: bool) -> AutoWorkerQueueIssue {
-    AutoWorkerQueueIssue {
-        number: issue.number,
-        title: issue.title,
-        url: issue.url,
-        body: issue.body,
-        labels: issue.labels.into_iter().map(|label| label.name).collect(),
-        is_active,
-    }
-}
-
-fn active_auto_worker_issue(project: &Project) -> Option<GithubIssue> {
-    project
-        .sessions
-        .iter()
-        .find(|session| session.auto_worker_session)
-        .and_then(|session| session.github_issue.clone())
-}
-
-fn build_auto_worker_queue(
-    issues: Vec<GithubIssue>,
-    active_issue: Option<GithubIssue>,
-) -> Vec<AutoWorkerQueueIssue> {
-    let active_issue_number = active_issue.as_ref().map(|issue| issue.number);
-    let mut queue = Vec::new();
-
-    if let Some(issue) = active_issue {
-        queue.push(queue_issue_from_github(issue, true));
-    }
-
-    queue.extend(
-        issues
-            .into_iter()
-            .filter(crate::auto_worker::is_eligible)
-            .filter(|issue| Some(issue.number) != active_issue_number)
-            .map(|issue| queue_issue_from_github(issue, false)),
-    );
-
-    queue
-}
-
 #[tauri::command]
 pub async fn get_auto_worker_queue(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Vec<AutoWorkerQueueIssue>, String> {
-    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let project = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-        storage
-            .load_project(project_id)
-            .map_err(|e| e.to_string())?
-    };
-
-    let active_issue = active_auto_worker_issue(&project);
-    let issues = github::list_github_issues(project.repo_path.clone(), state).await?;
-    Ok(build_auto_worker_queue(issues, active_issue))
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    service::get_auto_worker_queue(&state, project_uuid)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1354,11 +853,8 @@ pub async fn get_maintainer_status(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Option<crate::models::MaintainerRunLog>, String> {
-    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    storage
-        .latest_maintainer_run_log(project_id)
-        .map_err(|e| e.to_string())
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    service::get_maintainer_status(&state, project_uuid).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1366,13 +862,11 @@ pub async fn get_maintainer_history(
     state: State<'_, AppState>,
     project_id: String,
 ) -> Result<Vec<crate::models::MaintainerRunLog>, String> {
-    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    storage
-        .maintainer_run_log_history(project_id, 20)
-        .map_err(|e| e.to_string())
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    service::get_maintainer_history(&state, project_uuid, 20).map_err(Into::into)
 }
 
+#[cfg(test)]
 async fn run_maintainer_check_spawn_blocking_with<F>(
     repo_path: String,
     project_id: Uuid,
@@ -1389,22 +883,6 @@ where
         .map_err(|e| format!("Task failed: {e}"))?
 }
 
-async fn run_maintainer_check_spawn_blocking(
-    repo_path: String,
-    project_id: Uuid,
-    github_repo: Option<String>,
-) -> Result<crate::models::MaintainerRunLog, String> {
-    run_maintainer_check_spawn_blocking_with(
-        repo_path,
-        project_id,
-        github_repo,
-        |repo_path, project_id, github_repo| {
-            crate::maintainer::run_maintainer_check(&repo_path, project_id, github_repo.as_deref())
-        },
-    )
-    .await
-}
-
 #[tauri::command]
 pub async fn trigger_maintainer_check(
     state: State<'_, AppState>,
@@ -1412,49 +890,10 @@ pub async fn trigger_maintainer_check(
     project_id: String,
 ) -> Result<crate::models::MaintainerRunLog, String> {
     tracing::info!(project_id = %project_id, "triggering maintainer check");
-    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-
-    let (repo_path, github_repo) = {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-        let project = storage
-            .load_project(project_id)
-            .map_err(|e| e.to_string())?;
-        (
-            project.repo_path.clone(),
-            project.maintainer.github_repo.clone(),
-        )
-    };
-
-    let _ = state
-        .emitter
-        .emit(&format!("maintainer-status:{}", project_id), "running");
-
-    let log = match run_maintainer_check_spawn_blocking(repo_path, project_id, github_repo).await {
-        Ok(log) => log,
-        Err(e) => {
-            tracing::error!(project_id = %project_id, error = %e, "maintainer check failed");
-            let _ = state
-                .emitter
-                .emit(&format!("maintainer-status:{}", project_id), "error");
-            let _ = state
-                .emitter
-                .emit(&format!("maintainer-error:{}", project_id), &e.to_string());
-            return Err(e);
-        }
-    };
-
-    {
-        let storage = state.storage.lock().map_err(|e| e.to_string())?;
-        storage
-            .save_maintainer_run_log(&log)
-            .map_err(|e| e.to_string())?;
-    }
-
-    let _ = state
-        .emitter
-        .emit(&format!("maintainer-status:{}", project_id), "idle");
-
-    Ok(log)
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    service::trigger_maintainer_check(&state, project_uuid)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1464,15 +903,8 @@ pub async fn clear_maintainer_reports(
     project_id: String,
 ) -> Result<(), String> {
     tracing::debug!(project_id = %project_id, "clearing maintainer reports");
-    let project_id = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
-    let storage = state.storage.lock().map_err(|e| e.to_string())?;
-    storage
-        .clear_maintainer_run_logs(project_id)
-        .map_err(|e| e.to_string())?;
-    let _ = state
-        .emitter
-        .emit(&format!("maintainer-status:{}", project_id), "idle");
-    Ok(())
+    let project_uuid = Uuid::parse_str(&project_id).map_err(|e| e.to_string())?;
+    service::clear_maintainer_reports(&state, project_uuid).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1547,17 +979,6 @@ pub async fn load_keybindings(
     crate::service::load_keybindings(&state).map_err(Into::into)
 }
 
-fn find_main_branch_oid(repo: &git2::Repository) -> Option<git2::Oid> {
-    for name in &["refs/heads/main", "refs/heads/master"] {
-        if let Ok(reference) = repo.find_reference(name) {
-            if let Ok(commit) = reference.peel_to_commit() {
-                return Some(commit.id());
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1566,6 +987,7 @@ mod tests {
     use crate::pty_manager::PtyManager;
     use crate::state::{AppState, IssueCache};
     use crate::storage::Storage;
+    use crate::worktree::WorktreeManager;
     use once_cell::sync::Lazy;
     use std::env;
     use std::fs;
@@ -2663,15 +2085,17 @@ selection_background #444444
 
     #[test]
     fn test_trigger_maintainer_check_uses_spawn_blocking() {
+        // The blocking work now lives in service::trigger_maintainer_check
         let source =
-            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands.rs"))
-                .expect("read commands source");
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service.rs"))
+                .expect("read service source");
         let start = source
             .find("pub async fn trigger_maintainer_check")
             .expect("find trigger_maintainer_check");
         let rest = &source[start..];
         let end = rest
-            .find("\n#[tauri::command]")
+            .find("\npub ")
+            .or_else(|| rest.find("\n#[cfg(test)]"))
             .expect("find end of trigger_maintainer_check");
         let function_body = &rest[..end];
 
