@@ -1,3 +1,6 @@
+#[allow(dead_code)] // Used by tauri_gen and axum_gen modules (not yet wired up)
+mod parse;
+
 use proc_macro::TokenStream;
 
 /// Auto-derive Tauri commands and Axum handlers from a service function.
