@@ -736,20 +736,60 @@ fn forwarded_proto(headers: &HeaderMap) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
+// --- Shared handler utilities ---
+
+/// Parse a UUID string, returning `BAD_REQUEST` on failure.
+fn parse_uuid(s: &str) -> Result<uuid::Uuid, (StatusCode, String)> {
+    uuid::Uuid::parse_str(s).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+/// Serialize a value to `Json<Value>`, mapping serialization failure to
+/// `INTERNAL_SERVER_ERROR`. Nearly all service return types implement
+/// `Serialize`, so this replaces the scattered `serde_json::to_value(x).unwrap()` calls.
+fn ok_json<T: serde::Serialize>(v: T) -> Result<Json<Value>, (StatusCode, String)> {
+    Ok(Json(serde_json::to_value(v).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?))
+}
+
+/// Run a blocking closure on a threadpool and map both join-failure and
+/// `AppError` to Axum's error tuple.
+///
+/// Usage (clone only the Arcs you actually need):
+/// ```ignore
+/// let result = spawn_blocking_handler!({
+///     let foo = state.app.foo.clone();
+///     move || service::do_thing(&foo, arg)
+/// })?;
+/// ```
+macro_rules! spawn_blocking_handler {
+    ($closure:expr) => {{
+        tokio::task::spawn_blocking($closure)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Task failed: {e}"),
+                )
+            })?
+            .map_err(<(StatusCode, String)>::from)
+    }};
+}
+
 // --- Route handlers ---
 
 async fn list_projects(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let inventory = service::list_projects(&state.app).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(inventory).unwrap()))
+    ok_json(inventory)
 }
 
 async fn check_onboarding(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let cfg = service::check_onboarding(&state.app).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(cfg).unwrap()))
+    ok_json(cfg)
 }
 
 async fn restore_sessions(
@@ -763,8 +803,7 @@ async fn connect_session(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ConnectSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let id = parse_uuid(&req.session_id)?;
 
     service::connect_session(
         &state.app.storage,
@@ -785,15 +824,14 @@ async fn load_project(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let project = service::load_project(&state.app, &req.name, &req.repo_path)
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(project).unwrap()))
+    ok_json(project)
 }
 
 async fn write_to_pty(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<WriteToPtyRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let id = parse_uuid(&req.session_id)?;
     service::write_to_pty(&state.app, id, req.data.as_bytes())
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
@@ -803,8 +841,7 @@ async fn send_raw_to_pty(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<WriteToPtyRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let id = parse_uuid(&req.session_id)?;
     service::send_raw_to_pty(&state.app, id, req.data.as_bytes())
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
@@ -814,8 +851,7 @@ async fn resize_pty(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ResizePtyRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let id = parse_uuid(&req.session_id)?;
     service::resize_pty(&state.app, id, req.rows, req.cols)
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
@@ -825,10 +861,8 @@ async fn close_session(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<CloseSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
+    let session_uuid = parse_uuid(&req.session_id)?;
 
     service::close_session(&state.app, project_uuid, session_uuid, req.delete_worktree)
         .map_err(<(StatusCode, String)>::from)?;
@@ -840,8 +874,7 @@ async fn create_session(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
     let session_id = uuid::Uuid::new_v4();
 
     let storage = state.app.storage.clone();
@@ -852,7 +885,7 @@ async fn create_session(
     let background = req.background;
     let initial_prompt = req.initial_prompt;
 
-    let result = tokio::task::spawn_blocking(move || {
+    let result = spawn_blocking_handler!(move || {
         service::create_session(
             &storage,
             &pty_manager,
@@ -864,15 +897,7 @@ async fn create_session(
             background,
             initial_prompt,
         )
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(<(StatusCode, String)>::from)?;
+    })?;
 
     Ok(Json(Value::String(result)))
 }
@@ -882,19 +907,10 @@ async fn generate_architecture(
     Json(req): Json<RepoPathRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let emitter = state.app.emitter.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = spawn_blocking_handler!(move || {
         service::generate_architecture(&req.repo_path, &emitter)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(<(StatusCode, String)>::from)?;
-
-    Ok(Json(serde_json::to_value(result).unwrap()))
+    })?;
+    ok_json(result)
 }
 
 async fn create_project(
@@ -903,15 +919,14 @@ async fn create_project(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let project = service::create_project(&state.app, &req.name, &req.repo_path)
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(project).unwrap()))
+    ok_json(project)
 }
 
 async fn delete_project(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<DeleteProjectRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let id = parse_uuid(&req.project_id)?;
 
     service::delete_project(
         &state.app.storage,
@@ -928,9 +943,7 @@ async fn get_agents_md(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
+    let id = parse_uuid(&req.project_id)?;
     let content = service::get_agents_md(&state.app, id).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::String(content)))
 }
@@ -939,9 +952,7 @@ async fn update_agents_md(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<UpdateAgentsMdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
+    let id = parse_uuid(&req.project_id)?;
     service::update_agents_md(&state.app, id, &req.content)
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
@@ -951,10 +962,8 @@ async fn set_initial_prompt(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<SetInitialPromptRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
+    let session_uuid = parse_uuid(&req.session_id)?;
 
     service::set_initial_prompt(&state.app, project_uuid, session_uuid, req.prompt)
         .map_err(<(StatusCode, String)>::from)?;
@@ -963,14 +972,9 @@ async fn set_initial_prompt(
 }
 
 async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(service::check_claude_cli)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Task failed: {}", e),
-            )
-        })?;
+    let result = spawn_blocking_handler!(|| Ok::<_, the_controller_lib::error::AppError>(
+        service::check_claude_cli()
+    ))?;
     Ok(Json(Value::String(result)))
 }
 
@@ -1001,36 +1005,24 @@ async fn detect_project_type(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = req.repo_path;
     let result =
-        tokio::task::spawn_blocking(move || service::detect_project_type_blocking(&repo_path))
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(result).unwrap()))
+        spawn_blocking_handler!(move || { service::detect_project_type_blocking(&repo_path) })?;
+    ok_json(result)
 }
 
 async fn get_deploy_credentials() -> Result<Json<Value>, (StatusCode, String)> {
-    let result = tokio::task::spawn_blocking(service::get_deploy_credentials_blocking)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(result).unwrap()))
+    let result = spawn_blocking_handler!(service::get_deploy_credentials_blocking)?;
+    ok_json(result)
 }
 
 async fn save_deploy_credentials(
     Json(req): Json<SaveDeployCredentialsRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    tokio::task::spawn_blocking(move || service::save_deploy_credentials_blocking(req.credentials))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(<(StatusCode, String)>::from)?;
+    spawn_blocking_handler!(move || service::save_deploy_credentials_blocking(req.credentials))?;
     Ok(Json(Value::Null))
 }
 
 async fn is_deploy_provisioned() -> Result<Json<Value>, (StatusCode, String)> {
-    let provisioned = tokio::task::spawn_blocking(service::is_deploy_provisioned_blocking)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(<(StatusCode, String)>::from)?;
+    let provisioned = spawn_blocking_handler!(service::is_deploy_provisioned_blocking)?;
     Ok(Json(Value::Bool(provisioned)))
 }
 
@@ -1040,7 +1032,7 @@ async fn deploy_project(
     let result = service::deploy_project(req.request)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(result).unwrap()))
+    ok_json(result)
 }
 
 async fn list_deployed_services() -> Result<Json<Value>, (StatusCode, String)> {
@@ -1054,7 +1046,7 @@ async fn load_keybindings(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let result = service::load_keybindings(&state.app).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(result).unwrap()))
+    ok_json(result)
 }
 
 // --- Desktop-only stubs (return NOT_IMPLEMENTED gracefully) ---
@@ -1104,17 +1096,8 @@ async fn load_terminal_theme(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let storage = state.app.storage.clone();
-    let theme =
-        tokio::task::spawn_blocking(move || service::load_terminal_theme_blocking(&storage))
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Task failed: {}", e),
-                )
-            })?
-            .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(theme).unwrap()))
+    let theme = spawn_blocking_handler!(move || service::load_terminal_theme_blocking(&storage))?;
+    ok_json(theme)
 }
 
 async fn list_archived_projects(
@@ -1122,16 +1105,14 @@ async fn list_archived_projects(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let filtered =
         service::list_archived_projects(&state.app).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(filtered).unwrap()))
+    ok_json(filtered)
 }
 async fn merge_session_branch(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
+    let session_uuid = parse_uuid(&req.session_id)?;
 
     const OVERALL_TIMEOUT_SECS: u64 = 600; // 10 minutes
 
@@ -1144,7 +1125,7 @@ async fn merge_session_branch(
     match merge_result {
         Ok(inner) => {
             let resp = inner.map_err(<(StatusCode, String)>::from)?;
-            Ok(Json(serde_json::to_value(resp).unwrap()))
+            ok_json(resp)
         }
         Err(_) => Err((
             StatusCode::GATEWAY_TIMEOUT,
@@ -1165,7 +1146,7 @@ async fn send_note_ai_chat(
     .await
     .map_err(<(StatusCode, String)>::from)?;
 
-    Ok(Json(serde_json::to_value(response).unwrap()))
+    ok_json(response)
 }
 // --- Notes ---
 
@@ -1175,7 +1156,7 @@ async fn api_list_notes(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let entries = service::list_notes(&state.app.storage, &req.folder)
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(entries).unwrap()))
+    ok_json(entries)
 }
 
 async fn api_read_note(
@@ -1184,7 +1165,7 @@ async fn api_read_note(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let content = service::read_note(&state.app.storage, &req.folder, &req.filename)
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(content).unwrap()))
+    ok_json(content)
 }
 
 async fn api_write_note(
@@ -1202,7 +1183,7 @@ async fn api_create_note(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let filename = service::create_note(&state.app.storage, &req.folder, &req.title)
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(filename).unwrap()))
+    ok_json(filename)
 }
 
 async fn api_delete_note(
@@ -1225,7 +1206,7 @@ async fn api_rename_note(
         &req.new_name,
     )
     .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(filename).unwrap()))
+    ok_json(filename)
 }
 
 async fn api_list_folders(
@@ -1233,7 +1214,7 @@ async fn api_list_folders(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let folders =
         service::list_note_folders(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(folders).unwrap()))
+    ok_json(folders)
 }
 
 async fn api_create_folder(
@@ -1268,7 +1249,7 @@ async fn api_commit_notes(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let committed =
         service::commit_pending_notes(&state.app.storage).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(committed).unwrap()))
+    ok_json(committed)
 }
 
 // --- GitHub Issues ---
@@ -1280,7 +1261,7 @@ async fn list_github_issues(
     let issues = service::list_github_issues(&state.app, &req.repo_path)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(issues).unwrap()))
+    ok_json(issues)
 }
 
 async fn list_assigned_issues(
@@ -1289,7 +1270,7 @@ async fn list_assigned_issues(
     let assigned = service::list_assigned_issues(&req.repo_path)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(assigned).unwrap()))
+    ok_json(assigned)
 }
 
 async fn create_github_issue(
@@ -1299,7 +1280,7 @@ async fn create_github_issue(
     let issue = service::create_github_issue(&state.app, &req.repo_path, &req.title, &req.body)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(issue).unwrap()))
+    ok_json(issue)
 }
 
 async fn generate_issue_body(
@@ -1373,8 +1354,7 @@ async fn configure_maintainer(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ConfigureMaintainerRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
     service::configure_maintainer(
         &state.app,
         project_uuid,
@@ -1390,42 +1370,38 @@ async fn get_maintainer_status(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
     let log = service::get_maintainer_status(&state.app, project_uuid)
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(log).unwrap()))
+    ok_json(log)
 }
 
 async fn get_maintainer_history(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
     let logs = service::get_maintainer_history(&state.app, project_uuid, 20)
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(logs).unwrap()))
+    ok_json(logs)
 }
 
 async fn trigger_maintainer_check(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
     let log = service::trigger_maintainer_check(&state.app, project_uuid)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(log).unwrap()))
+    ok_json(log)
 }
 
 async fn clear_maintainer_reports(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
     service::clear_maintainer_reports(&state.app, project_uuid)
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
@@ -1435,22 +1411,18 @@ async fn get_maintainer_issues(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
+    let project_uuid = parse_uuid(&req.project_id)?;
     let issues = service::get_maintainer_issues_for_project(&state.app, project_uuid)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(issues).unwrap()))
+    ok_json(issues)
 }
 
 async fn get_maintainer_issue_detail(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<GetMaintainerIssueDetailRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
+    let project_uuid = parse_uuid(&req.project_id)?;
     let detail = service::get_maintainer_issue_detail_for_project(
         &state.app,
         project_uuid,
@@ -1458,15 +1430,14 @@ async fn get_maintainer_issue_detail(
     )
     .await
     .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(detail).unwrap()))
+    ok_json(detail)
 }
 
 async fn configure_auto_worker(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ConfigureAutoWorkerRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
     service::configure_auto_worker(&state.app, project_uuid, req.enabled)
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
@@ -1476,12 +1447,11 @@ async fn get_auto_worker_queue(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
     let queue = service::get_auto_worker_queue(&state.app, project_uuid)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(queue).unwrap()))
+    ok_json(queue)
 }
 
 async fn get_worker_reports(
@@ -1490,7 +1460,7 @@ async fn get_worker_reports(
     let reports = service::get_worker_reports(&req.repo_path)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(reports).unwrap()))
+    ok_json(reports)
 }
 
 // --- Storage/Git Operations ---
@@ -1499,33 +1469,21 @@ async fn get_session_commits(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
+    let session_uuid = parse_uuid(&req.session_id)?;
     let storage = state.app.storage.clone();
-    let commits = tokio::task::spawn_blocking(move || {
+    let commits = spawn_blocking_handler!(move || {
         service::get_session_commits(&storage, project_uuid, session_uuid)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(commits).unwrap()))
+    })?;
+    ok_json(commits)
 }
 
 async fn save_session_prompt(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
+    let session_uuid = parse_uuid(&req.session_id)?;
     service::save_session_prompt(&state.app, project_uuid, session_uuid)
         .map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
@@ -1535,50 +1493,31 @@ async fn list_project_prompts(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
     let prompts = service::list_project_prompts(&state.app, project_uuid)
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(prompts).unwrap()))
+    ok_json(prompts)
 }
 
 async fn get_repo_head(
     Json(req): Json<RepoPathRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let repo_path = req.repo_path;
-    let result = tokio::task::spawn_blocking(move || service::get_repo_head(&repo_path))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Task failed: {}", e),
-            )
-        })?
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(result).unwrap()))
+    let result = spawn_blocking_handler!(move || service::get_repo_head(&repo_path))?;
+    ok_json(result)
 }
 
 async fn get_session_token_usage(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
+    let session_uuid = parse_uuid(&req.session_id)?;
     let storage = state.app.storage.clone();
-    let data = tokio::task::spawn_blocking(move || {
+    let data = spawn_blocking_handler!(move || {
         service::get_session_token_usage(&storage, project_uuid, session_uuid)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Task failed: {}", e),
-        )
-    })?
-    .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(data).unwrap()))
+    })?;
+    ok_json(data)
 }
 
 // --- Directory Listing ---
@@ -1588,7 +1527,7 @@ async fn list_directories_at(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let entries =
         service::list_directories_at_safe(&req.path).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(entries).unwrap()))
+    ok_json(entries)
 }
 
 async fn list_root_directories(
@@ -1596,23 +1535,15 @@ async fn list_root_directories(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let entries =
         service::list_root_directories(&state.app).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(entries).unwrap()))
+    ok_json(entries)
 }
 
 async fn generate_project_names(
     Json(req): Json<DescriptionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let description = req.description;
-    let names = tokio::task::spawn_blocking(move || service::generate_project_names(&description))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Task failed: {}", e),
-            )
-        })?
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(names).unwrap()))
+    let names = spawn_blocking_handler!(move || service::generate_project_names(&description))?;
+    ok_json(names)
 }
 
 // --- Scaffold ---
@@ -1624,7 +1555,7 @@ async fn scaffold_project(
     let project = service::scaffold_project(&state.app, &req.name)
         .await
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(project).unwrap()))
+    ok_json(project)
 }
 
 // --- Session Management ---
@@ -1640,10 +1571,8 @@ async fn unstage_session(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectSessionRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = uuid::Uuid::parse_str(&req.project_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let session_uuid = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let project_uuid = parse_uuid(&req.project_id)?;
+    let session_uuid = parse_uuid(&req.session_id)?;
 
     service::unstage_session(&state.app, project_uuid, session_uuid)
         .map_err(<(StatusCode, String)>::from)?;
@@ -1702,7 +1631,7 @@ async fn api_duplicate_note(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let copy = service::duplicate_note(&state.app.storage, &req.folder, &req.filename)
         .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::to_value(copy).unwrap()))
+    ok_json(copy)
 }
 
 // --- Auth/Login ---
@@ -1719,8 +1648,7 @@ async fn stop_claude_login(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<SessionIdRequest>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = uuid::Uuid::parse_str(&req.session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let id = parse_uuid(&req.session_id)?;
     service::stop_claude_login(&state.app.pty_manager, id).map_err(<(StatusCode, String)>::from)?;
     Ok(Json(Value::Null))
 }
@@ -2113,5 +2041,19 @@ mod tests {
             "socket closed after lag instead of receiving later events"
         );
         server_handle.abort();
+    }
+
+    #[test]
+    fn parse_uuid_accepts_valid_uuid() {
+        let id = uuid::Uuid::new_v4();
+        let parsed = super::parse_uuid(&id.to_string());
+        assert_eq!(parsed.unwrap(), id);
+    }
+
+    #[test]
+    fn parse_uuid_rejects_invalid_input_with_bad_request() {
+        let result = super::parse_uuid("not-a-uuid");
+        let (status, _msg) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
