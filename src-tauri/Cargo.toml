@@ -44,6 +44,7 @@ crossbeam-channel = "0.5"
 ndarray = "0.17"
 notify = "7"
 notify-debouncer-mini = "0.5"
+the-controller-macros = { path = "the-controller-macros" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
