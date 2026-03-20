@@ -3,18 +3,10 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use crate::architecture::ArchitectureResult;
-use crate::config;
-use crate::models::{AutoWorkerQueueIssue, CommitInfo, Project};
 use crate::service;
 use crate::state::AppState;
-use crate::storage::ProjectInventory;
-use crate::terminal_theme;
-use crate::token_usage::TokenDataPoint;
 
-mod github;
 mod media;
-mod notes;
 
 /// Parse a UUID string, mapping failure to a `String` error (Tauri command
 /// return type).
@@ -49,10 +41,9 @@ pub use crate::service::{ensure_claude_md_symlink, render_agents_md, validate_pr
 // (e.g. auto_worker.rs, lib.rs, status_socket.rs, server/main.rs) keep working.
 pub use crate::service::{kill_process_group, next_session_label, stage_session_core};
 
-// Re-export scaffold and git helpers that moved to the service layer.
+// Re-export git helpers that moved to the service layer.
 pub use crate::service::{
-    build_auto_worker_queue, discover_branch_commits, find_main_branch_oid,
-    scaffold_project_blocking, validate_maintainer_interval,
+    build_auto_worker_queue, find_main_branch_oid, validate_maintainer_interval,
 };
 
 // Re-export test-only helpers that moved to the service layer.
@@ -60,6 +51,9 @@ pub use crate::service::{
 pub(crate) use crate::service::{
     cleanup_failed_session_spawn, find_staging_port, STAGING_PORT_OFFSET,
 };
+
+#[cfg(test)]
+use crate::models::{CommitInfo, Project};
 
 #[cfg(test)]
 fn update_project_with_rollback<T, C, M, R, A>(
@@ -111,14 +105,6 @@ where
 #[cfg(test)]
 pub(crate) use crate::service::wait_for_merge_rebase_resolution;
 
-/// Run storage migrations on startup (worktree path format, etc.).
-/// PTY connections are deferred to `connect_session` so each terminal
-/// can attach at the correct size.
-// [migrated to generated.rs]
-pub fn restore_sessions(state: State<Arc<AppState>>) -> Result<(), String> {
-    crate::service::restore_sessions(&state).map_err(|e| e.to_string())
-}
-
 /// Connect a terminal to its PTY session at the given size.
 /// Called by each Terminal component after it measures its dimensions.
 /// No-op if the session is already connected.
@@ -148,152 +134,6 @@ pub async fn connect_session(
     })?
 }
 
-// [migrated to generated.rs]
-pub fn create_project(
-    state: State<Arc<AppState>>,
-    name: String,
-    repo_path: String,
-) -> Result<Project, String> {
-    crate::service::create_project(&state, &name, &repo_path).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn load_project(
-    state: State<Arc<AppState>>,
-    name: String,
-    repo_path: String,
-) -> Result<Project, String> {
-    crate::service::load_project(&state, &name, &repo_path).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn list_projects(state: State<Arc<AppState>>) -> Result<ProjectInventory, String> {
-    crate::service::list_projects(&state).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn delete_project(
-    state: State<Arc<AppState>>,
-    project_id: String,
-    delete_repo: bool,
-) -> Result<(), String> {
-    let id = parse_uuid(&project_id)?;
-    crate::service::delete_project(&state, id, delete_repo).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn get_agents_md(state: State<Arc<AppState>>, project_id: String) -> Result<String, String> {
-    let id = parse_uuid(&project_id)?;
-    crate::service::get_agents_md(&state, id).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn update_agents_md(
-    state: State<Arc<AppState>>,
-    project_id: String,
-    content: String,
-) -> Result<(), String> {
-    let id = parse_uuid(&project_id)?;
-    crate::service::update_agents_md(&state, id, &content).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn create_session(
-    state: State<'_, Arc<AppState>>,
-    _app_handle: AppHandle,
-    project_id: String,
-    kind: Option<String>,
-    github_issue: Option<crate::models::GithubIssue>,
-    background: Option<bool>,
-    initial_prompt: Option<String>,
-) -> Result<String, String> {
-    let kind = kind.unwrap_or_else(|| "claude".to_string());
-    let background = background.unwrap_or(false);
-    let project_uuid = parse_uuid(&project_id)?;
-    let session_id = Uuid::new_v4();
-
-    let storage = state.storage.clone();
-    let pty_manager = state.pty_manager.clone();
-    let emitter = state.emitter.clone();
-
-    tauri_blocking!(move || {
-        let inner_state = crate::state::AppState::from_arcs(storage, pty_manager, emitter);
-        crate::service::create_session(
-            &inner_state,
-            project_uuid,
-            session_id,
-            &kind,
-            github_issue,
-            background,
-            initial_prompt,
-        )
-        .map_err(|e| e.to_string())
-    })
-}
-
-// [migrated to generated.rs]
-pub fn write_to_pty(
-    state: State<Arc<AppState>>,
-    session_id: String,
-    data: String,
-) -> Result<(), String> {
-    let id = parse_uuid(&session_id)?;
-    crate::service::write_to_pty(&state, id, data.as_bytes()).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn send_raw_to_pty(
-    state: State<Arc<AppState>>,
-    session_id: String,
-    data: String,
-) -> Result<(), String> {
-    let id = parse_uuid(&session_id)?;
-    crate::service::send_raw_to_pty(&state, id, data.as_bytes()).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn resize_pty(
-    state: State<Arc<AppState>>,
-    session_id: String,
-    rows: u16,
-    cols: u16,
-) -> Result<(), String> {
-    let id = parse_uuid(&session_id)?;
-    crate::service::resize_pty(&state, id, rows, cols).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn set_initial_prompt(
-    state: State<Arc<AppState>>,
-    project_id: String,
-    session_id: String,
-    prompt: String,
-) -> Result<(), String> {
-    let project_uuid = parse_uuid(&project_id)?;
-    let session_uuid = parse_uuid(&session_id)?;
-    crate::service::set_initial_prompt(&state, project_uuid, session_uuid, prompt)
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn submit_secure_env_value(
-    state: State<'_, Arc<AppState>>,
-    request_id: String,
-    value: String,
-) -> Result<String, String> {
-    crate::service::submit_secure_env_value(&state, &request_id, &value)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn cancel_secure_env_request(
-    state: State<Arc<AppState>>,
-    request_id: String,
-) -> Result<(), String> {
-    crate::service::cancel_secure_env_request(&state, &request_id).map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 pub async fn stage_session(
     state: State<'_, Arc<AppState>>,
@@ -307,207 +147,9 @@ pub async fn stage_session(
     Ok(())
 }
 
-// [migrated to generated.rs]
-pub fn unstage_session(
-    state: State<Arc<AppState>>,
-    project_id: String,
-    session_id: String,
-) -> Result<(), String> {
-    let project_uuid = parse_uuid(&project_id)?;
-    let session_uuid = parse_uuid(&session_id)?;
-    crate::service::unstage_session(&state, project_uuid, session_uuid).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn get_repo_head(repo_path: String) -> Result<(String, String), String> {
-    tauri_blocking!(move || service::get_repo_head(&repo_path).map_err(|e| e.to_string()))
-}
-
-// [migrated to generated.rs]
-pub fn save_session_prompt(
-    state: State<Arc<AppState>>,
-    project_id: String,
-    session_id: String,
-) -> Result<(), String> {
-    let project_uuid = parse_uuid(&project_id)?;
-    let session_uuid = parse_uuid(&session_id)?;
-    service::save_session_prompt(&state, project_uuid, session_uuid).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn list_project_prompts(
-    state: State<Arc<AppState>>,
-    project_id: String,
-) -> Result<Vec<crate::models::SavedPrompt>, String> {
-    let project_uuid = parse_uuid(&project_id)?;
-    service::list_project_prompts(&state, project_uuid).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn close_session(
-    state: State<Arc<AppState>>,
-    project_id: String,
-    session_id: String,
-    delete_worktree: bool,
-) -> Result<(), String> {
-    let project_uuid = parse_uuid(&project_id)?;
-    let session_uuid = parse_uuid(&session_id)?;
-    crate::service::close_session(&state, project_uuid, session_uuid, delete_worktree)
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn start_claude_login(state: State<Arc<AppState>>) -> Result<String, String> {
-    crate::service::start_claude_login(&state).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn stop_claude_login(state: State<Arc<AppState>>, session_id: String) -> Result<(), String> {
-    let id = parse_uuid(&session_id)?;
-    crate::service::stop_claude_login(&state, id).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn home_dir() -> Result<String, String> {
-    crate::service::home_dir().map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn check_onboarding(state: State<Arc<AppState>>) -> Result<Option<config::Config>, String> {
-    crate::service::check_onboarding(&state).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn save_onboarding_config(
-    state: State<Arc<AppState>>,
-    projects_root: String,
-) -> Result<(), String> {
-    crate::service::save_onboarding_config(&state, &projects_root, None).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn load_terminal_theme(
-    state: State<Arc<AppState>>,
-) -> Result<terminal_theme::TerminalTheme, String> {
-    service::load_terminal_theme_blocking(&state).map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 pub async fn check_claude_cli() -> Result<String, String> {
     tauri_blocking!(|| crate::service::check_claude_cli().map_err(|e| e.to_string()))
-}
-
-// [migrated to generated.rs]
-pub fn list_directories_at(path: String) -> Result<Vec<config::DirEntry>, String> {
-    service::list_directories_at(&path).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub fn list_root_directories(state: State<Arc<AppState>>) -> Result<Vec<config::DirEntry>, String> {
-    service::list_root_directories(&state).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn generate_project_names(description: String) -> Result<Vec<String>, String> {
-    tauri_blocking!(move || service::generate_project_names(&description).map_err(|e| e.to_string()))
-}
-
-// [migrated to generated.rs]
-pub fn generate_architecture(
-    state: State<Arc<AppState>>,
-    repo_path: String,
-) -> Result<ArchitectureResult, String> {
-    service::generate_architecture(&state, &repo_path).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn scaffold_project(
-    state: State<'_, Arc<AppState>>,
-    name: String,
-) -> Result<Project, String> {
-    crate::service::scaffold_project(&state, &name)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn list_github_issues(
-    repo_path: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<crate::models::GithubIssue>, String> {
-    github::list_github_issues(repo_path, state).await
-}
-
-// [migrated to generated.rs]
-pub async fn list_assigned_issues(
-    repo_path: String,
-) -> Result<Vec<crate::models::AssignedIssue>, String> {
-    github::list_assigned_issues(repo_path).await
-}
-
-// [migrated to generated.rs]
-pub async fn generate_issue_body(title: String) -> Result<String, String> {
-    github::generate_issue_body(title).await
-}
-
-// [migrated to generated.rs]
-pub async fn create_github_issue(
-    state: State<'_, Arc<AppState>>,
-    repo_path: String,
-    title: String,
-    body: String,
-) -> Result<crate::models::GithubIssue, String> {
-    github::create_github_issue(state, repo_path, title, body).await
-}
-
-// [migrated to generated.rs]
-pub async fn close_github_issue(
-    state: State<'_, Arc<AppState>>,
-    repo_path: String,
-    issue_number: u64,
-    comment: String,
-) -> Result<(), String> {
-    github::close_github_issue(state, repo_path, issue_number, comment).await
-}
-
-// [migrated to generated.rs]
-pub async fn delete_github_issue(
-    state: State<'_, Arc<AppState>>,
-    repo_path: String,
-    issue_number: u64,
-) -> Result<(), String> {
-    github::delete_github_issue(state, repo_path, issue_number).await
-}
-
-// [migrated to generated.rs]
-pub async fn post_github_comment(
-    repo_path: String,
-    issue_number: u64,
-    body: String,
-) -> Result<(), String> {
-    github::post_github_comment(repo_path, issue_number, body).await
-}
-
-// [migrated to generated.rs]
-pub async fn add_github_label(
-    state: State<'_, Arc<AppState>>,
-    repo_path: String,
-    issue_number: u64,
-    label: String,
-    description: Option<String>,
-    color: Option<String>,
-) -> Result<(), String> {
-    github::add_github_label(state, repo_path, issue_number, label, description, color).await
-}
-
-// [migrated to generated.rs]
-pub async fn remove_github_label(
-    state: State<'_, Arc<AppState>>,
-    repo_path: String,
-    issue_number: u64,
-    label: String,
-) -> Result<(), String> {
-    github::remove_github_label(state, repo_path, issue_number, label).await
 }
 
 #[tauri::command]
@@ -518,103 +160,6 @@ pub async fn copy_image_file_to_clipboard(app: AppHandle, path: String) -> Resul
 #[tauri::command]
 pub async fn capture_app_screenshot(app: AppHandle, cropped: bool) -> Result<String, String> {
     media::capture_app_screenshot(app, cropped).await
-}
-
-// [migrated to generated.rs]
-pub fn list_notes(
-    state: State<'_, Arc<AppState>>,
-    folder: String,
-) -> Result<Vec<crate::notes::NoteEntry>, String> {
-    notes::list_notes(state, folder)
-}
-
-// [migrated to generated.rs]
-pub fn read_note(
-    state: State<'_, Arc<AppState>>,
-    folder: String,
-    filename: String,
-) -> Result<String, String> {
-    notes::read_note(state, folder, filename)
-}
-
-// [migrated to generated.rs]
-pub fn write_note(
-    state: State<'_, Arc<AppState>>,
-    folder: String,
-    filename: String,
-    content: String,
-) -> Result<(), String> {
-    notes::write_note(state, folder, filename, content)
-}
-
-// [migrated to generated.rs]
-pub fn create_note(
-    state: State<'_, Arc<AppState>>,
-    folder: String,
-    title: String,
-) -> Result<String, String> {
-    notes::create_note(state, folder, title)
-}
-
-// [migrated to generated.rs]
-pub fn rename_note(
-    state: State<'_, Arc<AppState>>,
-    folder: String,
-    old_name: String,
-    new_name: String,
-) -> Result<String, String> {
-    notes::rename_note(state, folder, old_name, new_name)
-}
-
-// [migrated to generated.rs]
-pub fn duplicate_note(
-    state: State<'_, Arc<AppState>>,
-    folder: String,
-    filename: String,
-) -> Result<String, String> {
-    notes::duplicate_note(state, folder, filename)
-}
-
-// [migrated to generated.rs]
-pub fn delete_note(
-    state: State<'_, Arc<AppState>>,
-    folder: String,
-    filename: String,
-) -> Result<(), String> {
-    notes::delete_note(state, folder, filename)
-}
-
-// [migrated to generated.rs]
-pub fn list_folders(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
-    notes::list_folders(state)
-}
-
-// [migrated to generated.rs]
-pub fn create_folder(state: State<'_, Arc<AppState>>, name: String) -> Result<(), String> {
-    notes::create_folder(state, name)
-}
-
-// [migrated to generated.rs]
-pub fn rename_folder(
-    state: State<'_, Arc<AppState>>,
-    old_name: String,
-    new_name: String,
-) -> Result<(), String> {
-    notes::rename_folder(state, old_name, new_name)
-}
-
-// [migrated to generated.rs]
-pub fn delete_folder(
-    state: State<'_, Arc<AppState>>,
-    name: String,
-    force: bool,
-) -> Result<(), String> {
-    notes::delete_folder(state, name, force)
-}
-
-// [migrated to generated.rs]
-pub fn commit_notes(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
-    notes::commit_notes(state)
 }
 
 // Hand-written because image_bytes is Vec<u8> (binary data), which the
@@ -629,26 +174,6 @@ pub fn save_note_image(
     service::save_note_image(&state, &folder, &image_bytes, &extension).map_err(|e| e.to_string())
 }
 
-// [migrated to generated.rs]
-pub fn resolve_note_asset_path(
-    state: State<'_, Arc<AppState>>,
-    folder: String,
-    relative_path: String,
-) -> Result<String, String> {
-    service::resolve_note_asset_path(&state, &folder, &relative_path).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn send_note_ai_chat(
-    note_content: String,
-    selected_text: String,
-    conversation_history: Vec<crate::note_ai_chat::NoteAiChatMessage>,
-    prompt: String,
-) -> Result<crate::note_ai_chat::NoteAiResponse, String> {
-    service::send_note_ai_chat(note_content, selected_text, conversation_history, prompt)
-        .await
-        .map_err(|e| e.to_string())
-}
 #[tauri::command]
 pub async fn merge_session_branch(
     state: State<'_, Arc<AppState>>,
@@ -663,92 +188,6 @@ pub async fn merge_session_branch(
         .map_err(|e| e.to_string())
 }
 
-// [migrated to generated.rs]
-pub async fn get_session_commits(
-    state: State<'_, Arc<AppState>>,
-    project_id: String,
-    session_id: String,
-) -> Result<Vec<CommitInfo>, String> {
-    let storage = state.storage.clone();
-    let pty_manager = state.pty_manager.clone();
-    let emitter = state.emitter.clone();
-    tauri_blocking!(move || {
-        let project_uuid = parse_uuid(&project_id)?;
-        let session_uuid = parse_uuid(&session_id)?;
-        let inner_state = crate::state::AppState::from_arcs(storage, pty_manager, emitter);
-        service::get_session_commits(&inner_state, project_uuid, session_uuid)
-            .map_err(|e| e.to_string())
-    })
-}
-
-// [migrated to generated.rs]
-pub async fn get_session_token_usage(
-    state: State<'_, Arc<AppState>>,
-    project_id: String,
-    session_id: String,
-) -> Result<Vec<TokenDataPoint>, String> {
-    let storage = state.storage.clone();
-    let pty_manager = state.pty_manager.clone();
-    let emitter = state.emitter.clone();
-    tauri_blocking!(move || {
-        let project_uuid = parse_uuid(&project_id)?;
-        let session_uuid = parse_uuid(&session_id)?;
-        let inner_state = crate::state::AppState::from_arcs(storage, pty_manager, emitter);
-        service::get_session_token_usage(&inner_state, project_uuid, session_uuid)
-            .map_err(|e| e.to_string())
-    })
-}
-
-// [migrated to generated.rs]
-pub async fn configure_maintainer(
-    state: State<'_, Arc<AppState>>,
-    project_id: String,
-    enabled: bool,
-    interval_minutes: u64,
-    github_repo: Option<String>,
-) -> Result<(), String> {
-    tracing::debug!(project_id = %project_id, enabled, interval_minutes, "configuring maintainer");
-    let project_uuid = parse_uuid(&project_id)?;
-    service::configure_maintainer(&state, project_uuid, enabled, interval_minutes, github_repo)
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn configure_auto_worker(
-    state: State<'_, Arc<AppState>>,
-    project_id: String,
-    enabled: bool,
-) -> Result<(), String> {
-    tracing::debug!(project_id = %project_id, enabled, "configuring auto worker");
-    let project_uuid = parse_uuid(&project_id)?;
-    service::configure_auto_worker(&state, project_uuid, enabled).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn get_worker_reports(repo_path: String) -> Result<Vec<github::WorkerReport>, String> {
-    github::get_worker_reports(repo_path).await
-}
-
-// [migrated to generated.rs]
-pub async fn get_auto_worker_queue(
-    state: State<'_, Arc<AppState>>,
-    project_id: String,
-) -> Result<Vec<AutoWorkerQueueIssue>, String> {
-    let project_uuid = parse_uuid(&project_id)?;
-    service::get_auto_worker_queue(&state, project_uuid)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn get_maintainer_status(
-    state: State<'_, Arc<AppState>>,
-    project_id: String,
-) -> Result<Option<crate::models::MaintainerRunLog>, String> {
-    let project_uuid = parse_uuid(&project_id)?;
-    service::get_maintainer_status(&state, project_uuid).map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 pub async fn get_maintainer_history(
     state: State<'_, Arc<AppState>>,
@@ -756,6 +195,11 @@ pub async fn get_maintainer_history(
 ) -> Result<Vec<crate::models::MaintainerRunLog>, String> {
     let project_uuid = parse_uuid(&project_id)?;
     service::get_maintainer_history(&state, project_uuid, 20).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn log_frontend_error(message: String, state: tauri::State<'_, Arc<AppState>>) {
+    let _ = crate::service::log_frontend_error(&state, &message);
 }
 
 #[cfg(test)]
@@ -771,86 +215,6 @@ where
         + 'static,
 {
     tauri_blocking!(move || runner(repo_path, project_id, github_repo))
-}
-
-// [migrated to generated.rs]
-pub async fn trigger_maintainer_check(
-    state: State<'_, Arc<AppState>>,
-    _app_handle: AppHandle,
-    project_id: String,
-) -> Result<crate::models::MaintainerRunLog, String> {
-    tracing::info!(project_id = %project_id, "triggering maintainer check");
-    let project_uuid = parse_uuid(&project_id)?;
-    service::trigger_maintainer_check(&state, project_uuid)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn clear_maintainer_reports(
-    state: State<'_, Arc<AppState>>,
-    _app_handle: AppHandle,
-    project_id: String,
-) -> Result<(), String> {
-    tracing::debug!(project_id = %project_id, "clearing maintainer reports");
-    let project_uuid = parse_uuid(&project_id)?;
-    service::clear_maintainer_reports(&state, project_uuid).map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn get_maintainer_issues(
-    state: State<'_, Arc<AppState>>,
-    project_id: String,
-) -> Result<Vec<crate::models::MaintainerIssue>, String> {
-    let project_uuid = parse_uuid(&project_id)?;
-    crate::service::get_maintainer_issues_for_project(&state, project_uuid)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn get_maintainer_issue_detail(
-    state: State<'_, Arc<AppState>>,
-    project_id: String,
-    issue_number: u32,
-) -> Result<crate::models::MaintainerIssueDetail, String> {
-    let project_uuid = parse_uuid(&project_id)?;
-    crate::service::get_maintainer_issue_detail_for_project(&state, project_uuid, issue_number)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn log_frontend_error(message: String, state: tauri::State<'_, Arc<AppState>>) {
-    let _ = crate::service::log_frontend_error(&state, &message);
-}
-
-// [migrated to generated.rs]
-pub async fn start_voice_pipeline(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
-    crate::service::start_voice_pipeline(&state)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn stop_voice_pipeline(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
-    crate::service::stop_voice_pipeline(&state)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn toggle_voice_pause(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
-    crate::service::toggle_voice_pause(&state)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-// [migrated to generated.rs]
-pub async fn load_keybindings(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<crate::keybindings::KeybindingsResult, String> {
-    crate::service::load_keybindings(&state).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -903,10 +267,6 @@ mod tests {
             frontend_log: Mutex::new(None),
             voice_generation: std::sync::atomic::AtomicU64::new(0),
         })
-    }
-
-    fn state_from_ref<T: Send + Sync + 'static>(value: &T) -> tauri::State<'_, T> {
-        unsafe { std::mem::transmute(value) }
     }
 
     fn run_async_test<T>(future: impl Future<Output = T>) -> T {
@@ -1012,7 +372,7 @@ mod tests {
         let state = make_test_state(tmp.path(), &projects_root);
 
         let theme =
-            load_terminal_theme(state_from_ref(&state)).expect("theme command should succeed");
+            service::load_terminal_theme_blocking(&state).expect("theme command should succeed");
 
         assert_eq!(theme.background, "#000000");
         assert_eq!(theme.foreground, "#e0e0e0");
@@ -1038,7 +398,7 @@ selection_background #444444
         let state = make_test_state(tmp.path(), &projects_root);
 
         let theme =
-            load_terminal_theme(state_from_ref(&state)).expect("theme command should succeed");
+            service::load_terminal_theme_blocking(&state).expect("theme command should succeed");
 
         assert_eq!(theme.background, "#121212");
         assert_eq!(theme.foreground, "#f0f0f0");
@@ -1266,10 +626,11 @@ selection_background #444444
             fs::write(state_dir.join("gh-create-fails"), "")
                 .expect("mark first gh create as failed");
 
-            let error = run_async_test(scaffold_project(
-                state_from_ref(&app_state),
-                "gh-create-failure-test".to_string(),
+            let error = run_async_test(service::scaffold_project(
+                &app_state,
+                "gh-create-failure-test",
             ))
+            .map_err(|e| e.to_string())
             .expect_err("gh create failure should bubble up");
             assert!(error.contains("Failed to create GitHub repo"));
             assert!(
@@ -1294,10 +655,11 @@ selection_background #444444
 
             fs::remove_file(state_dir.join("gh-create-fails")).expect("allow gh create retry");
 
-            let project = run_async_test(scaffold_project(
-                state_from_ref(&app_state),
-                "gh-create-failure-test".to_string(),
+            let project = run_async_test(service::scaffold_project(
+                &app_state,
+                "gh-create-failure-test",
             ))
+            .map_err(|e| e.to_string())
             .expect("retry should succeed after rollback");
             assert_eq!(project.name, "gh-create-failure-test");
             assert!(repo_path.exists(), "retry should recreate repo directory");
@@ -1328,10 +690,11 @@ selection_background #444444
 
             let app_state_for_thread = Arc::clone(&app_state);
             let handle = thread::spawn(move || {
-                run_async_test(scaffold_project(
-                    state_from_ref(&app_state_for_thread),
-                    "lock-scope-test".to_string(),
+                run_async_test(service::scaffold_project(
+                    &app_state_for_thread,
+                    "lock-scope-test",
                 ))
+                .map_err(|e| e.to_string())
             });
 
             assert!(
@@ -1378,10 +741,11 @@ selection_background #444444
 
             let app_state_for_thread = Arc::clone(&app_state);
             let handle = thread::spawn(move || {
-                run_async_test(scaffold_project(
-                    state_from_ref(&app_state_for_thread),
-                    "lock-race-test".to_string(),
+                run_async_test(service::scaffold_project(
+                    &app_state_for_thread,
+                    "lock-race-test",
                 ))
+                .map_err(|e| e.to_string())
             });
 
             assert!(
@@ -1389,11 +753,12 @@ selection_background #444444
                 "scaffold should reach gh repo create"
             );
 
-            let imported = create_project(
-                state_from_ref(&app_state),
-                "lock-race-test".to_string(),
-                imported_repo.path().to_string_lossy().to_string(),
+            let imported = service::create_project(
+                &app_state,
+                "lock-race-test",
+                &imported_repo.path().to_string_lossy(),
             )
+            .map_err(|e| e.to_string())
             .expect("concurrent create_project should claim the name");
             assert_eq!(imported.name, "lock-race-test");
 
@@ -1535,11 +900,9 @@ selection_background #444444
             );
             fs::write(state_dir.join("push-fails"), "").expect("mark first push as failed");
 
-            let error = run_async_test(scaffold_project(
-                state_from_ref(&app_state),
-                "rollback-test".to_string(),
-            ))
-            .expect_err("push failure should bubble up");
+            let error = run_async_test(service::scaffold_project(&app_state, "rollback-test"))
+                .map_err(|e| e.to_string())
+                .expect_err("push failure should bubble up");
             assert!(error.contains("Failed to push initial commit"));
             assert!(
                 !repo_path.exists(),
@@ -1565,11 +928,9 @@ selection_background #444444
             fs::remove_file(state_dir.join("remote-deleted"))
                 .expect("clear previous delete marker");
 
-            let project = run_async_test(scaffold_project(
-                state_from_ref(&app_state),
-                "rollback-test".to_string(),
-            ))
-            .expect("retry should succeed after rollback");
+            let project = run_async_test(service::scaffold_project(&app_state, "rollback-test"))
+                .map_err(|e| e.to_string())
+                .expect("retry should succeed after rollback");
             assert_eq!(project.name, "rollback-test");
             assert!(repo_path.exists(), "retry should recreate repo directory");
             assert!(
@@ -1599,11 +960,12 @@ selection_background #444444
         let repo_dir = TempDir::new().unwrap();
         let app_state = make_test_state(base_dir.path(), projects_root.path());
 
-        let project = create_project(
-            state_from_ref(&app_state),
-            "rollback-session-create".to_string(),
-            repo_dir.path().to_string_lossy().to_string(),
+        let project = service::create_project(
+            &app_state,
+            "rollback-session-create",
+            &repo_dir.path().to_string_lossy(),
         )
+        .map_err(|e| e.to_string())
         .expect("create project");
 
         let session_id = Uuid::new_v4();
@@ -1654,11 +1016,12 @@ selection_background #444444
         let repo_dir = TempDir::new().unwrap();
         let app_state = make_test_state(base_dir.path(), projects_root.path());
 
-        let project = create_project(
-            state_from_ref(&app_state),
-            "rollback-session-concurrency".to_string(),
-            repo_dir.path().to_string_lossy().to_string(),
+        let project = service::create_project(
+            &app_state,
+            "rollback-session-concurrency",
+            &repo_dir.path().to_string_lossy(),
         )
+        .map_err(|e| e.to_string())
         .expect("create project");
 
         let session_id = Uuid::new_v4();
@@ -1771,11 +1134,12 @@ selection_background #444444
         fs::create_dir_all(&corrupt_dir).expect("create corrupt dir");
         fs::write(corrupt_dir.join("project.json"), "{ invalid json").expect("write corrupt json");
 
-        let project = create_project(
-            state_from_ref(&app_state),
-            "fresh-project".to_string(),
-            repo_dir.path().to_string_lossy().to_string(),
+        let project = service::create_project(
+            &app_state,
+            "fresh-project",
+            &repo_dir.path().to_string_lossy(),
         )
+        .map_err(|e| e.to_string())
         .expect("create project should ignore corrupt sibling metadata");
 
         assert_eq!(project.name, "fresh-project");
@@ -1788,11 +1152,12 @@ selection_background #444444
         let app_state = make_test_state(base_dir.path(), projects_root.path());
         let repo_dir = TempDir::new().unwrap();
 
-        let error = create_project(
-            state_from_ref(&app_state),
-            "invalid/name".to_string(),
-            repo_dir.path().to_string_lossy().to_string(),
+        let error = service::create_project(
+            &app_state,
+            "invalid/name",
+            &repo_dir.path().to_string_lossy(),
         )
+        .map_err(|e| e.to_string())
         .expect_err("create_project should reject invalid names");
 
         assert!(error.contains("Invalid project name: invalid/name"));
@@ -1824,11 +1189,12 @@ selection_background #444444
                 .expect("save existing project");
         }
 
-        let error = create_project(
-            state_from_ref(&app_state),
-            "duplicate-name".to_string(),
-            new_repo.path().to_string_lossy().to_string(),
+        let error = service::create_project(
+            &app_state,
+            "duplicate-name",
+            &new_repo.path().to_string_lossy(),
         )
+        .map_err(|e| e.to_string())
         .expect_err("create_project should reject duplicate names regardless of archived flag");
 
         assert_eq!(error, "A project named 'duplicate-name' already exists");
@@ -1849,11 +1215,12 @@ selection_background #444444
         fs::create_dir_all(&corrupt_dir).expect("create corrupt dir");
         fs::write(corrupt_dir.join("project.json"), "{ invalid json").expect("write corrupt json");
 
-        let project = load_project(
-            state_from_ref(&app_state),
-            "imported-project".to_string(),
-            repo_dir.path().to_string_lossy().to_string(),
+        let project = service::load_project(
+            &app_state,
+            "imported-project",
+            &repo_dir.path().to_string_lossy(),
         )
+        .map_err(|e| e.to_string())
         .expect("load project should ignore corrupt sibling metadata");
 
         assert_eq!(project.name, "imported-project");
@@ -1867,11 +1234,12 @@ selection_background #444444
         let repo_dir = TempDir::new().unwrap();
         git2::Repository::init(repo_dir.path()).expect("init git repo");
 
-        let error = load_project(
-            state_from_ref(&app_state),
-            "invalid/name".to_string(),
-            repo_dir.path().to_string_lossy().to_string(),
+        let error = service::load_project(
+            &app_state,
+            "invalid/name",
+            &repo_dir.path().to_string_lossy(),
         )
+        .map_err(|e| e.to_string())
         .expect_err("load_project should reject invalid names");
 
         assert!(error.contains("Invalid project name: invalid/name"));
@@ -1905,7 +1273,9 @@ selection_background #444444
                 .expect("save archived-flagged project");
         }
 
-        let inventory = list_projects(state_from_ref(&app_state)).expect("list projects");
+        let inventory = service::list_projects(&app_state)
+            .map_err(|e| e.to_string())
+            .expect("list projects");
 
         assert_eq!(inventory.projects.len(), 1);
         assert_eq!(inventory.projects[0].name, "stored-project");
@@ -1935,10 +1305,11 @@ selection_background #444444
             );
             write_fake_command(git_path, "exit 0");
 
-            let project = run_async_test(scaffold_project(
-                state_from_ref(&app_state),
-                "scaffold-with-corrupt-sibling".to_string(),
+            let project = run_async_test(service::scaffold_project(
+                &app_state,
+                "scaffold-with-corrupt-sibling",
             ))
+            .map_err(|e| e.to_string())
             .expect("scaffold should ignore corrupt sibling metadata");
 
             assert_eq!(project.name, "scaffold-with-corrupt-sibling");
@@ -2142,11 +1513,9 @@ selection_background #444444
             );
         }
 
-        let queue = run_async_test(get_auto_worker_queue(
-            state_from_ref(&app_state),
-            project_id.to_string(),
-        ))
-        .expect("queue command should succeed");
+        let queue = run_async_test(service::get_auto_worker_queue(&app_state, project_id))
+            .map_err(|e| e.to_string())
+            .expect("queue command should succeed");
 
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].number, 33);
@@ -2162,11 +1531,12 @@ selection_background #444444
         let repo_dir = TempDir::new().unwrap();
         let app_state = make_test_state(base_dir.path(), projects_root.path());
 
-        let project = create_project(
-            state_from_ref(&app_state),
-            "secure-env-submit".to_string(),
-            repo_dir.path().to_string_lossy().to_string(),
+        let project = service::create_project(
+            &app_state,
+            "secure-env-submit",
+            &repo_dir.path().to_string_lossy(),
         )
+        .map_err(|e| e.to_string())
         .expect("create project");
 
         crate::secure_env::begin_secure_env_request(
@@ -2177,11 +1547,12 @@ selection_background #444444
         )
         .expect("begin secure env request");
 
-        let status = run_async_test(submit_secure_env_value(
-            state_from_ref(&app_state),
-            "req-123".to_string(),
-            "new-secret".to_string(),
+        let status = run_async_test(service::submit_secure_env_value(
+            &app_state,
+            "req-123",
+            "new-secret",
         ))
+        .map_err(|e| e.to_string())
         .expect("submit secure env value");
 
         assert_eq!(status, "created");
@@ -2196,11 +1567,12 @@ selection_background #444444
         let repo_dir = TempDir::new().unwrap();
         let app_state = make_test_state(base_dir.path(), projects_root.path());
 
-        let project = create_project(
-            state_from_ref(&app_state),
-            "secure-env-cancel".to_string(),
-            repo_dir.path().to_string_lossy().to_string(),
+        let project = service::create_project(
+            &app_state,
+            "secure-env-cancel",
+            &repo_dir.path().to_string_lossy(),
         )
+        .map_err(|e| e.to_string())
         .expect("create project");
 
         crate::secure_env::begin_secure_env_request(
@@ -2211,7 +1583,8 @@ selection_background #444444
         )
         .expect("begin secure env request");
 
-        cancel_secure_env_request(state_from_ref(&app_state), "req-123".to_string())
+        service::cancel_secure_env_request(&app_state, "req-123")
+            .map_err(|e| e.to_string())
             .expect("cancel secure env request");
 
         assert!(app_state.secure_env_request.lock().unwrap().is_none());
