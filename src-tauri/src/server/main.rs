@@ -17,9 +17,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use the_controller_lib::{
-    config, deploy,
+    config,
     emitter::WsBroadcastEmitter,
-    models, note_ai_chat,
     server_helpers::{ok_json, parse_uuid, ServerState},
     service,
     state::AppState,
@@ -33,8 +32,6 @@ use tower_http::services::{ServeDir, ServeFile};
 mod requests {
     use super::*;
 
-    // --- Reusable single-field structs ---
-
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct ProjectIdRequest {
@@ -43,119 +40,9 @@ mod requests {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    pub struct RepoPathRequest {
-        pub repo_path: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SessionIdRequest {
-        pub session_id: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
     pub struct ProjectSessionRequest {
         pub project_id: String,
         pub session_id: String,
-    }
-
-    // --- Handler-specific structs ---
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ConnectSessionRequest {
-        pub session_id: String,
-        #[serde(default = "default_rows")]
-        pub rows: u16,
-        #[serde(default = "default_cols")]
-        pub cols: u16,
-    }
-
-    fn default_rows() -> u16 {
-        24
-    }
-    fn default_cols() -> u16 {
-        80
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct LoadProjectRequest {
-        pub name: String,
-        pub repo_path: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct WriteToPtyRequest {
-        pub session_id: String,
-        pub data: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ResizePtyRequest {
-        pub session_id: String,
-        #[serde(default = "default_rows")]
-        pub rows: u16,
-        #[serde(default = "default_cols")]
-        pub cols: u16,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CloseSessionRequest {
-        pub project_id: String,
-        pub session_id: String,
-        #[serde(default)]
-        pub delete_worktree: bool,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CreateSessionRequest {
-        pub project_id: String,
-        #[serde(default = "default_kind")]
-        pub kind: String,
-        #[serde(default)]
-        pub background: bool,
-        pub initial_prompt: Option<String>,
-        pub github_issue: Option<models::GithubIssue>,
-    }
-
-    fn default_kind() -> String {
-        "claude".to_string()
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CreateProjectRequest {
-        pub name: String,
-        pub repo_path: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct DeleteProjectRequest {
-        pub project_id: String,
-        #[serde(default)]
-        pub delete_repo: bool,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct UpdateAgentsMdRequest {
-        pub project_id: String,
-        pub content: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SetInitialPromptRequest {
-        pub project_id: String,
-        pub session_id: String,
-        pub prompt: String,
     }
 
     #[derive(Deserialize)]
@@ -175,206 +62,8 @@ mod requests {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    pub struct SaveDeployCredentialsRequest {
-        pub credentials: deploy::credentials::DeployCredentials,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct DeployProjectRequest {
-        pub request: deploy::commands::DeployRequest,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SendNoteAiChatRequest {
-        pub note_content: String,
-        pub selected_text: String,
-        pub prompt: String,
-        #[serde(default)]
-        pub conversation_history: Vec<note_ai_chat::NoteAiChatMessage>,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct FolderRequest {
-        pub folder: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct FolderFilenameRequest {
-        pub folder: String,
-        pub filename: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct WriteNoteRequest {
-        pub folder: String,
-        pub filename: String,
-        pub content: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CreateNoteRequest {
-        pub folder: String,
-        pub title: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct RenameNoteRequest {
-        pub folder: String,
-        pub old_name: String,
-        pub new_name: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct NameRequest {
-        pub name: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct RenameFolderRequest {
-        pub old_name: String,
-        pub new_name: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct DeleteFolderRequest {
-        pub name: String,
-        #[serde(default)]
-        pub force: bool,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct RepoPathIssueNumberRequest {
-        pub repo_path: String,
-        pub issue_number: u64,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CreateGithubIssueRequest {
-        pub repo_path: String,
-        pub title: String,
-        pub body: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct TitleRequest {
-        pub title: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct PostGithubCommentRequest {
-        pub repo_path: String,
-        pub issue_number: u64,
-        pub body: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct AddGithubLabelRequest {
-        pub repo_path: String,
-        pub issue_number: u64,
-        pub label: String,
-        pub description: Option<String>,
-        pub color: Option<String>,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct RemoveGithubLabelRequest {
-        pub repo_path: String,
-        pub issue_number: u64,
-        pub label: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CloseGithubIssueRequest {
-        pub repo_path: String,
-        pub issue_number: u64,
-        pub comment: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ConfigureMaintainerRequest {
-        pub project_id: String,
-        #[serde(default)]
-        pub enabled: bool,
-        #[serde(default = "default_interval_minutes")]
-        pub interval_minutes: u64,
-        pub github_repo: Option<String>,
-    }
-
-    fn default_interval_minutes() -> u64 {
-        30
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct GetMaintainerIssueDetailRequest {
-        pub project_id: String,
-        pub issue_number: u64,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ConfigureAutoWorkerRequest {
-        pub project_id: String,
-        #[serde(default)]
-        pub enabled: bool,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
     pub struct PathRequest {
         pub path: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct DescriptionRequest {
-        pub description: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SubmitSecureEnvValueRequest {
-        pub request_id: String,
-        pub value: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct CancelSecureEnvRequestRequest {
-        pub request_id: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SaveNoteImageRequest {
-        pub folder: String,
-        pub extension: String,
-        pub image_bytes: Vec<u8>,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ResolveNoteAssetPathRequest {
-        pub folder: String,
-        pub relative_path: String,
     }
 }
 
@@ -483,8 +172,14 @@ async fn run_server() -> std::io::Result<()> {
 
     let app = Router::new()
         .route("/api/list_projects", post(service::axum_list_projects))
-        .route("/api/check_onboarding", post(service::axum_check_onboarding))
-        .route("/api/restore_sessions", post(service::axum_restore_sessions))
+        .route(
+            "/api/check_onboarding",
+            post(service::axum_check_onboarding),
+        )
+        .route(
+            "/api/restore_sessions",
+            post(service::axum_restore_sessions),
+        )
         .route("/api/connect_session", post(service::axum_connect_session))
         .route("/api/load_project", post(service::axum_load_project))
         .route("/api/write_to_pty", post(service::axum_write_to_pty))
@@ -495,35 +190,74 @@ async fn run_server() -> std::io::Result<()> {
         .route("/api/create_project", post(service::axum_create_project))
         .route("/api/delete_project", post(service::axum_delete_project))
         .route("/api/get_agents_md", post(service::axum_get_agents_md))
-        .route("/api/update_agents_md", post(service::axum_update_agents_md))
-        .route("/api/set_initial_prompt", post(service::axum_set_initial_prompt))
+        .route(
+            "/api/update_agents_md",
+            post(service::axum_update_agents_md),
+        )
+        .route(
+            "/api/set_initial_prompt",
+            post(service::axum_set_initial_prompt),
+        )
         .route("/api/check_claude_cli", post(check_claude_cli))
         .route("/api/home_dir", post(service::axum_home_dir))
         .route("/api/save_onboarding_config", post(save_onboarding_config))
         .route("/api/log_frontend_error", post(log_frontend_error))
-        .route("/api/detect_project_type", post(service::axum_detect_project_type_blocking))
-        .route("/api/get_deploy_credentials", post(service::axum_get_deploy_credentials_blocking))
+        .route(
+            "/api/detect_project_type",
+            post(service::axum_detect_project_type_blocking),
+        )
+        .route(
+            "/api/get_deploy_credentials",
+            post(service::axum_get_deploy_credentials_blocking),
+        )
         .route(
             "/api/save_deploy_credentials",
             post(service::axum_save_deploy_credentials_blocking),
         )
-        .route("/api/is_deploy_provisioned", post(service::axum_is_deploy_provisioned_blocking))
+        .route(
+            "/api/is_deploy_provisioned",
+            post(service::axum_is_deploy_provisioned_blocking),
+        )
         .route("/api/deploy_project", post(service::axum_deploy_project))
-        .route("/api/list_deployed_services", post(service::axum_list_deployed_services))
-        .route("/api/load_keybindings", post(service::axum_load_keybindings))
+        .route(
+            "/api/list_deployed_services",
+            post(service::axum_list_deployed_services),
+        )
+        .route(
+            "/api/load_keybindings",
+            post(service::axum_load_keybindings),
+        )
         .route(
             "/api/copy_image_file_to_clipboard",
             post(copy_image_file_to_clipboard),
         )
         .route("/api/capture_app_screenshot", post(capture_app_screenshot))
-        .route("/api/start_voice_pipeline", post(service::axum_start_voice_pipeline))
-        .route("/api/stop_voice_pipeline", post(service::axum_stop_voice_pipeline))
-        .route("/api/toggle_voice_pause", post(service::axum_toggle_voice_pause))
-        .route("/api/load_terminal_theme", post(service::axum_load_terminal_theme_blocking))
+        .route(
+            "/api/start_voice_pipeline",
+            post(service::axum_start_voice_pipeline),
+        )
+        .route(
+            "/api/stop_voice_pipeline",
+            post(service::axum_stop_voice_pipeline),
+        )
+        .route(
+            "/api/toggle_voice_pause",
+            post(service::axum_toggle_voice_pause),
+        )
+        .route(
+            "/api/load_terminal_theme",
+            post(service::axum_load_terminal_theme_blocking),
+        )
         .route("/api/list_archived_projects", post(list_archived_projects))
-        .route("/api/generate_architecture", post(service::axum_generate_architecture))
+        .route(
+            "/api/generate_architecture",
+            post(service::axum_generate_architecture),
+        )
         .route("/api/merge_session_branch", post(merge_session_branch))
-        .route("/api/send_note_ai_chat", post(service::axum_send_note_ai_chat))
+        .route(
+            "/api/send_note_ai_chat",
+            post(service::axum_send_note_ai_chat),
+        )
         .route("/api/list_notes", post(service::axum_list_notes))
         .route("/api/read_note", post(service::axum_read_note))
         .route("/api/write_note", post(service::axum_write_note))
@@ -534,20 +268,56 @@ async fn run_server() -> std::io::Result<()> {
         .route("/api/create_folder", post(service::axum_create_note_folder))
         .route("/api/rename_folder", post(service::axum_rename_note_folder))
         .route("/api/delete_folder", post(service::axum_delete_note_folder))
-        .route("/api/commit_notes", post(service::axum_commit_pending_notes))
+        .route(
+            "/api/commit_notes",
+            post(service::axum_commit_pending_notes),
+        )
         // GitHub issues
-        .route("/api/list_github_issues", post(service::axum_list_github_issues))
-        .route("/api/list_assigned_issues", post(service::axum_list_assigned_issues))
-        .route("/api/create_github_issue", post(service::axum_create_github_issue))
-        .route("/api/generate_issue_body", post(service::axum_generate_issue_body))
-        .route("/api/post_github_comment", post(service::axum_post_github_comment))
-        .route("/api/add_github_label", post(service::axum_add_github_label))
-        .route("/api/remove_github_label", post(service::axum_remove_github_label))
-        .route("/api/close_github_issue", post(service::axum_close_github_issue))
-        .route("/api/delete_github_issue", post(service::axum_delete_github_issue))
+        .route(
+            "/api/list_github_issues",
+            post(service::axum_list_github_issues),
+        )
+        .route(
+            "/api/list_assigned_issues",
+            post(service::axum_list_assigned_issues),
+        )
+        .route(
+            "/api/create_github_issue",
+            post(service::axum_create_github_issue),
+        )
+        .route(
+            "/api/generate_issue_body",
+            post(service::axum_generate_issue_body),
+        )
+        .route(
+            "/api/post_github_comment",
+            post(service::axum_post_github_comment),
+        )
+        .route(
+            "/api/add_github_label",
+            post(service::axum_add_github_label),
+        )
+        .route(
+            "/api/remove_github_label",
+            post(service::axum_remove_github_label),
+        )
+        .route(
+            "/api/close_github_issue",
+            post(service::axum_close_github_issue),
+        )
+        .route(
+            "/api/delete_github_issue",
+            post(service::axum_delete_github_issue),
+        )
         // Maintainer & auto-worker
-        .route("/api/configure_maintainer", post(service::axum_configure_maintainer))
-        .route("/api/get_maintainer_status", post(service::axum_get_maintainer_status))
+        .route(
+            "/api/configure_maintainer",
+            post(service::axum_configure_maintainer),
+        )
+        .route(
+            "/api/get_maintainer_status",
+            post(service::axum_get_maintainer_status),
+        )
         .route("/api/get_maintainer_history", post(get_maintainer_history))
         .route(
             "/api/trigger_maintainer_check",
@@ -557,18 +327,39 @@ async fn run_server() -> std::io::Result<()> {
             "/api/clear_maintainer_reports",
             post(service::axum_clear_maintainer_reports),
         )
-        .route("/api/get_maintainer_issues", post(service::axum_get_maintainer_issues_for_project))
+        .route(
+            "/api/get_maintainer_issues",
+            post(service::axum_get_maintainer_issues_for_project),
+        )
         .route(
             "/api/get_maintainer_issue_detail",
             post(service::axum_get_maintainer_issue_detail_for_project),
         )
-        .route("/api/configure_auto_worker", post(service::axum_configure_auto_worker))
-        .route("/api/get_auto_worker_queue", post(service::axum_get_auto_worker_queue))
-        .route("/api/get_worker_reports", post(service::axum_get_worker_reports))
+        .route(
+            "/api/configure_auto_worker",
+            post(service::axum_configure_auto_worker),
+        )
+        .route(
+            "/api/get_auto_worker_queue",
+            post(service::axum_get_auto_worker_queue),
+        )
+        .route(
+            "/api/get_worker_reports",
+            post(service::axum_get_worker_reports),
+        )
         // Storage/git operations
-        .route("/api/get_session_commits", post(service::axum_get_session_commits))
-        .route("/api/save_session_prompt", post(service::axum_save_session_prompt))
-        .route("/api/list_project_prompts", post(service::axum_list_project_prompts))
+        .route(
+            "/api/get_session_commits",
+            post(service::axum_get_session_commits),
+        )
+        .route(
+            "/api/save_session_prompt",
+            post(service::axum_save_session_prompt),
+        )
+        .route(
+            "/api/list_project_prompts",
+            post(service::axum_list_project_prompts),
+        )
         .route("/api/get_repo_head", post(service::axum_get_repo_head))
         .route(
             "/api/get_session_token_usage",
@@ -576,10 +367,19 @@ async fn run_server() -> std::io::Result<()> {
         )
         // Directory listing
         .route("/api/list_directories_at", post(list_directories_at))
-        .route("/api/list_root_directories", post(service::axum_list_root_directories))
-        .route("/api/generate_project_names", post(service::axum_generate_project_names))
+        .route(
+            "/api/list_root_directories",
+            post(service::axum_list_root_directories),
+        )
+        .route(
+            "/api/generate_project_names",
+            post(service::axum_generate_project_names),
+        )
         // Scaffold
-        .route("/api/scaffold_project", post(service::axum_scaffold_project))
+        .route(
+            "/api/scaffold_project",
+            post(service::axum_scaffold_project),
+        )
         // Session management
         .route("/api/stage_session", post(stage_session))
         .route("/api/unstage_session", post(service::axum_unstage_session))
@@ -599,8 +399,14 @@ async fn run_server() -> std::io::Result<()> {
         )
         .route("/api/duplicate_note", post(service::axum_duplicate_note))
         // Auth/login
-        .route("/api/start_claude_login", post(service::axum_start_claude_login))
-        .route("/api/stop_claude_login", post(service::axum_stop_claude_login))
+        .route(
+            "/api/start_claude_login",
+            post(service::axum_start_claude_login),
+        )
+        .route(
+            "/api/stop_claude_login",
+            post(service::axum_stop_claude_login),
+        )
         .route("/ws", get(ws_upgrade))
         .fallback_service(serve_dir)
         .layer(middleware::from_fn(auth_middleware))
@@ -764,182 +570,6 @@ macro_rules! spawn_blocking_handler {
 
 // --- Route handlers ---
 
-async fn list_projects(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let inventory = service::list_projects(&state.app).map_err(<(StatusCode, String)>::from)?;
-    ok_json(inventory)
-}
-
-async fn check_onboarding(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let cfg = service::check_onboarding(&state.app).map_err(<(StatusCode, String)>::from)?;
-    ok_json(cfg)
-}
-
-async fn restore_sessions(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::restore_sessions(&state.app).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn connect_session(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ConnectSessionRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = parse_uuid(&req.session_id)?;
-
-    service::connect_session(&state.app, id, req.rows, req.cols)
-        .map_err(<(StatusCode, String)>::from)?;
-
-    Ok(Json(Value::Null))
-}
-
-async fn load_project(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<LoadProjectRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project = service::load_project(&state.app, &req.name, &req.repo_path)
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(project)
-}
-
-async fn write_to_pty(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<WriteToPtyRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = parse_uuid(&req.session_id)?;
-    service::write_to_pty(&state.app, id, req.data.as_bytes())
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn send_raw_to_pty(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<WriteToPtyRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = parse_uuid(&req.session_id)?;
-    service::send_raw_to_pty(&state.app, id, req.data.as_bytes())
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn resize_pty(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ResizePtyRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = parse_uuid(&req.session_id)?;
-    service::resize_pty(&state.app, id, req.rows, req.cols)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn close_session(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<CloseSessionRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let session_uuid = parse_uuid(&req.session_id)?;
-
-    service::close_session(&state.app, project_uuid, session_uuid, req.delete_worktree)
-        .map_err(<(StatusCode, String)>::from)?;
-
-    Ok(Json(Value::Null))
-}
-
-async fn create_session(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<CreateSessionRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let session_id = uuid::Uuid::new_v4();
-
-    let app = state.app.clone();
-    let kind = req.kind;
-    let github_issue = req.github_issue;
-    let background = req.background;
-    let initial_prompt = req.initial_prompt;
-
-    let result = spawn_blocking_handler!(move || {
-        service::create_session(
-            &app,
-            project_uuid,
-            session_id,
-            &kind,
-            github_issue,
-            background,
-            initial_prompt,
-        )
-    })?;
-
-    Ok(Json(Value::String(result)))
-}
-
-async fn generate_architecture(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<RepoPathRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let app = state.app.clone();
-    let result =
-        spawn_blocking_handler!(move || { service::generate_architecture(&app, &req.repo_path) })?;
-    ok_json(result)
-}
-
-async fn create_project(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<CreateProjectRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project = service::create_project(&state.app, &req.name, &req.repo_path)
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(project)
-}
-
-async fn delete_project(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<DeleteProjectRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = parse_uuid(&req.project_id)?;
-
-    service::delete_project(&state.app, id, req.delete_repo)
-        .map_err(<(StatusCode, String)>::from)?;
-
-    Ok(Json(Value::Null))
-}
-
-async fn get_agents_md(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectIdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = parse_uuid(&req.project_id)?;
-    let content = service::get_agents_md(&state.app, id).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::String(content)))
-}
-
-async fn update_agents_md(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<UpdateAgentsMdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = parse_uuid(&req.project_id)?;
-    service::update_agents_md(&state.app, id, &req.content)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn set_initial_prompt(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<SetInitialPromptRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let session_uuid = parse_uuid(&req.session_id)?;
-
-    service::set_initial_prompt(&state.app, project_uuid, session_uuid, req.prompt)
-        .map_err(<(StatusCode, String)>::from)?;
-
-    Ok(Json(Value::Null))
-}
-
 async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
     // service::check_claude_cli is infallible (returns String, not Result).
     // Wrap in Ok::<_, AppError> so spawn_blocking_handler! gets a Result<T, AppError>.
@@ -947,11 +577,6 @@ async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
         service::check_claude_cli()
     ))?;
     Ok(Json(Value::String(result)))
-}
-
-async fn home_dir() -> Result<Json<Value>, (StatusCode, String)> {
-    let path = service::home_dir().map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::String(path)))
 }
 
 async fn save_onboarding_config(
@@ -971,55 +596,6 @@ async fn log_frontend_error(
     Ok(Json(Value::Null))
 }
 
-async fn detect_project_type(
-    Json(req): Json<RepoPathRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = req.repo_path;
-    let result =
-        spawn_blocking_handler!(move || { service::detect_project_type_blocking(&repo_path) })?;
-    ok_json(result)
-}
-
-async fn get_deploy_credentials() -> Result<Json<Value>, (StatusCode, String)> {
-    let result = spawn_blocking_handler!(service::get_deploy_credentials_blocking)?;
-    ok_json(result)
-}
-
-async fn save_deploy_credentials(
-    Json(req): Json<SaveDeployCredentialsRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    spawn_blocking_handler!(move || service::save_deploy_credentials_blocking(req.credentials))?;
-    Ok(Json(Value::Null))
-}
-
-async fn is_deploy_provisioned() -> Result<Json<Value>, (StatusCode, String)> {
-    let provisioned = spawn_blocking_handler!(service::is_deploy_provisioned_blocking)?;
-    Ok(Json(Value::Bool(provisioned)))
-}
-
-async fn deploy_project(
-    Json(req): Json<DeployProjectRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let result = service::deploy_project(req.request)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(result)
-}
-
-async fn list_deployed_services() -> Result<Json<Value>, (StatusCode, String)> {
-    let services = service::list_deployed_services()
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Array(services)))
-}
-
-async fn load_keybindings(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let result = service::load_keybindings(&state.app).map_err(<(StatusCode, String)>::from)?;
-    ok_json(result)
-}
-
 // --- Desktop-only stubs (return NOT_IMPLEMENTED gracefully) ---
 
 async fn copy_image_file_to_clipboard() -> Result<Json<Value>, (StatusCode, String)> {
@@ -1036,41 +612,6 @@ async fn capture_app_screenshot() -> Result<Json<Value>, (StatusCode, String)> {
     ))
 }
 
-async fn start_voice_pipeline(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::start_voice_pipeline(&state.app)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn stop_voice_pipeline(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::stop_voice_pipeline(&state.app)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn toggle_voice_pause(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let paused = service::toggle_voice_pause(&state.app)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(serde_json::json!({ "paused": paused })))
-}
-
-async fn load_terminal_theme(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let app = state.app.clone();
-    let theme = spawn_blocking_handler!(move || service::load_terminal_theme_blocking(&app))?;
-    ok_json(theme)
-}
-
 async fn list_archived_projects(
     AxumState(state): AxumState<Arc<ServerState>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
@@ -1078,6 +619,7 @@ async fn list_archived_projects(
         service::list_archived_projects(&state.app).map_err(<(StatusCode, String)>::from)?;
     ok_json(filtered)
 }
+
 async fn merge_session_branch(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectSessionRequest>,
@@ -1105,241 +647,6 @@ async fn merge_session_branch(
     }
 }
 
-async fn send_note_ai_chat(
-    Json(req): Json<SendNoteAiChatRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let response = service::send_note_ai_chat(
-        req.note_content,
-        req.selected_text,
-        req.conversation_history,
-        req.prompt,
-    )
-    .await
-    .map_err(<(StatusCode, String)>::from)?;
-
-    ok_json(response)
-}
-// --- Notes ---
-
-async fn api_list_notes(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<FolderRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let entries =
-        service::list_notes(&state.app, &req.folder).map_err(<(StatusCode, String)>::from)?;
-    ok_json(entries)
-}
-
-async fn api_read_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<FolderFilenameRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let content = service::read_note(&state.app, &req.folder, &req.filename)
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(content)
-}
-
-async fn api_write_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<WriteNoteRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::write_note(&state.app, &req.folder, &req.filename, &req.content)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn api_create_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<CreateNoteRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let filename = service::create_note(&state.app, &req.folder, &req.title)
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(filename)
-}
-
-async fn api_delete_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<FolderFilenameRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::delete_note(&state.app, &req.folder, &req.filename)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn api_rename_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<RenameNoteRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let filename = service::rename_note(&state.app, &req.folder, &req.old_name, &req.new_name)
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(filename)
-}
-
-async fn api_list_folders(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let folders = service::list_note_folders(&state.app).map_err(<(StatusCode, String)>::from)?;
-    ok_json(folders)
-}
-
-async fn api_create_folder(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<NameRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::create_note_folder(&state.app, &req.name).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn api_rename_folder(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<RenameFolderRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::rename_note_folder(&state.app, &req.old_name, &req.new_name)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn api_delete_folder(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<DeleteFolderRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::delete_note_folder(&state.app, &req.name, req.force)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn api_commit_notes(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let committed =
-        service::commit_pending_notes(&state.app).map_err(<(StatusCode, String)>::from)?;
-    ok_json(committed)
-}
-
-// --- GitHub Issues ---
-
-async fn list_github_issues(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<RepoPathRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let issues = service::list_github_issues(&state.app, &req.repo_path)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(issues)
-}
-
-async fn list_assigned_issues(
-    Json(req): Json<RepoPathRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let assigned = service::list_assigned_issues(&req.repo_path)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(assigned)
-}
-
-async fn create_github_issue(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<CreateGithubIssueRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let issue = service::create_github_issue(&state.app, &req.repo_path, &req.title, &req.body)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(issue)
-}
-
-async fn generate_issue_body(
-    Json(req): Json<TitleRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let body = service::generate_issue_body(&req.title)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::String(body)))
-}
-
-async fn post_github_comment(
-    Json(req): Json<PostGithubCommentRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::post_github_comment(&req.repo_path, req.issue_number, &req.body)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn add_github_label(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<AddGithubLabelRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::add_github_label(
-        &state.app,
-        &req.repo_path,
-        req.issue_number,
-        &req.label,
-        req.description.as_deref(),
-        req.color.as_deref(),
-    )
-    .await
-    .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn remove_github_label(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<RemoveGithubLabelRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::remove_github_label(&state.app, &req.repo_path, req.issue_number, &req.label)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn close_github_issue(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<CloseGithubIssueRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::close_github_issue(&state.app, &req.repo_path, req.issue_number, &req.comment)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn delete_github_issue(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<RepoPathIssueNumberRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::delete_github_issue(&state.app, &req.repo_path, req.issue_number)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-// --- Maintainer & Auto-Worker ---
-
-async fn configure_maintainer(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ConfigureMaintainerRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    service::configure_maintainer(
-        &state.app,
-        project_uuid,
-        req.enabled,
-        req.interval_minutes,
-        req.github_repo,
-    )
-    .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn get_maintainer_status(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectIdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let log = service::get_maintainer_status(&state.app, project_uuid)
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(log)
-}
-
 async fn get_maintainer_history(
     AxumState(state): AxumState<Arc<ServerState>>,
     Json(req): Json<ProjectIdRequest>,
@@ -1348,140 +655,6 @@ async fn get_maintainer_history(
     let logs = service::get_maintainer_history(&state.app, project_uuid, 20)
         .map_err(<(StatusCode, String)>::from)?;
     ok_json(logs)
-}
-
-async fn trigger_maintainer_check(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectIdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let log = service::trigger_maintainer_check(&state.app, project_uuid)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(log)
-}
-
-async fn clear_maintainer_reports(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectIdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    service::clear_maintainer_reports(&state.app, project_uuid)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn get_maintainer_issues(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectIdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let issues = service::get_maintainer_issues_for_project(&state.app, project_uuid)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(issues)
-}
-
-async fn get_maintainer_issue_detail(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<GetMaintainerIssueDetailRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let detail = service::get_maintainer_issue_detail_for_project(
-        &state.app,
-        project_uuid,
-        req.issue_number as u32,
-    )
-    .await
-    .map_err(<(StatusCode, String)>::from)?;
-    ok_json(detail)
-}
-
-async fn configure_auto_worker(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ConfigureAutoWorkerRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    service::configure_auto_worker(&state.app, project_uuid, req.enabled)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn get_auto_worker_queue(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectIdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let queue = service::get_auto_worker_queue(&state.app, project_uuid)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(queue)
-}
-
-async fn get_worker_reports(
-    Json(req): Json<RepoPathRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let reports = service::get_worker_reports(&req.repo_path)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(reports)
-}
-
-// --- Storage/Git Operations ---
-
-async fn get_session_commits(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectSessionRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let session_uuid = parse_uuid(&req.session_id)?;
-    let app = state.app.clone();
-    let commits = spawn_blocking_handler!(move || {
-        service::get_session_commits(&app, project_uuid, session_uuid)
-    })?;
-    ok_json(commits)
-}
-
-async fn save_session_prompt(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectSessionRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let session_uuid = parse_uuid(&req.session_id)?;
-    service::save_session_prompt(&state.app, project_uuid, session_uuid)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn list_project_prompts(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectIdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let prompts = service::list_project_prompts(&state.app, project_uuid)
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(prompts)
-}
-
-async fn get_repo_head(
-    Json(req): Json<RepoPathRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let repo_path = req.repo_path;
-    let result = spawn_blocking_handler!(move || service::get_repo_head(&repo_path))?;
-    ok_json(result)
-}
-
-async fn get_session_token_usage(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectSessionRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let session_uuid = parse_uuid(&req.session_id)?;
-    let app = state.app.clone();
-    let data = spawn_blocking_handler!(move || {
-        service::get_session_token_usage(&app, project_uuid, session_uuid)
-    })?;
-    ok_json(data)
 }
 
 // --- Directory Listing ---
@@ -1494,34 +667,6 @@ async fn list_directories_at(
     ok_json(entries)
 }
 
-async fn list_root_directories(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let entries =
-        service::list_root_directories(&state.app).map_err(<(StatusCode, String)>::from)?;
-    ok_json(entries)
-}
-
-async fn generate_project_names(
-    Json(req): Json<DescriptionRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let description = req.description;
-    let names = spawn_blocking_handler!(move || service::generate_project_names(&description))?;
-    ok_json(names)
-}
-
-// --- Scaffold ---
-
-async fn scaffold_project(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<NameRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project = service::scaffold_project(&state.app, &req.name)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(project)
-}
-
 // --- Session Management ---
 
 async fn stage_session() -> Result<Json<Value>, (StatusCode, String)> {
@@ -1529,87 +674,6 @@ async fn stage_session() -> Result<Json<Value>, (StatusCode, String)> {
         StatusCode::NOT_IMPLEMENTED,
         "stage_session requires AppHandle and is not available in server mode".to_string(),
     ))
-}
-
-async fn unstage_session(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectSessionRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let session_uuid = parse_uuid(&req.session_id)?;
-
-    service::unstage_session(&state.app, project_uuid, session_uuid)
-        .map_err(<(StatusCode, String)>::from)?;
-
-    Ok(Json(Value::Null))
-}
-
-async fn submit_secure_env_value(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<SubmitSecureEnvValueRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let status = service::submit_secure_env_value(&state.app, &req.request_id, &req.value)
-        .await
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::String(status)))
-}
-
-async fn cancel_secure_env_request(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<CancelSecureEnvRequestRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::cancel_secure_env_request(&state.app, &req.request_id)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-// --- Notes (additional) ---
-
-async fn api_save_note_image(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<SaveNoteImageRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let filename =
-        service::save_note_image(&state.app, &req.folder, &req.image_bytes, &req.extension)
-            .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::String(filename)))
-}
-
-async fn api_resolve_note_asset_path(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ResolveNoteAssetPathRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let resolved = service::resolve_note_asset_path(&state.app, &req.folder, &req.relative_path)
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::String(resolved)))
-}
-
-async fn api_duplicate_note(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<FolderFilenameRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let copy = service::duplicate_note(&state.app, &req.folder, &req.filename)
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(copy)
-}
-
-// --- Auth/Login ---
-
-async fn start_claude_login(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let session_id =
-        service::start_claude_login(&state.app).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::String(session_id)))
-}
-
-async fn stop_claude_login(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<SessionIdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let id = parse_uuid(&req.session_id)?;
-    service::stop_claude_login(&state.app, id).map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
 }
 
 // --- WebSocket ---
