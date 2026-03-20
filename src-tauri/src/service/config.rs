@@ -17,12 +17,14 @@ pub fn home_dir() -> Result<String, AppError> {
 
 /// Check the Claude CLI installation and authentication status.
 /// This spawns a subprocess and should be called from a blocking context.
-pub fn check_claude_cli() -> String {
-    config::check_claude_cli_status()
+#[derive_handlers(axum_handler, blocking)]
+pub fn check_claude_cli() -> Result<String, AppError> {
+    Ok(config::check_claude_cli_status())
 }
 
 /// Save onboarding config with a projects root and optional default provider.
 /// If `default_provider` is `None`, defaults to `ClaudeCode`.
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn save_onboarding_config(
     state: &AppState,
     projects_root: &str,
@@ -81,7 +83,8 @@ pub fn load_keybindings(state: &AppState) -> Result<keybindings::KeybindingsResu
 }
 
 /// Log a frontend error to the dedicated log file and tracing.
-pub fn log_frontend_error(state: &AppState, message: &str) {
+#[derive_handlers(axum_handler)]
+pub fn log_frontend_error(state: &AppState, message: &str) -> Result<(), AppError> {
     use std::io::Write;
     let sanitized = message.replace('\n', "\\n").replace('\r', "\\r");
     let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z");
@@ -95,6 +98,7 @@ pub fn log_frontend_error(state: &AppState, message: &str) {
     }
 
     tracing::error!(target: "frontend", "{}", sanitized);
+    Ok(())
 }
 
 #[derive_handlers(tauri_command)]

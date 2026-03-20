@@ -116,7 +116,7 @@ pub fn run() {
             generated::stop_claude_login,
             generated::home_dir,
             generated::check_onboarding,
-            commands::save_onboarding_config,
+            generated::save_onboarding_config,
             generated::load_terminal_theme,
             commands::check_claude_cli,
             generated::list_directories_at,

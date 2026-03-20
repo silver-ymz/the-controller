@@ -73,6 +73,15 @@ pub fn get_maintainer_history(
         .map_err(AppError::internal)
 }
 
+/// Get the maintainer run log history with a default limit of 20.
+#[derive_handlers(axum_handler)]
+pub fn get_maintainer_history_default(
+    state: &AppState,
+    project_id: Uuid,
+) -> Result<Vec<MaintainerRunLog>, AppError> {
+    get_maintainer_history(state, project_id, 20)
+}
+
 #[derive_handlers(tauri_command, axum_handler)]
 pub async fn trigger_maintainer_check(
     state: &AppState,

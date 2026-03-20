@@ -102,6 +102,7 @@ fwd!(async fn send_note_ai_chat => crate::service::tauri_send_note_ai_chat(note_
 
 // --- config ---
 fwd!(fn home_dir => crate::service::tauri_home_dir() -> Result<String, String>);
+fwd!(fn save_onboarding_config => crate::service::tauri_save_onboarding_config(state: S<'_>, projects_root: String, default_provider: Option<crate::config::ConfigDefaultProvider>) -> Result<(), String>);
 fwd!(fn list_directories_at => crate::service::tauri_list_directories_at(path: String) -> Result<Vec<crate::config::DirEntry>, String>);
 fwd!(fn list_root_directories => crate::service::tauri_list_root_directories(state: S<'_>) -> Result<Vec<crate::config::DirEntry>, String>);
 fwd!(async fn generate_project_names => crate::service::tauri_generate_project_names(description: String) -> Result<Vec<String>, String>);

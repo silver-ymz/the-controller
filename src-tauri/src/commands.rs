@@ -377,7 +377,7 @@ pub fn check_onboarding(state: State<Arc<AppState>>) -> Result<Option<config::Co
     crate::service::check_onboarding(&state).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn save_onboarding_config(
     state: State<Arc<AppState>>,
     projects_root: String,
@@ -394,7 +394,7 @@ pub fn load_terminal_theme(
 
 #[tauri::command]
 pub async fn check_claude_cli() -> Result<String, String> {
-    tauri_blocking!(|| Ok(crate::service::check_claude_cli()))
+    tauri_blocking!(|| crate::service::check_claude_cli().map_err(|e| e.to_string()))
 }
 
 // [migrated to generated.rs]
@@ -820,7 +820,7 @@ pub async fn get_maintainer_issue_detail(
 
 #[tauri::command]
 pub fn log_frontend_error(message: String, state: tauri::State<'_, Arc<AppState>>) {
-    crate::service::log_frontend_error(&state, &message);
+    let _ = crate::service::log_frontend_error(&state, &message);
 }
 
 // [migrated to generated.rs]

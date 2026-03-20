@@ -17,7 +17,6 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use the_controller_lib::{
-    config,
     emitter::WsBroadcastEmitter,
     server_helpers::{ok_json, parse_uuid, ServerState},
     service,
@@ -34,36 +33,9 @@ mod requests {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    pub struct ProjectIdRequest {
-        pub project_id: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
     pub struct ProjectSessionRequest {
         pub project_id: String,
         pub session_id: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SaveOnboardingConfigRequest {
-        pub projects_root: String,
-        #[serde(default)]
-        pub default_provider: config::ConfigDefaultProvider,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct LogFrontendErrorRequest {
-        #[serde(default)]
-        pub message: String,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct PathRequest {
-        pub path: String,
     }
 }
 
@@ -198,10 +170,19 @@ async fn run_server() -> std::io::Result<()> {
             "/api/set_initial_prompt",
             post(service::axum_set_initial_prompt),
         )
-        .route("/api/check_claude_cli", post(check_claude_cli))
+        .route(
+            "/api/check_claude_cli",
+            post(service::axum_check_claude_cli),
+        )
         .route("/api/home_dir", post(service::axum_home_dir))
-        .route("/api/save_onboarding_config", post(save_onboarding_config))
-        .route("/api/log_frontend_error", post(log_frontend_error))
+        .route(
+            "/api/save_onboarding_config",
+            post(service::axum_save_onboarding_config),
+        )
+        .route(
+            "/api/log_frontend_error",
+            post(service::axum_log_frontend_error),
+        )
         .route(
             "/api/detect_project_type",
             post(service::axum_detect_project_type_blocking),
@@ -248,7 +229,10 @@ async fn run_server() -> std::io::Result<()> {
             "/api/load_terminal_theme",
             post(service::axum_load_terminal_theme_blocking),
         )
-        .route("/api/list_archived_projects", post(list_archived_projects))
+        .route(
+            "/api/list_archived_projects",
+            post(service::axum_list_archived_projects),
+        )
         .route(
             "/api/generate_architecture",
             post(service::axum_generate_architecture),
@@ -318,7 +302,10 @@ async fn run_server() -> std::io::Result<()> {
             "/api/get_maintainer_status",
             post(service::axum_get_maintainer_status),
         )
-        .route("/api/get_maintainer_history", post(get_maintainer_history))
+        .route(
+            "/api/get_maintainer_history",
+            post(service::axum_get_maintainer_history_default),
+        )
         .route(
             "/api/trigger_maintainer_check",
             post(service::axum_trigger_maintainer_check),
@@ -366,7 +353,10 @@ async fn run_server() -> std::io::Result<()> {
             post(service::axum_get_session_token_usage),
         )
         // Directory listing
-        .route("/api/list_directories_at", post(list_directories_at))
+        .route(
+            "/api/list_directories_at",
+            post(service::axum_list_directories_at_safe),
+        )
         .route(
             "/api/list_root_directories",
             post(service::axum_list_root_directories),
@@ -542,59 +532,7 @@ fn forwarded_proto(headers: &HeaderMap) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-// --- Shared handler utilities ---
-
-/// Run a blocking closure on a threadpool and map both join-failure and
-/// `AppError` to Axum's error tuple.
-///
-/// Usage (clone only the Arcs you actually need):
-/// ```ignore
-/// let result = spawn_blocking_handler!({
-///     let foo = state.app.foo.clone();
-///     move || service::do_thing(&foo, arg)
-/// })?;
-/// ```
-macro_rules! spawn_blocking_handler {
-    ($closure:expr) => {{
-        tokio::task::spawn_blocking($closure)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Task failed: {e}"),
-                )
-            })?
-            .map_err(<(StatusCode, String)>::from)
-    }};
-}
-
 // --- Route handlers ---
-
-async fn check_claude_cli() -> Result<Json<Value>, (StatusCode, String)> {
-    // service::check_claude_cli is infallible (returns String, not Result).
-    // Wrap in Ok::<_, AppError> so spawn_blocking_handler! gets a Result<T, AppError>.
-    let result = spawn_blocking_handler!(|| Ok::<_, the_controller_lib::error::AppError>(
-        service::check_claude_cli()
-    ))?;
-    Ok(Json(Value::String(result)))
-}
-
-async fn save_onboarding_config(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<SaveOnboardingConfigRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::save_onboarding_config(&state.app, &req.projects_root, Some(req.default_provider))
-        .map_err(<(StatusCode, String)>::from)?;
-    Ok(Json(Value::Null))
-}
-
-async fn log_frontend_error(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<LogFrontendErrorRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    service::log_frontend_error(&state.app, &req.message);
-    Ok(Json(Value::Null))
-}
 
 // --- Desktop-only stubs (return NOT_IMPLEMENTED gracefully) ---
 
@@ -610,14 +548,6 @@ async fn capture_app_screenshot() -> Result<Json<Value>, (StatusCode, String)> {
         StatusCode::NOT_IMPLEMENTED,
         "capture_app_screenshot is not available in server mode".to_string(),
     ))
-}
-
-async fn list_archived_projects(
-    AxumState(state): AxumState<Arc<ServerState>>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let filtered =
-        service::list_archived_projects(&state.app).map_err(<(StatusCode, String)>::from)?;
-    ok_json(filtered)
 }
 
 async fn merge_session_branch(
@@ -645,26 +575,6 @@ async fn merge_session_branch(
             format!("Merge timed out after {} seconds", OVERALL_TIMEOUT_SECS),
         )),
     }
-}
-
-async fn get_maintainer_history(
-    AxumState(state): AxumState<Arc<ServerState>>,
-    Json(req): Json<ProjectIdRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let project_uuid = parse_uuid(&req.project_id)?;
-    let logs = service::get_maintainer_history(&state.app, project_uuid, 20)
-        .map_err(<(StatusCode, String)>::from)?;
-    ok_json(logs)
-}
-
-// --- Directory Listing ---
-
-async fn list_directories_at(
-    Json(req): Json<PathRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let entries =
-        service::list_directories_at_safe(&req.path).map_err(<(StatusCode, String)>::from)?;
-    ok_json(entries)
 }
 
 // --- Session Management ---
