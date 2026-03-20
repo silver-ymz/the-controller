@@ -482,125 +482,125 @@ async fn run_server() -> std::io::Result<()> {
         .filter(|t| !t.is_empty());
 
     let app = Router::new()
-        .route("/api/list_projects", post(list_projects))
-        .route("/api/check_onboarding", post(check_onboarding))
-        .route("/api/restore_sessions", post(restore_sessions))
-        .route("/api/connect_session", post(connect_session))
-        .route("/api/load_project", post(load_project))
-        .route("/api/write_to_pty", post(write_to_pty))
-        .route("/api/send_raw_to_pty", post(send_raw_to_pty))
-        .route("/api/resize_pty", post(resize_pty))
-        .route("/api/close_session", post(close_session))
-        .route("/api/create_session", post(create_session))
-        .route("/api/create_project", post(create_project))
-        .route("/api/delete_project", post(delete_project))
-        .route("/api/get_agents_md", post(get_agents_md))
-        .route("/api/update_agents_md", post(update_agents_md))
-        .route("/api/set_initial_prompt", post(set_initial_prompt))
+        .route("/api/list_projects", post(service::axum_list_projects))
+        .route("/api/check_onboarding", post(service::axum_check_onboarding))
+        .route("/api/restore_sessions", post(service::axum_restore_sessions))
+        .route("/api/connect_session", post(service::axum_connect_session))
+        .route("/api/load_project", post(service::axum_load_project))
+        .route("/api/write_to_pty", post(service::axum_write_to_pty))
+        .route("/api/send_raw_to_pty", post(service::axum_send_raw_to_pty))
+        .route("/api/resize_pty", post(service::axum_resize_pty))
+        .route("/api/close_session", post(service::axum_close_session))
+        .route("/api/create_session", post(service::axum_create_session))
+        .route("/api/create_project", post(service::axum_create_project))
+        .route("/api/delete_project", post(service::axum_delete_project))
+        .route("/api/get_agents_md", post(service::axum_get_agents_md))
+        .route("/api/update_agents_md", post(service::axum_update_agents_md))
+        .route("/api/set_initial_prompt", post(service::axum_set_initial_prompt))
         .route("/api/check_claude_cli", post(check_claude_cli))
-        .route("/api/home_dir", post(home_dir))
+        .route("/api/home_dir", post(service::axum_home_dir))
         .route("/api/save_onboarding_config", post(save_onboarding_config))
         .route("/api/log_frontend_error", post(log_frontend_error))
-        .route("/api/detect_project_type", post(detect_project_type))
-        .route("/api/get_deploy_credentials", post(get_deploy_credentials))
+        .route("/api/detect_project_type", post(service::axum_detect_project_type_blocking))
+        .route("/api/get_deploy_credentials", post(service::axum_get_deploy_credentials_blocking))
         .route(
             "/api/save_deploy_credentials",
-            post(save_deploy_credentials),
+            post(service::axum_save_deploy_credentials_blocking),
         )
-        .route("/api/is_deploy_provisioned", post(is_deploy_provisioned))
-        .route("/api/deploy_project", post(deploy_project))
-        .route("/api/list_deployed_services", post(list_deployed_services))
-        .route("/api/load_keybindings", post(load_keybindings))
+        .route("/api/is_deploy_provisioned", post(service::axum_is_deploy_provisioned_blocking))
+        .route("/api/deploy_project", post(service::axum_deploy_project))
+        .route("/api/list_deployed_services", post(service::axum_list_deployed_services))
+        .route("/api/load_keybindings", post(service::axum_load_keybindings))
         .route(
             "/api/copy_image_file_to_clipboard",
             post(copy_image_file_to_clipboard),
         )
         .route("/api/capture_app_screenshot", post(capture_app_screenshot))
-        .route("/api/start_voice_pipeline", post(start_voice_pipeline))
-        .route("/api/stop_voice_pipeline", post(stop_voice_pipeline))
-        .route("/api/toggle_voice_pause", post(toggle_voice_pause))
-        .route("/api/load_terminal_theme", post(load_terminal_theme))
+        .route("/api/start_voice_pipeline", post(service::axum_start_voice_pipeline))
+        .route("/api/stop_voice_pipeline", post(service::axum_stop_voice_pipeline))
+        .route("/api/toggle_voice_pause", post(service::axum_toggle_voice_pause))
+        .route("/api/load_terminal_theme", post(service::axum_load_terminal_theme_blocking))
         .route("/api/list_archived_projects", post(list_archived_projects))
-        .route("/api/generate_architecture", post(generate_architecture))
+        .route("/api/generate_architecture", post(service::axum_generate_architecture))
         .route("/api/merge_session_branch", post(merge_session_branch))
-        .route("/api/send_note_ai_chat", post(send_note_ai_chat))
-        .route("/api/list_notes", post(api_list_notes))
-        .route("/api/read_note", post(api_read_note))
-        .route("/api/write_note", post(api_write_note))
-        .route("/api/create_note", post(api_create_note))
-        .route("/api/delete_note", post(api_delete_note))
-        .route("/api/rename_note", post(api_rename_note))
-        .route("/api/list_folders", post(api_list_folders))
-        .route("/api/create_folder", post(api_create_folder))
-        .route("/api/rename_folder", post(api_rename_folder))
-        .route("/api/delete_folder", post(api_delete_folder))
-        .route("/api/commit_notes", post(api_commit_notes))
+        .route("/api/send_note_ai_chat", post(service::axum_send_note_ai_chat))
+        .route("/api/list_notes", post(service::axum_list_notes))
+        .route("/api/read_note", post(service::axum_read_note))
+        .route("/api/write_note", post(service::axum_write_note))
+        .route("/api/create_note", post(service::axum_create_note))
+        .route("/api/delete_note", post(service::axum_delete_note))
+        .route("/api/rename_note", post(service::axum_rename_note))
+        .route("/api/list_folders", post(service::axum_list_note_folders))
+        .route("/api/create_folder", post(service::axum_create_note_folder))
+        .route("/api/rename_folder", post(service::axum_rename_note_folder))
+        .route("/api/delete_folder", post(service::axum_delete_note_folder))
+        .route("/api/commit_notes", post(service::axum_commit_pending_notes))
         // GitHub issues
-        .route("/api/list_github_issues", post(list_github_issues))
-        .route("/api/list_assigned_issues", post(list_assigned_issues))
-        .route("/api/create_github_issue", post(create_github_issue))
-        .route("/api/generate_issue_body", post(generate_issue_body))
-        .route("/api/post_github_comment", post(post_github_comment))
-        .route("/api/add_github_label", post(add_github_label))
-        .route("/api/remove_github_label", post(remove_github_label))
-        .route("/api/close_github_issue", post(close_github_issue))
-        .route("/api/delete_github_issue", post(delete_github_issue))
+        .route("/api/list_github_issues", post(service::axum_list_github_issues))
+        .route("/api/list_assigned_issues", post(service::axum_list_assigned_issues))
+        .route("/api/create_github_issue", post(service::axum_create_github_issue))
+        .route("/api/generate_issue_body", post(service::axum_generate_issue_body))
+        .route("/api/post_github_comment", post(service::axum_post_github_comment))
+        .route("/api/add_github_label", post(service::axum_add_github_label))
+        .route("/api/remove_github_label", post(service::axum_remove_github_label))
+        .route("/api/close_github_issue", post(service::axum_close_github_issue))
+        .route("/api/delete_github_issue", post(service::axum_delete_github_issue))
         // Maintainer & auto-worker
-        .route("/api/configure_maintainer", post(configure_maintainer))
-        .route("/api/get_maintainer_status", post(get_maintainer_status))
+        .route("/api/configure_maintainer", post(service::axum_configure_maintainer))
+        .route("/api/get_maintainer_status", post(service::axum_get_maintainer_status))
         .route("/api/get_maintainer_history", post(get_maintainer_history))
         .route(
             "/api/trigger_maintainer_check",
-            post(trigger_maintainer_check),
+            post(service::axum_trigger_maintainer_check),
         )
         .route(
             "/api/clear_maintainer_reports",
-            post(clear_maintainer_reports),
+            post(service::axum_clear_maintainer_reports),
         )
-        .route("/api/get_maintainer_issues", post(get_maintainer_issues))
+        .route("/api/get_maintainer_issues", post(service::axum_get_maintainer_issues_for_project))
         .route(
             "/api/get_maintainer_issue_detail",
-            post(get_maintainer_issue_detail),
+            post(service::axum_get_maintainer_issue_detail_for_project),
         )
-        .route("/api/configure_auto_worker", post(configure_auto_worker))
-        .route("/api/get_auto_worker_queue", post(get_auto_worker_queue))
-        .route("/api/get_worker_reports", post(get_worker_reports))
+        .route("/api/configure_auto_worker", post(service::axum_configure_auto_worker))
+        .route("/api/get_auto_worker_queue", post(service::axum_get_auto_worker_queue))
+        .route("/api/get_worker_reports", post(service::axum_get_worker_reports))
         // Storage/git operations
-        .route("/api/get_session_commits", post(get_session_commits))
-        .route("/api/save_session_prompt", post(save_session_prompt))
-        .route("/api/list_project_prompts", post(list_project_prompts))
-        .route("/api/get_repo_head", post(get_repo_head))
+        .route("/api/get_session_commits", post(service::axum_get_session_commits))
+        .route("/api/save_session_prompt", post(service::axum_save_session_prompt))
+        .route("/api/list_project_prompts", post(service::axum_list_project_prompts))
+        .route("/api/get_repo_head", post(service::axum_get_repo_head))
         .route(
             "/api/get_session_token_usage",
-            post(get_session_token_usage),
+            post(service::axum_get_session_token_usage),
         )
         // Directory listing
         .route("/api/list_directories_at", post(list_directories_at))
-        .route("/api/list_root_directories", post(list_root_directories))
-        .route("/api/generate_project_names", post(generate_project_names))
+        .route("/api/list_root_directories", post(service::axum_list_root_directories))
+        .route("/api/generate_project_names", post(service::axum_generate_project_names))
         // Scaffold
-        .route("/api/scaffold_project", post(scaffold_project))
+        .route("/api/scaffold_project", post(service::axum_scaffold_project))
         // Session management
         .route("/api/stage_session", post(stage_session))
-        .route("/api/unstage_session", post(unstage_session))
+        .route("/api/unstage_session", post(service::axum_unstage_session))
         .route(
             "/api/submit_secure_env_value",
-            post(submit_secure_env_value),
+            post(service::axum_submit_secure_env_value),
         )
         .route(
             "/api/cancel_secure_env_request",
-            post(cancel_secure_env_request),
+            post(service::axum_cancel_secure_env_request),
         )
         // Notes (additional)
-        .route("/api/save_note_image", post(api_save_note_image))
+        .route("/api/save_note_image", post(service::axum_save_note_image))
         .route(
             "/api/resolve_note_asset_path",
-            post(api_resolve_note_asset_path),
+            post(service::axum_resolve_note_asset_path),
         )
-        .route("/api/duplicate_note", post(api_duplicate_note))
+        .route("/api/duplicate_note", post(service::axum_duplicate_note))
         // Auth/login
-        .route("/api/start_claude_login", post(start_claude_login))
-        .route("/api/stop_claude_login", post(stop_claude_login))
+        .route("/api/start_claude_login", post(service::axum_start_claude_login))
+        .route("/api/stop_claude_login", post(service::axum_stop_claude_login))
         .route("/ws", get(ws_upgrade))
         .fallback_service(serve_dir)
         .layer(middleware::from_fn(auth_middleware))
