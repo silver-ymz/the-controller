@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tauri::State;
 
 use crate::notes::NoteEntry;
@@ -5,14 +7,14 @@ use crate::service;
 use crate::state::AppState;
 
 pub(crate) fn list_notes(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
 ) -> Result<Vec<NoteEntry>, String> {
     service::list_notes(&state, &folder).map_err(Into::into)
 }
 
 pub(crate) fn read_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     filename: String,
 ) -> Result<String, String> {
@@ -20,7 +22,7 @@ pub(crate) fn read_note(
 }
 
 pub(crate) fn write_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     filename: String,
     content: String,
@@ -29,7 +31,7 @@ pub(crate) fn write_note(
 }
 
 pub(crate) fn create_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     title: String,
 ) -> Result<String, String> {
@@ -37,7 +39,7 @@ pub(crate) fn create_note(
 }
 
 pub(crate) fn rename_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     old_name: String,
     new_name: String,
@@ -45,7 +47,7 @@ pub(crate) fn rename_note(
     service::rename_note(&state, &folder, &old_name, &new_name).map_err(Into::into)
 }
 pub(crate) fn duplicate_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     filename: String,
 ) -> Result<String, String> {
@@ -53,23 +55,23 @@ pub(crate) fn duplicate_note(
 }
 
 pub(crate) fn delete_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     filename: String,
 ) -> Result<(), String> {
     service::delete_note(&state, &folder, &filename).map_err(Into::into)
 }
 
-pub(crate) fn list_folders(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+pub(crate) fn list_folders(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
     service::list_note_folders(&state).map_err(Into::into)
 }
 
-pub(crate) fn create_folder(state: State<'_, AppState>, name: String) -> Result<(), String> {
+pub(crate) fn create_folder(state: State<'_, Arc<AppState>>, name: String) -> Result<(), String> {
     service::create_note_folder(&state, &name).map_err(Into::into)
 }
 
 pub(crate) fn rename_folder(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     old_name: String,
     new_name: String,
 ) -> Result<(), String> {
@@ -77,7 +79,7 @@ pub(crate) fn rename_folder(
 }
 
 pub(crate) fn delete_folder(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     name: String,
     force: bool,
 ) -> Result<(), String> {
@@ -86,6 +88,6 @@ pub(crate) fn delete_folder(
 
 /// Commit any pending note changes (content edits).
 /// Called by the frontend when switching notes.
-pub(crate) fn commit_notes(state: State<'_, AppState>) -> Result<bool, String> {
+pub(crate) fn commit_notes(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     service::commit_pending_notes(&state).map_err(Into::into)
 }

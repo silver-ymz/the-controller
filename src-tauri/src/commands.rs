@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
@@ -112,8 +114,8 @@ pub(crate) use crate::service::wait_for_merge_rebase_resolution;
 /// Run storage migrations on startup (worktree path format, etc.).
 /// PTY connections are deferred to `connect_session` so each terminal
 /// can attach at the correct size.
-#[tauri::command]
-pub fn restore_sessions(state: State<AppState>) -> Result<(), String> {
+// [migrated to generated.rs]
+pub fn restore_sessions(state: State<Arc<AppState>>) -> Result<(), String> {
     crate::service::restore_sessions(&state).map_err(|e| e.to_string())
 }
 
@@ -126,7 +128,7 @@ pub fn restore_sessions(state: State<AppState>) -> Result<(), String> {
 /// alternate-screen escape sequence that xterm.js needs for correct scrolling.
 #[tauri::command]
 pub async fn connect_session(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     _app_handle: AppHandle,
     session_id: String,
     rows: u16,
@@ -134,15 +136,10 @@ pub async fn connect_session(
 ) -> Result<(), String> {
     let id = parse_uuid(&session_id)?;
 
-    let storage = state.storage.clone();
-    let pty_manager = state.pty_manager.clone();
-    let emitter = state.emitter.clone();
+    let state = (*state).clone();
 
     tokio::task::spawn_blocking(move || {
-        // Reconstruct an AppState-like struct for the service call inside spawn_blocking.
-        // We clone the Arc fields so they can be moved into the 'static closure.
-        let inner_state = crate::state::AppState::from_arcs(storage, pty_manager, emitter);
-        service::connect_session(&inner_state, id, rows, cols).map_err(|e| e.to_string())
+        service::connect_session(&state, id, rows, cols).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| {
@@ -151,32 +148,32 @@ pub async fn connect_session(
     })?
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn create_project(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     name: String,
     repo_path: String,
 ) -> Result<Project, String> {
     crate::service::create_project(&state, &name, &repo_path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn load_project(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     name: String,
     repo_path: String,
 ) -> Result<Project, String> {
     crate::service::load_project(&state, &name, &repo_path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn list_projects(state: State<AppState>) -> Result<ProjectInventory, String> {
+// [migrated to generated.rs]
+pub fn list_projects(state: State<Arc<AppState>>) -> Result<ProjectInventory, String> {
     crate::service::list_projects(&state).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn delete_project(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     project_id: String,
     delete_repo: bool,
 ) -> Result<(), String> {
@@ -184,15 +181,15 @@ pub fn delete_project(
     crate::service::delete_project(&state, id, delete_repo).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn get_agents_md(state: State<AppState>, project_id: String) -> Result<String, String> {
+// [migrated to generated.rs]
+pub fn get_agents_md(state: State<Arc<AppState>>, project_id: String) -> Result<String, String> {
     let id = parse_uuid(&project_id)?;
     crate::service::get_agents_md(&state, id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn update_agents_md(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     project_id: String,
     content: String,
 ) -> Result<(), String> {
@@ -200,9 +197,9 @@ pub fn update_agents_md(
     crate::service::update_agents_md(&state, id, &content).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn create_session(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     _app_handle: AppHandle,
     project_id: String,
     kind: Option<String>,
@@ -234,9 +231,9 @@ pub async fn create_session(
     })
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn write_to_pty(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     session_id: String,
     data: String,
 ) -> Result<(), String> {
@@ -244,9 +241,9 @@ pub fn write_to_pty(
     crate::service::write_to_pty(&state, id, data.as_bytes()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn send_raw_to_pty(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     session_id: String,
     data: String,
 ) -> Result<(), String> {
@@ -254,9 +251,9 @@ pub fn send_raw_to_pty(
     crate::service::send_raw_to_pty(&state, id, data.as_bytes()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn resize_pty(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     session_id: String,
     rows: u16,
     cols: u16,
@@ -265,9 +262,9 @@ pub fn resize_pty(
     crate::service::resize_pty(&state, id, rows, cols).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn set_initial_prompt(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     project_id: String,
     session_id: String,
     prompt: String,
@@ -278,9 +275,9 @@ pub fn set_initial_prompt(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn submit_secure_env_value(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     request_id: String,
     value: String,
 ) -> Result<String, String> {
@@ -289,14 +286,17 @@ pub async fn submit_secure_env_value(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn cancel_secure_env_request(state: State<AppState>, request_id: String) -> Result<(), String> {
+// [migrated to generated.rs]
+pub fn cancel_secure_env_request(
+    state: State<Arc<AppState>>,
+    request_id: String,
+) -> Result<(), String> {
     crate::service::cancel_secure_env_request(&state, &request_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn stage_session(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     _app_handle: AppHandle,
     project_id: String,
     session_id: String,
@@ -307,9 +307,9 @@ pub async fn stage_session(
     Ok(())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn unstage_session(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     project_id: String,
     session_id: String,
 ) -> Result<(), String> {
@@ -318,14 +318,14 @@ pub fn unstage_session(
     crate::service::unstage_session(&state, project_uuid, session_uuid).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn get_repo_head(repo_path: String) -> Result<(String, String), String> {
     tauri_blocking!(move || service::get_repo_head(&repo_path).map_err(|e| e.to_string()))
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn save_session_prompt(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     project_id: String,
     session_id: String,
 ) -> Result<(), String> {
@@ -334,18 +334,18 @@ pub fn save_session_prompt(
     service::save_session_prompt(&state, project_uuid, session_uuid).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn list_project_prompts(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     project_id: String,
 ) -> Result<Vec<crate::models::SavedPrompt>, String> {
     let project_uuid = parse_uuid(&project_id)?;
     service::list_project_prompts(&state, project_uuid).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn close_session(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     project_id: String,
     session_id: String,
     delete_worktree: bool,
@@ -356,35 +356,38 @@ pub fn close_session(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn start_claude_login(state: State<AppState>) -> Result<String, String> {
+// [migrated to generated.rs]
+pub fn start_claude_login(state: State<Arc<AppState>>) -> Result<String, String> {
     crate::service::start_claude_login(&state).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn stop_claude_login(state: State<AppState>, session_id: String) -> Result<(), String> {
+// [migrated to generated.rs]
+pub fn stop_claude_login(state: State<Arc<AppState>>, session_id: String) -> Result<(), String> {
     let id = parse_uuid(&session_id)?;
     crate::service::stop_claude_login(&state, id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn home_dir() -> Result<String, String> {
     crate::service::home_dir().map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn check_onboarding(state: State<AppState>) -> Result<Option<config::Config>, String> {
+// [migrated to generated.rs]
+pub fn check_onboarding(state: State<Arc<AppState>>) -> Result<Option<config::Config>, String> {
     crate::service::check_onboarding(&state).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn save_onboarding_config(state: State<AppState>, projects_root: String) -> Result<(), String> {
+pub fn save_onboarding_config(
+    state: State<Arc<AppState>>,
+    projects_root: String,
+) -> Result<(), String> {
     crate::service::save_onboarding_config(&state, &projects_root, None).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn load_terminal_theme(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
 ) -> Result<terminal_theme::TerminalTheme, String> {
     service::load_terminal_theme_blocking(&state).map_err(|e| e.to_string())
 }
@@ -394,59 +397,62 @@ pub async fn check_claude_cli() -> Result<String, String> {
     tauri_blocking!(|| Ok(crate::service::check_claude_cli()))
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn list_directories_at(path: String) -> Result<Vec<config::DirEntry>, String> {
     service::list_directories_at(&path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn list_root_directories(state: State<AppState>) -> Result<Vec<config::DirEntry>, String> {
+// [migrated to generated.rs]
+pub fn list_root_directories(state: State<Arc<AppState>>) -> Result<Vec<config::DirEntry>, String> {
     service::list_root_directories(&state).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn generate_project_names(description: String) -> Result<Vec<String>, String> {
     tauri_blocking!(move || service::generate_project_names(&description).map_err(|e| e.to_string()))
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn generate_architecture(
-    state: State<AppState>,
+    state: State<Arc<AppState>>,
     repo_path: String,
 ) -> Result<ArchitectureResult, String> {
     service::generate_architecture(&state, &repo_path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn scaffold_project(state: State<'_, AppState>, name: String) -> Result<Project, String> {
+// [migrated to generated.rs]
+pub async fn scaffold_project(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> Result<Project, String> {
     crate::service::scaffold_project(&state, &name)
         .await
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn list_github_issues(
     repo_path: String,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<crate::models::GithubIssue>, String> {
     github::list_github_issues(repo_path, state).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn list_assigned_issues(
     repo_path: String,
 ) -> Result<Vec<crate::models::AssignedIssue>, String> {
     github::list_assigned_issues(repo_path).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn generate_issue_body(title: String) -> Result<String, String> {
     github::generate_issue_body(title).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn create_github_issue(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     title: String,
     body: String,
@@ -454,9 +460,9 @@ pub async fn create_github_issue(
     github::create_github_issue(state, repo_path, title, body).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn close_github_issue(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     issue_number: u64,
     comment: String,
@@ -464,16 +470,16 @@ pub async fn close_github_issue(
     github::close_github_issue(state, repo_path, issue_number, comment).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn delete_github_issue(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     issue_number: u64,
 ) -> Result<(), String> {
     github::delete_github_issue(state, repo_path, issue_number).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn post_github_comment(
     repo_path: String,
     issue_number: u64,
@@ -482,9 +488,9 @@ pub async fn post_github_comment(
     github::post_github_comment(repo_path, issue_number, body).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn add_github_label(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     issue_number: u64,
     label: String,
@@ -494,9 +500,9 @@ pub async fn add_github_label(
     github::add_github_label(state, repo_path, issue_number, label, description, color).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn remove_github_label(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     issue_number: u64,
     label: String,
@@ -514,26 +520,26 @@ pub async fn capture_app_screenshot(app: AppHandle, cropped: bool) -> Result<Str
     media::capture_app_screenshot(app, cropped).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn list_notes(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
 ) -> Result<Vec<crate::notes::NoteEntry>, String> {
     notes::list_notes(state, folder)
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn read_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     filename: String,
 ) -> Result<String, String> {
     notes::read_note(state, folder, filename)
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn write_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     filename: String,
     content: String,
@@ -541,18 +547,18 @@ pub fn write_note(
     notes::write_note(state, folder, filename, content)
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn create_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     title: String,
 ) -> Result<String, String> {
     notes::create_note(state, folder, title)
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn rename_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     old_name: String,
     new_name: String,
@@ -560,56 +566,60 @@ pub fn rename_note(
     notes::rename_note(state, folder, old_name, new_name)
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn duplicate_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     filename: String,
 ) -> Result<String, String> {
     notes::duplicate_note(state, folder, filename)
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn delete_note(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     filename: String,
 ) -> Result<(), String> {
     notes::delete_note(state, folder, filename)
 }
 
-#[tauri::command]
-pub fn list_folders(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+// [migrated to generated.rs]
+pub fn list_folders(state: State<'_, Arc<AppState>>) -> Result<Vec<String>, String> {
     notes::list_folders(state)
 }
 
-#[tauri::command]
-pub fn create_folder(state: State<'_, AppState>, name: String) -> Result<(), String> {
+// [migrated to generated.rs]
+pub fn create_folder(state: State<'_, Arc<AppState>>, name: String) -> Result<(), String> {
     notes::create_folder(state, name)
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn rename_folder(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     old_name: String,
     new_name: String,
 ) -> Result<(), String> {
     notes::rename_folder(state, old_name, new_name)
 }
 
-#[tauri::command]
-pub fn delete_folder(state: State<'_, AppState>, name: String, force: bool) -> Result<(), String> {
+// [migrated to generated.rs]
+pub fn delete_folder(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    force: bool,
+) -> Result<(), String> {
     notes::delete_folder(state, name, force)
 }
 
-#[tauri::command]
-pub fn commit_notes(state: State<'_, AppState>) -> Result<bool, String> {
+// [migrated to generated.rs]
+pub fn commit_notes(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     notes::commit_notes(state)
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn save_note_image(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     image_bytes: Vec<u8>,
     extension: String,
@@ -617,16 +627,16 @@ pub fn save_note_image(
     service::save_note_image(&state, &folder, &image_bytes, &extension).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub fn resolve_note_asset_path(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     folder: String,
     relative_path: String,
 ) -> Result<String, String> {
     service::resolve_note_asset_path(&state, &folder, &relative_path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn send_note_ai_chat(
     note_content: String,
     selected_text: String,
@@ -639,7 +649,7 @@ pub async fn send_note_ai_chat(
 }
 #[tauri::command]
 pub async fn merge_session_branch(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     _app_handle: AppHandle,
     project_id: String,
     session_id: String,
@@ -651,9 +661,9 @@ pub async fn merge_session_branch(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn get_session_commits(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     project_id: String,
     session_id: String,
 ) -> Result<Vec<CommitInfo>, String> {
@@ -669,9 +679,9 @@ pub async fn get_session_commits(
     })
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn get_session_token_usage(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     project_id: String,
     session_id: String,
 ) -> Result<Vec<TokenDataPoint>, String> {
@@ -687,9 +697,9 @@ pub async fn get_session_token_usage(
     })
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn configure_maintainer(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     project_id: String,
     enabled: bool,
     interval_minutes: u64,
@@ -701,9 +711,9 @@ pub async fn configure_maintainer(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn configure_auto_worker(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     project_id: String,
     enabled: bool,
 ) -> Result<(), String> {
@@ -712,14 +722,14 @@ pub async fn configure_auto_worker(
     service::configure_auto_worker(&state, project_uuid, enabled).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn get_worker_reports(repo_path: String) -> Result<Vec<github::WorkerReport>, String> {
     github::get_worker_reports(repo_path).await
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn get_auto_worker_queue(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     project_id: String,
 ) -> Result<Vec<AutoWorkerQueueIssue>, String> {
     let project_uuid = parse_uuid(&project_id)?;
@@ -728,9 +738,9 @@ pub async fn get_auto_worker_queue(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn get_maintainer_status(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     project_id: String,
 ) -> Result<Option<crate::models::MaintainerRunLog>, String> {
     let project_uuid = parse_uuid(&project_id)?;
@@ -739,7 +749,7 @@ pub async fn get_maintainer_status(
 
 #[tauri::command]
 pub async fn get_maintainer_history(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     project_id: String,
 ) -> Result<Vec<crate::models::MaintainerRunLog>, String> {
     let project_uuid = parse_uuid(&project_id)?;
@@ -761,9 +771,9 @@ where
     tauri_blocking!(move || runner(repo_path, project_id, github_repo))
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn trigger_maintainer_check(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     _app_handle: AppHandle,
     project_id: String,
 ) -> Result<crate::models::MaintainerRunLog, String> {
@@ -774,9 +784,9 @@ pub async fn trigger_maintainer_check(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn clear_maintainer_reports(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     _app_handle: AppHandle,
     project_id: String,
 ) -> Result<(), String> {
@@ -785,9 +795,9 @@ pub async fn clear_maintainer_reports(
     service::clear_maintainer_reports(&state, project_uuid).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn get_maintainer_issues(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     project_id: String,
 ) -> Result<Vec<crate::models::MaintainerIssue>, String> {
     let project_uuid = parse_uuid(&project_id)?;
@@ -796,9 +806,9 @@ pub async fn get_maintainer_issues(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn get_maintainer_issue_detail(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     project_id: String,
     issue_number: u32,
 ) -> Result<crate::models::MaintainerIssueDetail, String> {
@@ -809,34 +819,34 @@ pub async fn get_maintainer_issue_detail(
 }
 
 #[tauri::command]
-pub fn log_frontend_error(message: String, state: tauri::State<'_, AppState>) {
+pub fn log_frontend_error(message: String, state: tauri::State<'_, Arc<AppState>>) {
     crate::service::log_frontend_error(&state, &message);
 }
 
-#[tauri::command]
-pub async fn start_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
+// [migrated to generated.rs]
+pub async fn start_voice_pipeline(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
     crate::service::start_voice_pipeline(&state)
         .await
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn stop_voice_pipeline(state: tauri::State<'_, AppState>) -> Result<(), String> {
+// [migrated to generated.rs]
+pub async fn stop_voice_pipeline(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
     crate::service::stop_voice_pipeline(&state)
         .await
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn toggle_voice_pause(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+// [migrated to generated.rs]
+pub async fn toggle_voice_pause(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     crate::service::toggle_voice_pause(&state)
         .await
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+// [migrated to generated.rs]
 pub async fn load_keybindings(
-    state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<crate::keybindings::KeybindingsResult, String> {
     crate::service::load_keybindings(&state).map_err(|e| e.to_string())
 }
@@ -867,7 +877,7 @@ mod tests {
     static ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
     const BUSY_TEST_WAIT: Duration = Duration::from_secs(5);
 
-    fn make_test_state(base_dir: &Path, projects_root: &Path) -> AppState {
+    fn make_test_state(base_dir: &Path, projects_root: &Path) -> Arc<AppState> {
         let storage = Storage::new(base_dir.to_path_buf());
         storage.ensure_dirs().expect("ensure_dirs");
         save_config(
@@ -880,7 +890,7 @@ mod tests {
         )
         .expect("save_config");
 
-        AppState {
+        Arc::new(AppState {
             storage: Arc::new(Mutex::new(storage)),
             pty_manager: Arc::new(Mutex::new(PtyManager::new())),
             issue_cache: Arc::new(Mutex::new(IssueCache::new())),
@@ -890,7 +900,7 @@ mod tests {
             voice_pipeline: Arc::new(tokio::sync::Mutex::new(None)),
             frontend_log: Mutex::new(None),
             voice_generation: std::sync::atomic::AtomicU64::new(0),
-        }
+        })
     }
 
     fn state_from_ref<T: Send + Sync + 'static>(value: &T) -> tauri::State<'_, T> {
@@ -1300,7 +1310,7 @@ selection_background #444444
     fn test_scaffold_project_does_not_hold_storage_lock_during_external_publish() {
         let base_dir = TempDir::new().unwrap();
         let projects_root = TempDir::new().unwrap();
-        let app_state = Arc::new(make_test_state(base_dir.path(), projects_root.path()));
+        let app_state = make_test_state(base_dir.path(), projects_root.path());
         let real_git = real_git_path();
 
         with_fake_cli_bins(|gh_path, git_path, state_dir| {
@@ -1317,7 +1327,7 @@ selection_background #444444
             let app_state_for_thread = Arc::clone(&app_state);
             let handle = thread::spawn(move || {
                 run_async_test(scaffold_project(
-                    state_from_ref(app_state_for_thread.as_ref()),
+                    state_from_ref(&app_state_for_thread),
                     "lock-scope-test".to_string(),
                 ))
             });
@@ -1348,7 +1358,7 @@ selection_background #444444
     fn test_scaffold_project_rolls_back_if_name_is_claimed_before_final_save() {
         let base_dir = TempDir::new().unwrap();
         let projects_root = TempDir::new().unwrap();
-        let app_state = Arc::new(make_test_state(base_dir.path(), projects_root.path()));
+        let app_state = make_test_state(base_dir.path(), projects_root.path());
         let repo_path = projects_root.path().join("lock-race-test");
         let imported_repo = TempDir::new().unwrap();
         let real_git = real_git_path();
@@ -1367,7 +1377,7 @@ selection_background #444444
             let app_state_for_thread = Arc::clone(&app_state);
             let handle = thread::spawn(move || {
                 run_async_test(scaffold_project(
-                    state_from_ref(app_state_for_thread.as_ref()),
+                    state_from_ref(&app_state_for_thread),
                     "lock-race-test".to_string(),
                 ))
             });
@@ -1378,7 +1388,7 @@ selection_background #444444
             );
 
             let imported = create_project(
-                state_from_ref(app_state.as_ref()),
+                state_from_ref(&app_state),
                 "lock-race-test".to_string(),
                 imported_repo.path().to_string_lossy().to_string(),
             )

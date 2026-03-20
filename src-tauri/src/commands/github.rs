@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tauri::State;
 
 use crate::models::{AssignedIssue, GithubIssue};
@@ -9,7 +11,7 @@ pub use crate::service::WorkerReport;
 
 pub(crate) async fn list_github_issues(
     repo_path: String,
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<GithubIssue>, String> {
     service::list_github_issues(&state, &repo_path)
         .await
@@ -23,7 +25,7 @@ pub(crate) async fn generate_issue_body(title: String) -> Result<String, String>
 }
 
 pub(crate) async fn create_github_issue(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     title: String,
     body: String,
@@ -44,7 +46,7 @@ pub(crate) async fn post_github_comment(
 }
 
 pub(crate) async fn add_github_label(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     issue_number: u64,
     label: String,
@@ -64,7 +66,7 @@ pub(crate) async fn add_github_label(
 }
 
 pub(crate) async fn remove_github_label(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     issue_number: u64,
     label: String,
@@ -75,7 +77,7 @@ pub(crate) async fn remove_github_label(
 }
 
 pub(crate) async fn close_github_issue(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     issue_number: u64,
     comment: String,
@@ -86,7 +88,7 @@ pub(crate) async fn close_github_issue(
 }
 
 pub(crate) async fn delete_github_issue(
-    state: State<'_, AppState>,
+    state: State<'_, Arc<AppState>>,
     repo_path: String,
     issue_number: u64,
 ) -> Result<(), String> {
