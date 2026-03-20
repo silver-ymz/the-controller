@@ -13,3 +13,4 @@ test-results/
 playwright-report/
 staging.log
 package-lock.json
+src-tauri/the-controller-macros/target/
