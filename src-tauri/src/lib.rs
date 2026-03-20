@@ -159,7 +159,7 @@ pub fn run() {
             generated::rename_folder,
             generated::delete_folder,
             generated::commit_notes,
-            generated::save_note_image,
+            commands::save_note_image,
             generated::resolve_note_asset_path,
             generated::send_note_ai_chat,
             generated::save_session_prompt,

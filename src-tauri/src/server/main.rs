@@ -158,7 +158,10 @@ async fn run_server() -> std::io::Result<()> {
         .route("/api/send_raw_to_pty", post(service::axum_send_raw_to_pty))
         .route("/api/resize_pty", post(service::axum_resize_pty))
         .route("/api/close_session", post(service::axum_close_session))
-        .route("/api/create_session", post(service::axum_create_session))
+        .route(
+            "/api/create_session",
+            post(service::axum_create_session_auto_id),
+        )
         .route("/api/create_project", post(service::axum_create_project))
         .route("/api/delete_project", post(service::axum_delete_project))
         .route("/api/get_agents_md", post(service::axum_get_agents_md))
@@ -221,10 +224,7 @@ async fn run_server() -> std::io::Result<()> {
             "/api/stop_voice_pipeline",
             post(service::axum_stop_voice_pipeline),
         )
-        .route(
-            "/api/toggle_voice_pause",
-            post(service::axum_toggle_voice_pause),
-        )
+        .route("/api/toggle_voice_pause", post(toggle_voice_pause))
         .route(
             "/api/load_terminal_theme",
             post(service::axum_load_terminal_theme_blocking),
@@ -382,7 +382,7 @@ async fn run_server() -> std::io::Result<()> {
             post(service::axum_cancel_secure_env_request),
         )
         // Notes (additional)
-        .route("/api/save_note_image", post(service::axum_save_note_image))
+        .route("/api/save_note_image", post(save_note_image))
         .route(
             "/api/resolve_note_asset_path",
             post(service::axum_resolve_note_asset_path),
@@ -575,6 +575,51 @@ async fn merge_session_branch(
             format!("Merge timed out after {} seconds", OVERALL_TIMEOUT_SECS),
         )),
     }
+}
+
+// --- Notes (binary data) ---
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveNoteImageRequest {
+    folder: String,
+    image_bytes: String, // base64-encoded
+    extension: String,
+}
+
+async fn save_note_image(
+    AxumState(state): AxumState<Arc<ServerState>>,
+    Json(req): Json<SaveNoteImageRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    use base64::Engine;
+    let image_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&req.image_bytes)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid base64: {e}")))?;
+    let filename = tokio::task::spawn_blocking(move || {
+        service::save_note_image(&state.app, &req.folder, &image_bytes, &req.extension)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task failed: {e}"),
+        )
+    })?
+    .map_err(<(StatusCode, String)>::from)?;
+    ok_json(filename)
+}
+
+// --- Voice (response shape) ---
+
+/// Hand-written because the old API returns `{"paused": bool}` but the
+/// macro-generated handler would return a bare `bool`.
+async fn toggle_voice_pause(
+    AxumState(state): AxumState<Arc<ServerState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let paused = service::toggle_voice_pause(&state.app)
+        .await
+        .map_err(<(StatusCode, String)>::from)?;
+    ok_json(serde_json::json!({ "paused": paused }))
 }
 
 // --- Session Management ---

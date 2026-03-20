@@ -137,7 +137,6 @@ pub fn commit_pending_notes(state: &AppState) -> Result<bool, AppError> {
     notes::commit_notes(&base_dir, "update notes").map_err(AppError::internal)
 }
 
-#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn save_note_image(
     state: &AppState,
     folder: &str,

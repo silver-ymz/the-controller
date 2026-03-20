@@ -139,7 +139,7 @@ pub async fn connect_session(
     let state = (*state).clone();
 
     tokio::task::spawn_blocking(move || {
-        service::connect_session(&state, id, rows, cols).map_err(|e| e.to_string())
+        service::connect_session(&state, id, Some(rows), Some(cols)).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| {
@@ -617,7 +617,9 @@ pub fn commit_notes(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
     notes::commit_notes(state)
 }
 
-// [migrated to generated.rs]
+// Hand-written because image_bytes is Vec<u8> (binary data), which the
+// derive_handlers macro cannot map correctly (it maps &[u8] → String).
+#[tauri::command]
 pub fn save_note_image(
     state: State<'_, Arc<AppState>>,
     folder: String,

@@ -61,7 +61,7 @@ pub async fn stop_voice_pipeline(state: &AppState) -> Result<(), AppError> {
     Ok(())
 }
 
-#[derive_handlers(tauri_command, axum_handler)]
+#[derive_handlers(tauri_command)]
 pub async fn toggle_voice_pause(state: &AppState) -> Result<bool, AppError> {
     let pipeline = state.voice_pipeline.lock().await;
     match pipeline.as_ref() {

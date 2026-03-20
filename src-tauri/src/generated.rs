@@ -96,7 +96,6 @@ fwd!(async fn create_folder => crate::service::tauri_create_note_folder(state: S
 fwd!(async fn rename_folder => crate::service::tauri_rename_note_folder(state: S<'_>, old_name: String, new_name: String) -> Result<(), String>);
 fwd!(async fn delete_folder => crate::service::tauri_delete_note_folder(state: S<'_>, name: String, force: bool) -> Result<(), String>);
 fwd!(async fn commit_notes => crate::service::tauri_commit_pending_notes(state: S<'_>) -> Result<bool, String>);
-fwd!(async fn save_note_image => crate::service::tauri_save_note_image(state: S<'_>, folder: String, image_bytes: String, extension: String) -> Result<String, String>);
 fwd!(async fn resolve_note_asset_path => crate::service::tauri_resolve_note_asset_path(state: S<'_>, folder: String, relative_path: String) -> Result<String, String>);
 fwd!(async fn send_note_ai_chat => crate::service::tauri_send_note_ai_chat(note_content: String, selected_text: String, conversation_history: Vec<crate::note_ai_chat::NoteAiChatMessage>, prompt: String) -> Result<crate::note_ai_chat::NoteAiResponse, String>);
 

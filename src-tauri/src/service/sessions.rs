@@ -122,9 +122,11 @@ pub fn restore_sessions(state: &AppState) -> Result<(), AppError> {
 pub fn connect_session(
     state: &AppState,
     session_id: Uuid,
-    rows: u16,
-    cols: u16,
+    rows: Option<u16>,
+    cols: Option<u16>,
 ) -> Result<(), AppError> {
+    let rows = rows.unwrap_or(24);
+    let cols = cols.unwrap_or(80);
     // Check if already connected
     {
         let pty_manager = state.pty_manager.lock().map_err(AppError::internal)?;
@@ -174,7 +176,7 @@ pub fn connect_session(
     .map_err(AppError::Internal)
 }
 
-#[derive_handlers(tauri_command, axum_handler, blocking)]
+#[derive_handlers(tauri_command, blocking)]
 #[allow(clippy::too_many_arguments)]
 pub fn create_session(
     state: &AppState,
@@ -308,6 +310,31 @@ pub fn create_session(
 
     spawn_result.map_err(AppError::Internal)?;
     Ok(session_id.to_string())
+}
+
+/// Wrapper for Axum: auto-generates session_id server-side.
+/// The old HTTP API did not require callers to supply a session ID.
+#[derive_handlers(axum_handler, blocking)]
+pub fn create_session_auto_id(
+    state: &AppState,
+    project_id: Uuid,
+    kind: Option<String>,
+    github_issue: Option<GithubIssue>,
+    background: Option<bool>,
+    initial_prompt: Option<String>,
+) -> Result<String, AppError> {
+    let session_id = Uuid::new_v4();
+    let kind = kind.unwrap_or_else(|| "claude".to_string());
+    let background = background.unwrap_or(false);
+    create_session(
+        state,
+        project_id,
+        session_id,
+        &kind,
+        github_issue,
+        background,
+        initial_prompt,
+    )
 }
 
 #[derive_handlers(tauri_command, axum_handler)]
