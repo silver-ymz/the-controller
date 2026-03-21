@@ -755,6 +755,7 @@ mod tests {
                 trimmed
                     .strip_prefix("commands::")
                     .or_else(|| trimmed.strip_prefix("deploy::commands::"))
+                    .or_else(|| trimmed.strip_prefix("generated::"))
                     .map(ToOwned::to_owned)
             })
             .collect()
