@@ -14,3 +14,4 @@ playwright-report/
 staging.log
 package-lock.json
 src-tauri/the-controller-macros/target/
+src-tauri/the-controller-macros/Cargo.lock
