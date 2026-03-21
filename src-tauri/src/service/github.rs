@@ -3,6 +3,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::models::{AssignedIssue, GithubIssue, MaintainerIssue, MaintainerIssueDetail};
 use crate::state::AppState;
+use the_controller_macros::derive_handlers;
 
 // ---------------------------------------------------------------------------
 // GitHub issue commands
@@ -114,7 +115,7 @@ pub async fn fetch_github_issues(repo_path: &str) -> Result<Vec<GithubIssue>, Ap
     Ok(issues)
 }
 
-/// List GitHub issues with caching (stale-while-revalidate).
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn list_github_issues(
     state: &AppState,
     repo_path: &str,
@@ -167,7 +168,7 @@ pub async fn list_github_issues(
     Ok(issues)
 }
 
-/// Generate a GitHub issue body using the Claude CLI.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn generate_issue_body(title: &str) -> Result<String, AppError> {
     tracing::debug!("generating issue body via claude CLI");
     let prompt = format!(
@@ -195,7 +196,7 @@ pub async fn generate_issue_body(title: &str) -> Result<String, AppError> {
     }
 }
 
-/// Create a new GitHub issue via the `gh` CLI.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn create_github_issue(
     state: &AppState,
     repo_path: &str,
@@ -248,7 +249,7 @@ pub async fn create_github_issue(
     Ok(issue)
 }
 
-/// Post a comment on a GitHub issue via the `gh` CLI.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn post_github_comment(
     repo_path: &str,
     issue_number: u64,
@@ -287,7 +288,7 @@ pub async fn post_github_comment(
     Ok(())
 }
 
-/// Add a label to a GitHub issue (ensuring the label exists on the repo first).
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn add_github_label(
     state: &AppState,
     repo_path: &str,
@@ -353,7 +354,7 @@ pub async fn add_github_label(
     Ok(())
 }
 
-/// Remove a label from a GitHub issue.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn remove_github_label(
     state: &AppState,
     repo_path: &str,
@@ -397,7 +398,7 @@ pub async fn remove_github_label(
     Ok(())
 }
 
-/// Close a GitHub issue, optionally with a closing comment.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn close_github_issue(
     state: &AppState,
     repo_path: &str,
@@ -441,7 +442,7 @@ pub async fn close_github_issue(
     Ok(())
 }
 
-/// Delete a GitHub issue permanently.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn delete_github_issue(
     state: &AppState,
     repo_path: &str,
@@ -575,7 +576,7 @@ pub async fn get_maintainer_issue_detail(
     Ok(detail)
 }
 
-/// List issues that have at least one assignee.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn list_assigned_issues(repo_path: &str) -> Result<Vec<AssignedIssue>, AppError> {
     let nwo = extract_github_repo(repo_path).await?;
 
@@ -622,7 +623,7 @@ pub async fn list_assigned_issues(repo_path: &str) -> Result<Vec<AssignedIssue>,
     Ok(assigned)
 }
 
-/// Fetch worker reports (closed issues with the `assigned-to-auto-worker` label).
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn get_worker_reports(repo_path: &str) -> Result<Vec<WorkerReport>, AppError> {
     let nwo = extract_github_repo(repo_path).await?;
 
@@ -703,8 +704,7 @@ pub fn parse_worker_reports(raw: Vec<serde_json::Value>) -> Vec<WorkerReport> {
 // Maintainer issues (project-level wrappers)
 // ---------------------------------------------------------------------------
 
-/// Fetch maintainer issues for a project by looking up repo_path and github_repo
-/// from storage.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn get_maintainer_issues_for_project(
     state: &AppState,
     project_id: Uuid,
@@ -722,8 +722,7 @@ pub async fn get_maintainer_issues_for_project(
     get_maintainer_issues(&repo_path, github_repo.as_deref()).await
 }
 
-/// Fetch maintainer issue detail for a project by looking up repo_path and
-/// github_repo from storage.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn get_maintainer_issue_detail_for_project(
     state: &AppState,
     project_id: Uuid,

@@ -1,10 +1,10 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use crate::error::AppError;
 use crate::note_ai_chat::{NoteAiChatMessage, NoteAiResponse};
 use crate::notes::{self, NoteEntry};
-use crate::storage::Storage;
+use crate::state::AppState;
+use the_controller_macros::derive_handlers;
 
 /// Best-effort git commit for notes. Logs errors but never fails the caller.
 pub fn try_commit_notes(base_dir: &Path, message: &str) {
@@ -14,66 +14,60 @@ pub fn try_commit_notes(base_dir: &Path, message: &str) {
     }
 }
 
-pub fn list_notes(storage: &Arc<Mutex<Storage>>, folder: &str) -> Result<Vec<NoteEntry>, AppError> {
+#[derive_handlers(tauri_command, axum_handler, blocking)]
+pub fn list_notes(state: &AppState, folder: &str) -> Result<Vec<NoteEntry>, AppError> {
     tracing::debug!("listing notes");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::list_notes(&base_dir, folder).map_err(AppError::internal)
 }
 
-pub fn read_note(
-    storage: &Arc<Mutex<Storage>>,
-    folder: &str,
-    filename: &str,
-) -> Result<String, AppError> {
+#[derive_handlers(tauri_command, axum_handler, blocking)]
+pub fn read_note(state: &AppState, folder: &str, filename: &str) -> Result<String, AppError> {
     tracing::debug!("reading note");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::read_note(&base_dir, folder, filename).map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn write_note(
-    storage: &Arc<Mutex<Storage>>,
+    state: &AppState,
     folder: &str,
     filename: &str,
     content: &str,
 ) -> Result<(), AppError> {
     tracing::debug!("writing note");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::write_note(&base_dir, folder, filename, content).map_err(AppError::internal)
     // No git commit here — batched via commit_notes command
 }
 
-pub fn create_note(
-    storage: &Arc<Mutex<Storage>>,
-    folder: &str,
-    title: &str,
-) -> Result<String, AppError> {
+#[derive_handlers(tauri_command, axum_handler, blocking)]
+pub fn create_note(state: &AppState, folder: &str, title: &str) -> Result<String, AppError> {
     tracing::debug!("creating note");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     let filename = notes::create_note(&base_dir, folder, title).map_err(AppError::internal)?;
     try_commit_notes(&base_dir, &format!("create {}/{}", folder, filename));
     Ok(filename)
 }
 
-pub fn delete_note(
-    storage: &Arc<Mutex<Storage>>,
-    folder: &str,
-    filename: &str,
-) -> Result<(), AppError> {
+#[derive_handlers(tauri_command, axum_handler, blocking)]
+pub fn delete_note(state: &AppState, folder: &str, filename: &str) -> Result<(), AppError> {
     tracing::debug!("deleting note");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::delete_note(&base_dir, folder, filename).map_err(AppError::internal)?;
     try_commit_notes(&base_dir, &format!("delete {}/{}", folder, filename));
     Ok(())
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn rename_note(
-    storage: &Arc<Mutex<Storage>>,
+    state: &AppState,
     folder: &str,
     old_name: &str,
     new_name: &str,
 ) -> Result<String, AppError> {
     tracing::debug!("renaming note");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     let new_filename =
         notes::rename_note(&base_dir, folder, old_name, new_name).map_err(AppError::internal)?;
     try_commit_notes(
@@ -83,13 +77,10 @@ pub fn rename_note(
     Ok(new_filename)
 }
 
-pub fn duplicate_note(
-    storage: &Arc<Mutex<Storage>>,
-    folder: &str,
-    filename: &str,
-) -> Result<String, AppError> {
+#[derive_handlers(tauri_command, axum_handler, blocking)]
+pub fn duplicate_note(state: &AppState, folder: &str, filename: &str) -> Result<String, AppError> {
     tracing::debug!("duplicating note");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     let copy = notes::duplicate_note(&base_dir, folder, filename).map_err(AppError::internal)?;
     try_commit_notes(
         &base_dir,
@@ -98,27 +89,30 @@ pub fn duplicate_note(
     Ok(copy)
 }
 
-pub fn list_note_folders(storage: &Arc<Mutex<Storage>>) -> Result<Vec<String>, AppError> {
+#[derive_handlers(tauri_command, axum_handler, blocking)]
+pub fn list_note_folders(state: &AppState) -> Result<Vec<String>, AppError> {
     tracing::debug!("listing note folders");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::list_folders(&base_dir).map_err(AppError::internal)
 }
 
-pub fn create_note_folder(storage: &Arc<Mutex<Storage>>, name: &str) -> Result<(), AppError> {
+#[derive_handlers(tauri_command, axum_handler, blocking)]
+pub fn create_note_folder(state: &AppState, name: &str) -> Result<(), AppError> {
     tracing::debug!("creating folder");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::create_folder(&base_dir, name).map_err(AppError::internal)?;
     try_commit_notes(&base_dir, &format!("create folder {}", name));
     Ok(())
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn rename_note_folder(
-    storage: &Arc<Mutex<Storage>>,
+    state: &AppState,
     old_name: &str,
     new_name: &str,
 ) -> Result<(), AppError> {
     tracing::debug!("renaming folder");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::rename_folder(&base_dir, old_name, new_name).map_err(AppError::internal)?;
     try_commit_notes(
         &base_dir,
@@ -127,47 +121,45 @@ pub fn rename_note_folder(
     Ok(())
 }
 
-pub fn delete_note_folder(
-    storage: &Arc<Mutex<Storage>>,
-    name: &str,
-    force: bool,
-) -> Result<(), AppError> {
+#[derive_handlers(tauri_command, axum_handler, blocking)]
+pub fn delete_note_folder(state: &AppState, name: &str, force: bool) -> Result<(), AppError> {
     tracing::debug!(force, "deleting folder");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::delete_folder(&base_dir, name, force).map_err(AppError::internal)?;
     try_commit_notes(&base_dir, &format!("delete folder {}", name));
     Ok(())
 }
 
-/// Commit any pending note changes (content edits).
-/// Called by the frontend when switching notes.
-pub fn commit_pending_notes(storage: &Arc<Mutex<Storage>>) -> Result<bool, AppError> {
+#[derive_handlers(tauri_command, axum_handler, blocking)]
+pub fn commit_pending_notes(state: &AppState) -> Result<bool, AppError> {
     tracing::debug!("committing pending note changes");
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::commit_notes(&base_dir, "update notes").map_err(AppError::internal)
 }
 
 pub fn save_note_image(
-    storage: &Arc<Mutex<Storage>>,
+    state: &AppState,
     folder: &str,
     image_bytes: &[u8],
     extension: &str,
 ) -> Result<String, AppError> {
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::save_note_image(&base_dir, folder, image_bytes, extension).map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn resolve_note_asset_path(
-    storage: &Arc<Mutex<Storage>>,
+    state: &AppState,
     folder: &str,
     relative_path: &str,
 ) -> Result<String, AppError> {
-    let base_dir = storage.lock().map_err(AppError::internal)?.base_dir();
+    let base_dir = state.storage.lock().map_err(AppError::internal)?.base_dir();
     notes::resolve_note_asset_path(&base_dir, folder, relative_path)
         .map(|p| p.to_string_lossy().to_string())
         .map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn send_note_ai_chat(
     note_content: String,
     selected_text: String,

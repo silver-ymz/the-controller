@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tauri::Manager;
 
 pub mod architecture;
@@ -10,6 +12,7 @@ pub mod config;
 pub mod deploy;
 pub mod emitter;
 pub mod error;
+pub mod generated;
 pub mod keybindings;
 pub mod labels;
 pub mod logging;
@@ -30,6 +33,9 @@ pub mod terminal_theme;
 pub mod token_usage;
 pub mod voice;
 pub mod worktree;
+
+#[cfg(feature = "server")]
+pub mod server_helpers;
 
 fn show_startup_error(error: &std::io::Error) {
     tracing::error!("failed to initialize app storage: {error}");
@@ -70,11 +76,11 @@ pub fn run() {
                     std::process::exit(1);
                 }
             };
-            app.manage(app_state);
+            app.manage(Arc::new(app_state));
             cli_install::install_controller_cli();
             skills::sync_skills();
             {
-                let app_state = app.state::<state::AppState>();
+                let app_state = app.state::<Arc<state::AppState>>();
                 let emitter = app_state.emitter.clone();
                 let base_dir = app_state.storage.lock().map(|s| s.base_dir()).map_err(|e| {
                     tracing::error!("failed to lock storage for keybindings setup: {e}");
@@ -90,89 +96,89 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::restore_sessions,
+            generated::restore_sessions,
             commands::connect_session,
-            commands::create_project,
-            commands::load_project,
-            commands::list_projects,
-            commands::delete_project,
-            commands::get_agents_md,
-            commands::update_agents_md,
-            commands::create_session,
-            commands::write_to_pty,
-            commands::send_raw_to_pty,
-            commands::resize_pty,
-            commands::close_session,
-            commands::set_initial_prompt,
-            commands::submit_secure_env_value,
-            commands::cancel_secure_env_request,
-            commands::start_claude_login,
-            commands::stop_claude_login,
-            commands::home_dir,
-            commands::check_onboarding,
-            commands::save_onboarding_config,
-            commands::load_terminal_theme,
+            generated::create_project,
+            generated::load_project,
+            generated::list_projects,
+            generated::delete_project,
+            generated::get_agents_md,
+            generated::update_agents_md,
+            generated::create_session,
+            generated::write_to_pty,
+            generated::send_raw_to_pty,
+            generated::resize_pty,
+            generated::close_session,
+            generated::set_initial_prompt,
+            generated::submit_secure_env_value,
+            generated::cancel_secure_env_request,
+            generated::start_claude_login,
+            generated::stop_claude_login,
+            generated::home_dir,
+            generated::check_onboarding,
+            generated::save_onboarding_config,
+            generated::load_terminal_theme,
             commands::check_claude_cli,
-            commands::list_directories_at,
-            commands::list_root_directories,
-            commands::generate_project_names,
-            commands::generate_architecture,
-            commands::scaffold_project,
-            commands::list_github_issues,
-            commands::list_assigned_issues,
-            commands::generate_issue_body,
-            commands::create_github_issue,
-            commands::close_github_issue,
-            commands::delete_github_issue,
-            commands::post_github_comment,
-            commands::add_github_label,
-            commands::remove_github_label,
+            generated::list_directories_at,
+            generated::list_root_directories,
+            generated::generate_project_names,
+            generated::generate_architecture,
+            generated::scaffold_project,
+            generated::list_github_issues,
+            generated::list_assigned_issues,
+            generated::generate_issue_body,
+            generated::create_github_issue,
+            generated::close_github_issue,
+            generated::delete_github_issue,
+            generated::post_github_comment,
+            generated::add_github_label,
+            generated::remove_github_label,
             commands::merge_session_branch,
             commands::copy_image_file_to_clipboard,
             commands::capture_app_screenshot,
-            commands::get_session_commits,
-            commands::configure_maintainer,
-            commands::get_maintainer_status,
+            generated::get_session_commits,
+            generated::configure_maintainer,
+            generated::get_maintainer_status,
             commands::get_maintainer_history,
-            commands::trigger_maintainer_check,
-            commands::clear_maintainer_reports,
-            commands::get_maintainer_issues,
-            commands::get_maintainer_issue_detail,
-            commands::configure_auto_worker,
-            commands::get_auto_worker_queue,
-            commands::get_worker_reports,
-            commands::list_notes,
-            commands::read_note,
-            commands::write_note,
-            commands::create_note,
-            commands::rename_note,
-            commands::duplicate_note,
-            commands::delete_note,
-            commands::list_folders,
-            commands::create_folder,
-            commands::rename_folder,
-            commands::delete_folder,
-            commands::commit_notes,
+            generated::trigger_maintainer_check,
+            generated::clear_maintainer_reports,
+            generated::get_maintainer_issues,
+            generated::get_maintainer_issue_detail,
+            generated::configure_auto_worker,
+            generated::get_auto_worker_queue,
+            generated::get_worker_reports,
+            generated::list_notes,
+            generated::read_note,
+            generated::write_note,
+            generated::create_note,
+            generated::rename_note,
+            generated::duplicate_note,
+            generated::delete_note,
+            generated::list_folders,
+            generated::create_folder,
+            generated::rename_folder,
+            generated::delete_folder,
+            generated::commit_notes,
             commands::save_note_image,
-            commands::resolve_note_asset_path,
-            commands::send_note_ai_chat,
-            commands::save_session_prompt,
-            commands::list_project_prompts,
+            generated::resolve_note_asset_path,
+            generated::send_note_ai_chat,
+            generated::save_session_prompt,
+            generated::list_project_prompts,
             commands::stage_session,
-            commands::unstage_session,
-            commands::get_repo_head,
-            commands::get_session_token_usage,
-            deploy::commands::detect_project_type,
-            deploy::commands::get_deploy_credentials,
-            deploy::commands::save_deploy_credentials,
-            deploy::commands::is_deploy_provisioned,
-            deploy::commands::deploy_project,
-            deploy::commands::list_deployed_services,
-            commands::start_voice_pipeline,
-            commands::stop_voice_pipeline,
-            commands::toggle_voice_pause,
+            generated::unstage_session,
+            generated::get_repo_head,
+            generated::get_session_token_usage,
+            generated::detect_project_type,
+            generated::get_deploy_credentials,
+            generated::save_deploy_credentials,
+            generated::is_deploy_provisioned,
+            generated::deploy_project,
+            generated::list_deployed_services,
+            generated::start_voice_pipeline,
+            generated::stop_voice_pipeline,
+            generated::toggle_voice_pause,
             commands::log_frontend_error,
-            commands::load_keybindings,
+            generated::load_keybindings,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -181,7 +187,7 @@ pub fn run() {
                 tracing::info!("exit requested, cleaning up");
                 status_socket::cleanup();
                 // Kill any staged controller instance and clear stale records
-                if let Some(state) = app_handle.try_state::<state::AppState>() {
+                if let Some(state) = app_handle.try_state::<Arc<state::AppState>>() {
                     if let Ok(storage) = state.storage.lock() {
                         if let Ok(inventory) = storage.list_projects() {
                             for project in &inventory.projects {

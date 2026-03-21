@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use the_controller_macros::derive_handlers;
+
 use crate::config;
 use crate::error::AppError;
 use crate::models::Project;
@@ -166,6 +168,7 @@ pub fn scaffold_project_blocking(name: String, repo_path: PathBuf) -> Result<Pro
 
 /// Full scaffold orchestration: validate, check duplicates, resolve repo path,
 /// run blocking scaffold, and save the project to storage.
+#[derive_handlers(tauri_command, axum_handler)]
 pub async fn scaffold_project(state: &AppState, name: &str) -> Result<Project, AppError> {
     tracing::info!(project_name = %name, "scaffolding new project");
     super::validate_project_name(name).map_err(AppError::BadRequest)?;

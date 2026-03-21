@@ -5320,6 +5320,7 @@ dependencies = [
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-opener",
  "tempfile",
+ "the-controller-macros",
  "tokio",
  "tokio-tungstenite",
  "tower-http",
@@ -5328,6 +5329,15 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "whisper-rs",
+]
+
+[[package]]
+name = "the-controller-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

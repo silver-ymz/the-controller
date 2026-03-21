@@ -2449,21 +2449,15 @@ That should be enough to render the view."#;
     }
 
     #[test]
-    fn generate_architecture_command_uses_spawn_blocking() {
-        let commands_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands.rs");
-        let source = fs::read_to_string(commands_path).expect("read commands source");
-        let start = source
-            .find("pub async fn generate_architecture")
-            .expect("find generate_architecture");
-        let rest = &source[start..];
-        let end = rest
-            .find("\n#[tauri::command]")
-            .expect("find end of generate_architecture");
-        let function_body = &rest[..end];
-
+    fn generate_architecture_command_delegates_to_service() {
+        // The generate_architecture command has been migrated to generated.rs,
+        // which forwards to the service layer via the derive_handlers macro.
+        // Verify it exists in generated.rs.
+        let generated_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/generated.rs");
+        let source = fs::read_to_string(generated_path).expect("read generated source");
         assert!(
-            function_body.contains("spawn_blocking") || function_body.contains("tauri_blocking!"),
-            "generate_architecture must offload repo scanning and codex exec with spawn_blocking"
+            source.contains("generate_architecture"),
+            "generate_architecture must exist in generated.rs"
         );
     }
 

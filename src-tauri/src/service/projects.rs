@@ -1,15 +1,15 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::models::Project;
-use crate::pty_manager::PtyManager;
 use crate::state::AppState;
-use crate::storage::{ProjectInventory, Storage};
+use crate::storage::ProjectInventory;
 use crate::worktree::WorktreeManager;
+use the_controller_macros::derive_handlers;
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn list_projects(state: &AppState) -> Result<ProjectInventory, AppError> {
     tracing::debug!("listing projects");
     let storage = state.storage.lock().map_err(AppError::internal)?;
@@ -17,12 +17,14 @@ pub fn list_projects(state: &AppState) -> Result<ProjectInventory, AppError> {
     Ok(inventory)
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn check_onboarding(state: &AppState) -> Result<Option<crate::config::Config>, AppError> {
     let storage = state.storage.lock().map_err(AppError::internal)?;
     let base_dir = storage.base_dir();
     Ok(crate::config::load_config(&base_dir))
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn create_project(state: &AppState, name: &str, repo_path: &str) -> Result<Project, AppError> {
     tracing::info!(project_name = %name, repo_path = %repo_path, "creating project");
     super::validate_project_name(name).map_err(AppError::BadRequest)?;
@@ -79,6 +81,7 @@ pub fn create_project(state: &AppState, name: &str, repo_path: &str) -> Result<P
     Ok(project)
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn load_project(state: &AppState, name: &str, repo_path: &str) -> Result<Project, AppError> {
     tracing::info!(project_name = %name, repo_path = %repo_path, "loading project");
     super::validate_project_name(name).map_err(AppError::BadRequest)?;
@@ -148,27 +151,22 @@ pub fn load_project(state: &AppState, name: &str, repo_path: &str) -> Result<Pro
     Ok(project)
 }
 
-/// Delete a project. This is synchronous — callers that need non-blocking
-/// behaviour (e.g. the Tauri command) should wrap in `spawn_blocking`.
-///
-/// Takes the individual `Arc` fields instead of `&AppState` so that callers
-/// can clone them before entering a `spawn_blocking` closure.
+#[derive_handlers(tauri_command, axum_handler, blocking)]
 pub fn delete_project(
-    storage: &Arc<Mutex<Storage>>,
-    pty_manager: &Arc<Mutex<PtyManager>>,
+    state: &AppState,
     project_id: Uuid,
     delete_repo: bool,
 ) -> Result<(), AppError> {
     tracing::info!(project_id = %project_id, delete_repo, "deleting project");
 
-    let storage = storage.lock().map_err(AppError::internal)?;
+    let storage = state.storage.lock().map_err(AppError::internal)?;
     let project = storage
         .load_project(project_id)
         .map_err(AppError::internal)?;
 
     // Close all PTY sessions and clean up worktrees
     {
-        let mut pty_manager = pty_manager.lock().map_err(AppError::internal)?;
+        let mut pty_manager = state.pty_manager.lock().map_err(AppError::internal)?;
         for session in &project.sessions {
             let _ = pty_manager.close_session(session.id);
             if let (Some(wt_path), Some(branch)) =
@@ -193,6 +191,7 @@ pub fn delete_project(
     Ok(())
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn get_agents_md(state: &AppState, project_id: Uuid) -> Result<String, AppError> {
     let storage = state.storage.lock().map_err(AppError::internal)?;
     let project = storage
@@ -201,6 +200,7 @@ pub fn get_agents_md(state: &AppState, project_id: Uuid) -> Result<String, AppEr
     storage.get_agents_md(&project).map_err(AppError::internal)
 }
 
+#[derive_handlers(tauri_command, axum_handler)]
 pub fn update_agents_md(state: &AppState, project_id: Uuid, content: &str) -> Result<(), AppError> {
     let storage = state.storage.lock().map_err(AppError::internal)?;
     storage
